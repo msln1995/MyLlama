@@ -524,8 +524,8 @@ type tuneHardware struct {
 	PhysicalCores int // CPUInfo.Cores
 	LogicalCPUs   int
 	// PerfCores is CPUInfo.PerfCores: the performance-cluster core count on
-	// big.LITTLE SoCs (0 = unknown). Feeds the Android thread cap in
-	// tuneModelConfig.
+	// asymmetric CPUs — big.LITTLE SoCs and Apple Silicon (0 = unknown).
+	// Feeds the thread cap in tuneModelConfig.
 	PerfCores int
 	// AndroidPlatform mirrors runtime.GOOS == "android". Kept as an explicit
 	// input (instead of reading the GOOS inside tuneModelConfig) so the
@@ -870,13 +870,16 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	} else if hw.LogicalCPUs > 1 {
 		threads = hw.LogicalCPUs / 2
 	}
-	// Android big.LITTLE cap: phones report every online core as a physical
-	// core, but scheduling GEMM workers onto the LITTLE cluster degrades
+	// Cluster cap: scheduling GEMM workers onto the efficiency cluster degrades
 	// decode speed and drives SoC thermals, so pin the worker pool to the
-	// performance-cluster count when the cpufreq probe knows it and the SoC
-	// actually has a split (PerfCores < PhysicalCores). Every other platform
-	// — and uniform topologies — keep the rule above byte-for-byte.
-	if hw.AndroidPlatform && hw.PerfCores > 0 && hw.PerfCores < hw.PhysicalCores && threads > hw.PerfCores {
+	// performance-cluster count when the probe knows it and the CPU actually has
+	// a split (PerfCores < PhysicalCores). Measured on a 4P+4E M2 with a 4B
+	// Q4_K_M model (llama.cpp b10537, tg128): 20.76 t/s at 4 threads, 18.81 at
+	// 6 and 10.07 at 8 — using every core is *worse than half of them*, not
+	// linear. The probe is Android/Linux cpufreq and Apple Silicon's
+	// hw.perflevel0.physicalcpu; uniform topologies and unknown splits
+	// (PerfCores 0) keep the rule above byte-for-byte.
+	if hw.PerfCores > 0 && hw.PerfCores < hw.PhysicalCores && threads > hw.PerfCores {
 		threads = hw.PerfCores
 	}
 
@@ -931,12 +934,18 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	// GPU-visible allocation away, so all layers offload (GPULayers="all")
 	// while the context is bounded by the same usable-RAM budget as the
 	// CPU-only plan — GPU and CPU share one physical pool, there is no VRAM
-	// budget to merge against. FlashAttn stays off in v1: llama.cpp supports
-	// flash attention on Metal upstream, but this tuner has no Metal benchmark
-	// path yet, so the plan conservatively stays on the default path. cpu-moe
-	// is a CUDA-centric VRAM/RAM split (meaningless on unified memory), so
-	// CPUMoe/NCpuMoe stay off and the bench chain that calibrates the cpu-moe
-	// flip never runs for apple (UsedCPUMoe=false without a bench attempt).
+	// budget to merge against. FlashAttn deliberately stays false, which means
+	// "emit nothing" (see core/preset.go) and leaves the choice to llama-server's
+	// own `-fa auto` — measured on an M2 with a 4B Q4_K_M model (b10537, -ngl
+	// 99) auto is the fastest of the three: pp2048 297.3 / tg128 31.91 t/s,
+	// versus explicit on 268.5 / 28.69 and off 256.3 / 27.41. Setting it true
+	// here would be a ~10% decode regression, and the q8_0 cache pair also
+	// measured slower on decode (27.29 vs 28.69) while only saving memory, so
+	// both belong to a user who opts in on the model settings page, not to the
+	// default plan. cpu-moe is a CUDA-centric VRAM/RAM split (meaningless on
+	// unified memory), so CPUMoe/NCpuMoe stay off and the bench chain that
+	// calibrates the cpu-moe flip never runs for apple
+	// (UsedCPUMoe=false without a bench attempt).
 	if hw.GPUVendor == vendorApple {
 		cfg.GPULayers = "all"
 		cfg.FlashAttn = false
