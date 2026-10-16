@@ -1153,6 +1153,60 @@ func TestTuneModelConfigMetal(t *testing.T) {
 	}
 }
 
+// A pinned q8_0 K/V pair survives a re-tune on the RAM-bounded plans and prices
+// the context ladder at tuneQ8KVSizeRatio the KV footprint, so the cache saving
+// converts into context instead of only into headroom.
+//
+// The fixture is the measured M2 case: a 4B Q4_K_M model (2.33 GiB, 36 layers,
+// 144 KiB of f16 KV per token) on 24 GB. At 10 GB free (8.5 GiB usable) the
+// 65536 rung costs 11.3 GiB in f16 and 7.1 GiB with the q8_0 pair — so the pair
+// is worth 32768 → 65536 on this budget.
+func TestTuneModelConfigPinnedQ8KVConvertsToContext(t *testing.T) {
+	tm := tuneModel{WeightsBytes: 2497281120, Layers: 36, KVBytesPerTokPerLayerF16: 4096, TrainCtx: 262144}
+	hw := tuneHardware{GPUVendor: vendorApple, RAMTotalGB: 24, RAMFreeGB: 10, PhysicalCores: 8, LogicalCPUs: 8, PerfCores: 4}
+
+	// Unpinned keeps the historical plan byte-for-byte: f16 cache, 32768.
+	if cfg := tuneModelConfig(hw, tm); cfg.CtxSize != 32768 || cfg.CacheTypeK != "" || cfg.CacheTypeV != "" {
+		t.Errorf("f16 plan = ctx %d K=%q V=%q, want 32768 / \"\" / \"\"", cfg.CtxSize, cfg.CacheTypeK, cfg.CacheTypeV)
+	}
+
+	// Pinned: same hardware, one rung larger — and the pair stays written, or the
+	// chosen context would not be affordable at load time.
+	tm.PinnedQ8KV = true
+	cfg := tuneModelConfig(hw, tm)
+	if cfg.CtxSize != 65536 || cfg.CacheTypeK != "q8_0" || cfg.CacheTypeV != "q8_0" {
+		t.Errorf("pinned plan = ctx %d K=%q V=%q, want 65536 / q8_0 / q8_0", cfg.CtxSize, cfg.CacheTypeK, cfg.CacheTypeV)
+	}
+
+	// The CPU-only plan shares the budget logic, so it converts the same way.
+	cpu := hw
+	cpu.GPUVendor = vendorNone
+	if cfg := tuneModelConfig(cpu, tm); cfg.GPULayers != "0" || cfg.CtxSize != 65536 || cfg.CacheTypeK != "q8_0" {
+		t.Errorf("cpu-only pinned plan = gpuLayers %q ctx %q K=%q, want 0 / 65536 / q8_0", cfg.GPULayers, cfg.CtxSize, cfg.CacheTypeK)
+	}
+}
+
+// TestPinnedQ8KVRequiresThePair narrows the preservation to what the plan can
+// actually price: a complete q8_0 K+V pair. A half pin or a smaller quant keeps
+// the reset, because only q8_0 has a measured decode cost here and it is the
+// only quantized pair the NVIDIA A/B merge ever picks.
+func TestPinnedQ8KVRequiresThePair(t *testing.T) {
+	if !pinnedQ8KV(ModelConfig{CacheTypeK: "q8_0", CacheTypeV: "q8_0"}) {
+		t.Error("a complete q8_0 pair must count as pinned")
+	}
+	for name, c := range map[string]ModelConfig{
+		"K only":        {CacheTypeK: "q8_0"},
+		"V only":        {CacheTypeV: "q8_0"},
+		"mixed pair":    {CacheTypeK: "q8_0", CacheTypeV: "q4_0"},
+		"smaller quant": {CacheTypeK: "q4_0", CacheTypeV: "q4_0"},
+		"f16 explicit":  {CacheTypeK: "f16", CacheTypeV: "f16"},
+	} {
+		if pinnedQ8KV(c) {
+			t.Errorf("%s must keep the historical f16 reset, got %+v", name, c)
+		}
+	}
+}
+
 // ─── Asymmetric-CPU awareness ────────────────────────────────────
 
 // TestTuneModelConfigClusterThreadCap verifies the performance-cluster thread

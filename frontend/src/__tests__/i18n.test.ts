@@ -284,4 +284,20 @@ describe('lib/i18n', () => {
     expect(t('modelSettings.flashAttnSub')).not.toContain('recommended')
     expect(t('modelSettings.q8Recommended')).not.toContain('recommended')
   })
+
+  it('KV cache hints state that a pinned q8_0 pair converts into context', () => {
+    // Auto-tune keeps a complete q8_0 K+V pair and prices the context ladder at
+    // the halved cache footprint, so the copy has to name the requirement and the
+    // measured threshold shift — not just "saves memory".
+    setLocale('zh')
+    expect(t('modelSettings.cacheTypeKHint')).toContain('自动调参')
+    expect(t('modelSettings.cacheTypeKHint')).toContain('13.4')
+    expect(t('modelSettings.cacheTypeKHint')).toContain('8.4')
+    expect(t('modelSettings.cacheTypeVHint')).toContain('q8_0')
+    setLocale('en')
+    expect(t('modelSettings.cacheTypeKHint')).toContain('auto-tune')
+    expect(t('modelSettings.cacheTypeKHint')).toContain('13.4')
+    expect(t('modelSettings.cacheTypeKHint')).toContain('8.4')
+    expect(t('modelSettings.cacheTypeVHint')).toContain('both K and V')
+  })
 })

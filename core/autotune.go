@@ -563,6 +563,16 @@ type tuneModel struct {
 	// already folded for hybrid attention (see buildTuneModel): multiplying it
 	// by Layers yields the true per-token KV total.
 	KVBytesPerTokPerLayerF16 float64
+	// PinnedQ8KV marks that the model's existing per-model config already pins
+	// the q8_0 K/V pair. The RAM-bounded plans (Apple Silicon and CPU-only) then
+	// keep that pair instead of erasing it, and price the context ladder at the
+	// q8_0 footprint (tuneQ8KVSizeRatio) — otherwise the halved cache only buys
+	// headroom and never a larger window. False is the historical behavior:
+	// cache reset to f16 and ladder priced in f16. Only q8_0 is honored because
+	// it is the one quantized pair with a measured decode cost on this tuner's
+	// hardware (see the Metal plan note) and the only one the NVIDIA A/B merge
+	// ever selects.
+	PinnedQ8KV bool
 	// TrainCtx is the trained context window; <=0 is treated as 32768.
 	TrainCtx int
 	// ExpertBytes / DenseBytes split WeightsBytes into MoE expert weights and
@@ -789,6 +799,13 @@ func estimateCPUMoeTPS(ramBandwidthGBs, expertBytesPerToken float64) float64 {
 	return ramBandwidthGBs * 1e9 / expertBytesPerToken
 }
 
+// pinnedQ8KV reports whether a model's current per-model config pins the q8_0
+// K/V pair — the one user cache selection the RAM-bounded plans preserve and
+// re-price (see tuneModel.PinnedQ8KV).
+func pinnedQ8KV(c ModelConfig) bool {
+	return c.CacheTypeK == "q8_0" && c.CacheTypeV == "q8_0"
+}
+
 // tuneModelConfig computes hardware-aware llama-server parameters for one
 // model. Pure and deterministic: same inputs, same ModelConfig. The plan body
 // (tuneModelConfigPlan) is post-processed with the platform-level pins that
@@ -910,17 +927,33 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	cfg := defaultModelConfig()
 	cfg.Threads = threads
 
-	// ramCtxSize picks the largest ladder context whose f16 weights + KV fit
-	// in usable RAM, falling back to the smallest ladder entry. Shared by the
+	// ramCtxSize picks the largest ladder context whose weights + KV fit in
+	// usable RAM, falling back to the smallest ladder entry. Shared by the
 	// CPU-only plan and the Metal plan (unified memory bounds both the same
-	// way).
+	// way). ramKVPerTok follows the pinned q8_0 pair so the cache saving converts
+	// into context instead of only into headroom; ramKVCache writes the matching
+	// pair, and the two are always used together.
+	ramKVPerTok := kvPerTok
+	if m.PinnedQ8KV {
+		ramKVPerTok *= tuneQ8KVSizeRatio
+	}
 	ramCtxSize := func() int {
 		for _, ctx := range ladder {
-			if w+kvPerTok*float64(ctx) <= usableRAM {
+			if w+ramKVPerTok*float64(ctx) <= usableRAM {
 				return ctx
 			}
 		}
 		return ladder[len(ladder)-1]
+	}
+
+	// ramKVCache returns the KV cache pair matching the ladder pricing above:
+	// the pinned q8_0 pair stays written so the larger context is actually
+	// affordable, and anything else stays reset to f16.
+	ramKVCache := func() (string, string) {
+		if m.PinnedQ8KV {
+			return "q8_0", "q8_0"
+		}
+		return "", ""
 	}
 
 	// cpuOnlyPlan: no GPU offload; largest ladder context whose weights + KV
@@ -928,7 +961,7 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	cpuOnlyPlan := func() {
 		cfg.GPULayers = "0"
 		cfg.FlashAttn = false
-		cfg.CacheTypeK, cfg.CacheTypeV = "", ""
+		cfg.CacheTypeK, cfg.CacheTypeV = ramKVCache()
 		cfg.CtxSize = ramCtxSize()
 	}
 
@@ -945,7 +978,13 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	// leaving it unset captures whatever the engine decides is best. The q8_0
 	// cache pair is the same story in reverse — it only saves memory and measured
 	// ~6% slower decode (28.38 vs 30.09 t/s) — so both belong to a user who opts
-	// in on the model settings page, not to the default plan. cpu-moe is a
+	// in on the model settings page, not to the default plan. Once the user has
+	// opted in, ramKVCache/ramCtxSize keep the pair through a re-tune and price
+	// the ladder at 0.53125 the KV footprint, which is what turns that saving
+	// into context: on a 24 GB M2 with a 4B Q4_K_M model (36 layers, 144 KiB of
+	// f16 KV per token) the 65536 rung needs ~13.4 GB free in f16 but only
+	// ~8.4 GB with the q8_0 pair.
+	// cpu-moe is a
 	// CUDA-centric VRAM/RAM split (meaningless on unified memory), so
 	// CPUMoe/NCpuMoe stay off and the bench chain that calibrates the cpu-moe
 	// flip never runs for apple
@@ -953,7 +992,7 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	if hw.GPUVendor == vendorApple {
 		cfg.GPULayers = "all"
 		cfg.FlashAttn = false
-		cfg.CacheTypeK, cfg.CacheTypeV = "", ""
+		cfg.CacheTypeK, cfg.CacheTypeV = ramKVCache()
 		cfg.CtxSize = ramCtxSize()
 		return cfg
 	}
