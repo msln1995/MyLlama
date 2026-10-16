@@ -912,17 +912,15 @@ func TestAndroidLdEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := androidLdEnv(filepath.Join(binDir, "llama-server"))
-	if len(got) != 1 || !strings.HasPrefix(got[0], "LD_LIBRARY_PATH=") {
-		t.Fatalf("androidLdEnv with sibling lib = %v, want one LD_LIBRARY_PATH entry", got)
+	// The value is the Android (POSIX) search path, so it is colon-separated by
+	// contract and compared as a whole string: splitting the result on the HOST's
+	// os.PathListSeparator would read a Windows test run (where the separator is
+	// ';') as one element, and splitting on ':' would tear the Windows temp paths
+	// themselves apart.
+	want = "LD_LIBRARY_PATH=" + binDir + ":" + filepath.Join(binDir, "..", "lib")
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("androidLdEnv with sibling lib = %v, want [%q]", got, want)
 	}
-	dirs := strings.Split(strings.TrimPrefix(got[0], "LD_LIBRARY_PATH="), string(os.PathListSeparator))
-	if len(dirs) != 2 {
-		t.Fatalf("androidLdEnv = %v, want the bin dir and the sibling lib dir", dirs)
-	}
-	if dirs[0] != binDir {
-		t.Errorf("first LD_LIBRARY_PATH dir = %q, want the binary's own dir %q", dirs[0], binDir)
-	}
-	wantSamePath(t, dirs[1], libDir)
 }
 
 // TestServerChildEnv verifies the llama-server child-environment assembly:
