@@ -26,6 +26,29 @@ Windows x64 · Android arm64 · Linux x64 · GPL-3.0
 
 ---
 
+## 📌 关于本仓库：这是 Fork，改动都在「找到 llama.cpp」这条链路上
+
+本仓库是 [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLlama) 的 fork——**上游那个仓库不属于我们，正式的 Release 也只由上游发布**。所以下面的改动只存在于本仓库，并已按 [PR #43](https://github.com/CodeNeow/MyLlama/pull/43) 提交给上游评审——**PR 合并后这份差异就会消失**，届时请直接用上游。
+
+除了下面这张表里的运行时识别修复，功能、界面、模型调优、下载与监控全部与上游一致。**如果你要的只是一个官方构建，请去上游；如果你要的是「在安卓手机上装完 llama.cpp 之后还能用」，这个 fork 修的就是那一段。**
+
+| 差异点 | 上游行为 | 本仓库（fork） |
+| --- | --- | --- |
+| Android / Linux arm64 选到装不上的包 | 选包打分相同即按 GitHub API 返回顺序取第一个，于是经常拿到 `*-snapdragon` 的 `cmake --install` 布局包，解压完找不到可执行文件 | `pickBestAssetFor` 给 `-snapdragon` 包强降权（−400 分），普通平铺 CPU 包优先；只有实在没有别的可选时才回退 |
+| `release/bin/<binary>` 布局识别不到 | 只在下载目录本身和它的一级子目录里平铺查找 | `findLlamaBinInDir` 额外检查每个子目录下的 `bin/`（硬上限两层），`detectAccel` 与 CUDA runtime 探测同样遍历同级 `lib/` |
+| Android 启动后加载不到共享库 | 只把二进制自身所在目录导出给子进程 | `androidLdEnv` 同时把同级 `lib/` 加进 `LD_LIBRARY_PATH`（冒号分隔；Android 链接器不会自动搜索可执行文件所在目录） |
+| macOS / Linux 解压「已安装却找不到」 | 遇到第一个 tar symlink 就中断解压，而 `llama-server` 排在后面，于是永远没落地 | `archive.go` 两阶段物化：先落普通文件并收集链接条目，再统一建 symlink / hardlink，失败时复制目标文件兜底；复制字节也计入总量上限 |
+| 解压安全 | 无链接条目相关限制 | 链接目标必须留在解压目录内（沿用既有的路径穿越拒绝规则），并新增 `maxExtractTarLinks = 64` 上限 |
+
+配套的是 `core` 包里的针对性单测：用真实 b11671 资产名与 API 顺序做选包用例、两种目录布局的检测用例、symlink / hardlink 与链接数上限的解压用例。
+
+**本 fork 独有的限制（不是回归，也不是 bug）**
+
+- fork 的 GitHub Actions 拿不到仓库 secrets，CI 产物退回 per-runner **debug keystore** 签名：不能覆盖安装已装的正式包（得先卸载），也不会被 App 内「检查更新」识别——`core/update.go` 的更新接口硬编码指向上游仓库。正式签名版请从上游 Release 获取。
+- 已知但本次未处理的两个缺口也写在 PR #43 里：`RuntimeSection.vue` 在状态为 `done` 时把两个入口都藏掉；`GetLlamaCpp` 的检测结果没有 TTL，也没有重新扫描的 binding。
+
+---
+
 ## ✨ 为什么选择 MyLlama
 
 <table>

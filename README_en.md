@@ -26,6 +26,29 @@ Windows x64 · Android arm64 · Linux x64 · GPL-3.0
 
 ---
 
+## 📌 About this repository: it is a fork, and every change is on the "find llama.cpp" path
+
+This is a fork of [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLlama) — **upstream, where the official releases live**. We do not own that repository, so the changes below only exist here and have been submitted upstream for review as [PR #43](https://github.com/CodeNeow/MyLlama/pull/43); **once that PR merges, the divergence described here disappears** — use upstream at that point.
+
+Apart from the runtime-detection fixes in this table, features, UI, tuning, downloads and monitoring are identical to upstream. **If you want an official build, go upstream. If you want "it actually works on my Android phone after llama.cpp finishes installing", this fork fixes exactly that stretch.**
+
+| Divergence | Upstream behaviour | This fork |
+| --- | --- | --- |
+| Android / Linux arm64 picking an unusable package | Equal scores kept the first candidate in GitHub API order, so the download often landed on a `*-snapdragon` `cmake --install` package whose layout has no binary where the scanner looks | `pickBestAssetFor` heavily deprioritizes `-snapdragon` assets (−400) so the plain flat CPU package wins; snapdragon stays as a last resort |
+| `release/bin/<binary>` layout undetected | Only the download directory itself and its first-level children were probed | `findLlamaBinInDir` also probes `bin/` inside each subdirectory (hard-bounded at two levels), and `detectAccel` / the CUDA-runtime probe walk the sibling `lib/` too |
+| Android started but shared libraries did not load | Only the binary's own directory was exported to the child process | `androidLdEnv` adds the sibling `lib/` to `LD_LIBRARY_PATH` (colon-separated; the Android linker does not search the executable's directory) |
+| macOS / Linux "installed but not found" after extraction | Extraction aborted at the first tar symlink, and `llama-server` sits later in the archive, so it never landed | `archive.go` materializes in two passes: regular files first while link entries are collected, then symlinks / hardlinks are created, falling back to copying the target; copied bytes are charged to the total-size cap |
+| Extraction hardening | No link-specific limits | Link targets must resolve inside the destination (the existing path-traversal rejection rule) plus a new `maxExtractTarLinks = 64` cap |
+
+These come with focused tests in the `core` package: asset-selection cases built from the real b11671 asset names in API order, detection cases for both directory layouts, and extraction cases for symlinks, hardlinks and the link-count cap.
+
+**Fork-only limitations (not regressions)**
+
+- GitHub Actions on a fork cannot read the repository secrets, so CI artifacts fall back to the per-runner **debug keystore**: they cannot overwrite-install an existing official build (uninstall first) and are invisible to the in-app "check for updates", because `core/update.go` hard-codes the upstream release API. Get formally signed builds from upstream Releases.
+- Two known gaps deliberately left out of this change are noted in PR #43: `RuntimeSection.vue` hides both entry points when the status is `done`, and `GetLlamaCpp`'s result cache has no TTL and no re-scan binding.
+
+---
+
 ## ✨ Why MyLlama
 
 <table>
