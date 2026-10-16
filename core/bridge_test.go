@@ -879,7 +879,10 @@ func TestStopServerInternalEscalatesToKillAfterGrace(t *testing.T) {
 }
 
 // TestAndroidLdEnv verifies the Android LD_LIBRARY_PATH anchor: the binary's
-// directory only on android, nil elsewhere.
+// directory only on android, nil elsewhere, plus the install-tree layout where
+// the executable sits in bin/ and its shared libraries in the sibling lib/ (the
+// Android linker does not search the executable's own directory, so a lib/ that
+// is not on LD_LIBRARY_PATH means the binary dies at load time).
 func TestAndroidLdEnv(t *testing.T) {
 	old := pathsGOOS
 	t.Cleanup(func() { pathsGOOS = old })
@@ -893,6 +896,33 @@ func TestAndroidLdEnv(t *testing.T) {
 	if got := androidLdEnv("/data/x/llama-server"); len(got) != 1 || got[0] != want {
 		t.Errorf("androidLdEnv on android = %v, want [%q]", got, want)
 	}
+
+	// release/bin/llama-server with a sibling release/lib/: both directories are
+	// exported, the binary's own dir first (the flat layout keeps its priority).
+	root := t.TempDir()
+	binDir := filepath.Join(root, "llama-b11671", "bin")
+	libDir := filepath.Join(root, "llama-b11671", "lib")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(libDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "libllama.so"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := androidLdEnv(filepath.Join(binDir, "llama-server"))
+	if len(got) != 1 || !strings.HasPrefix(got[0], "LD_LIBRARY_PATH=") {
+		t.Fatalf("androidLdEnv with sibling lib = %v, want one LD_LIBRARY_PATH entry", got)
+	}
+	dirs := strings.Split(strings.TrimPrefix(got[0], "LD_LIBRARY_PATH="), string(os.PathListSeparator))
+	if len(dirs) != 2 {
+		t.Fatalf("androidLdEnv = %v, want the bin dir and the sibling lib dir", dirs)
+	}
+	if dirs[0] != binDir {
+		t.Errorf("first LD_LIBRARY_PATH dir = %q, want the binary's own dir %q", dirs[0], binDir)
+	}
+	wantSamePath(t, dirs[1], libDir)
 }
 
 // TestServerChildEnv verifies the llama-server child-environment assembly:
