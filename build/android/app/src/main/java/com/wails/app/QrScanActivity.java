@@ -56,7 +56,7 @@ import java.util.concurrent.Executors;
  */
 public class QrScanActivity extends AppCompatActivity {
     private static final String TAG = "QrScanActivity";
-    private static final boolean DEBUG = com.codeneow.llamadesktop.BuildConfig.DEBUG;
+    private static final boolean DEBUG = com.msln1995.myllama.BuildConfig.DEBUG;
     /** Extra key the decoded QR text is delivered under. */
     public static final String EXTRA_TEXT = "text";
 

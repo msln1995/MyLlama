@@ -5,7 +5,9 @@
 # multi-line shell.
 #
 # Package identity: the applicationId is the gradle namespace
-# (com.codeneow.llamadesktop) while Activity CLASSES keep the Wails
+# (com.msln1995.myllama - this fork's own id, deliberately different from
+# upstream's com.codeneow.llamadesktop so the two APKs install side by side)
+# while Activity CLASSES keep the Wails
 # template Java package com.wails.app (the JNI entry symbols are
 # hardcoded to it) - am start needs namespace/class, pidof the namespace.
 
@@ -15,13 +17,13 @@ APK="$(ls apk/*.apk)"
 echo "installing $APK"
 adb install -r "$APK"
 adb logcat -c
-adb shell am start -W -n com.codeneow.llamadesktop/com.wails.app.MainActivity || true
+adb shell am start -W -n com.msln1995.myllama/com.wails.app.MainActivity || true
 
 # Poll for a live process up to ~90s (Go runtime + WebView first boot).
 PID=""
 i=0
 while [ "$i" -lt 30 ]; do
-  PID="$(adb shell pidof com.codeneow.llamadesktop | tr -d '\r' || true)"
+  PID="$(adb shell pidof com.msln1995.myllama | tr -d '\r' || true)"
   if [ -n "$PID" ]; then
     break
   fi

@@ -57,10 +57,10 @@ import androidx.fragment.app.FragmentActivity;
 import androidx.security.crypto.EncryptedSharedPreferences;
 import androidx.security.crypto.MasterKey;
 
-// BuildConfig is generated under the AGP namespace (com.codeneow.llamadesktop),
+// BuildConfig is generated under the AGP namespace (com.msln1995.myllama),
 // which differs from this file's Java package (com.wails.app — required by the
 // Go runtime's hardcoded Java_com_wails_app_WailsBridge_* JNI export names).
-import com.codeneow.llamadesktop.BuildConfig;
+import com.msln1995.myllama.BuildConfig;
 
 import org.json.JSONArray;
 import org.json.JSONObject;

@@ -43,11 +43,11 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.webkit.WebViewAssetLoader;
 
 // BuildConfig and R are generated under the AGP namespace
-// (com.codeneow.llamadesktop), which differs from this file's Java package
+// (com.msln1995.myllama), which differs from this file's Java package
 // (com.wails.app — required by the Wails v3 Go runtime's hardcoded JNI export
 // names), so both need explicit imports here.
-import com.codeneow.llamadesktop.BuildConfig;
-import com.codeneow.llamadesktop.R;
+import com.msln1995.myllama.BuildConfig;
+import com.msln1995.myllama.R;
 
 import org.json.JSONObject;
 

@@ -5,10 +5,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
-// BuildConfig is generated under the AGP namespace (com.codeneow.llamadesktop),
+// BuildConfig is generated under the AGP namespace (com.msln1995.myllama),
 // which differs from this file's Java package (com.wails.app — required by the
 // Wails v3 Go runtime's hardcoded JNI export names).
-import com.codeneow.llamadesktop.BuildConfig;
+import com.msln1995.myllama.BuildConfig;
 
 /**
  * WailsJSBridge provides the JavaScript interface that allows the web frontend

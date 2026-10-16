@@ -8,10 +8,10 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.webkit.WebViewAssetLoader;
 
-// BuildConfig is generated under the AGP namespace (com.codeneow.llamadesktop),
+// BuildConfig is generated under the AGP namespace (com.msln1995.myllama),
 // which differs from this file's Java package (com.wails.app — required by the
 // Wails v3 Go runtime's hardcoded JNI export names).
-import com.codeneow.llamadesktop.BuildConfig;
+import com.msln1995.myllama.BuildConfig;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
