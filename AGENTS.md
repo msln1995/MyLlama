@@ -216,6 +216,20 @@ Remaining gaps:
 - <explicitly state unfinished follow-up work; write None if there are none>
 ```
 
+### Commit attribution (this fork only)
+
+Fork-side commits carry one trailer per AI tool that took part, so the implementation/review split stays auditable outside the diff itself:
+
+```text
+Co-Authored-By: Qwen <qwen@agents.local>    # implementation agent session
+Co-Authored-By: Qoder <qoder@agents.local>  # reviewer session (diff review + quality gates)
+```
+
+- Names are tools, not people. List only the sessions that actually participated, and state each one's role as declared at task start (see "Multi-role Collaboration and Workflows") — the trailer records the assignment, it does not create it.
+- The `@agents.local` addresses deliberately use the RFC 6762 reserved `.local` suffix: no GitHub account can ever be bound to them, so a trailer cannot accidentally attribute this work to a stranger who registered a plausible `noreply@…` address. GitHub renders them as plain text — no avatar, no contribution-graph credit — which is the correct outcome for a tool rather than a person.
+- **Never add these trailers to a commit destined for an upstream PR** (the PR #43 branch, or anything else that will be pushed to `origin`): upstream has no such convention and the fork-only identity changes belong on fork `main`. If a commit is being prepared for an upstream PR branch, omit the whole section.
+- Already-pushed commits are not rewritten to add trailers; the convention applies from the commit that introduces it onward.
+
 - Stage files by explicit path. Before committing, check `git status --short`, `git diff --cached --stat`, and `git diff --cached --check`; the working tree must be clean after commit.
 - External implementation agents must not stage or commit; only the reviewer may do so after re-reviewing the actual diff, confirming all task package exit criteria are met, and personally completing the required verification. If review reveals issues, enter the next fix round without committing.
 
