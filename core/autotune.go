@@ -874,11 +874,13 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	// decode speed and drives SoC thermals, so pin the worker pool to the
 	// performance-cluster count when the probe knows it and the CPU actually has
 	// a split (PerfCores < PhysicalCores). Measured on a 4P+4E M2 with a 4B
-	// Q4_K_M model (llama.cpp b10537, tg128): 20.76 t/s at 4 threads, 18.81 at
-	// 6 and 10.07 at 8 — using every core is *worse than half of them*, not
-	// linear. The probe is Android/Linux cpufreq and Apple Silicon's
-	// hw.perflevel0.physicalcpu; uniform topologies and unknown splits
-	// (PerfCores 0) keep the rule above byte-for-byte.
+	// Q4_K_M model (tg128, CPU-only): 20.76 t/s at 4 threads, 18.81 at 6 and
+	// 10.07 at 8 — using every core is *worse than half of them*, not linear
+	// (reproduced on a second build: 21.47 / 19.49 / 10.02, which is also why
+	// llama.cpp itself defaults to 4 threads on this host). The probe is
+	// Android/Linux cpufreq and Apple Silicon's hw.perflevel0.physicalcpu;
+	// uniform topologies and unknown splits (PerfCores 0) keep the rule above
+	// byte-for-byte.
 	if hw.PerfCores > 0 && hw.PerfCores < hw.PhysicalCores && threads > hw.PerfCores {
 		threads = hw.PerfCores
 	}
@@ -936,15 +938,17 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	// CPU-only plan — GPU and CPU share one physical pool, there is no VRAM
 	// budget to merge against. FlashAttn deliberately stays false, which means
 	// "emit nothing" (see core/preset.go) and leaves the choice to llama-server's
-	// own `-fa auto` — measured on an M2 with a 4B Q4_K_M model (b10537, -ngl
-	// 99) auto is the fastest of the three: pp2048 297.3 / tg128 31.91 t/s,
-	// versus explicit on 268.5 / 28.69 and off 256.3 / 27.41. Setting it true
-	// here would be a ~10% decode regression, and the q8_0 cache pair also
-	// measured slower on decode (27.29 vs 28.69) while only saving memory, so
-	// both belong to a user who opts in on the model settings page, not to the
-	// default plan. cpu-moe is a CUDA-centric VRAM/RAM split (meaningless on
-	// unified memory), so CPUMoe/NCpuMoe stay off and the bench chain that
-	// calibrates the cpu-moe flip never runs for apple
+	// own -fa auto. Measured on an M2 with a 4B Q4_K_M model at -ngl 99, tg128:
+	// auto is never slower than explicit on (31.91 vs 28.69 t/s on b10537, 30.02
+	// vs 29.70 within noise on a current build) and explicit off is the loser of
+	// the three (27.16 t/s, -9%), so forcing the flag can only cost speed while
+	// leaving it unset captures whatever the engine decides is best. The q8_0
+	// cache pair is the same story in reverse — it only saves memory and measured
+	// ~6% slower decode (28.38 vs 30.09 t/s) — so both belong to a user who opts
+	// in on the model settings page, not to the default plan. cpu-moe is a
+	// CUDA-centric VRAM/RAM split (meaningless on unified memory), so
+	// CPUMoe/NCpuMoe stay off and the bench chain that calibrates the cpu-moe
+	// flip never runs for apple
 	// (UsedCPUMoe=false without a bench attempt).
 	if hw.GPUVendor == vendorApple {
 		cfg.GPULayers = "all"

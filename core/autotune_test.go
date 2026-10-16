@@ -1095,10 +1095,11 @@ func TestTunePlanTargetApple(t *testing.T) {
 
 // TestTuneModelConfigMetal pins the Apple Silicon plan: all layers offload
 // (GPULayers="all"), the context is sized by the usable-RAM budget (unified
-// memory), flash-attn is left unset so llama-server keeps its own `-fa auto`
-// (measured fastest on an M2: auto 297.3/31.91 vs on 268.5/28.69 vs off
-// 256.3/27.41 t/s at pp2048/tg128), the q8_0 cache pair is never written (it
-// measured slower on decode), and a MoE model still gets the plain metal plan —
+// memory), flash-attn is left unset so llama-server keeps its own -fa auto
+// (measured on an M2 at tg128: auto/on/off = 30.02/29.70/27.16 t/s — auto is
+// never the loser, forcing it on can only cost speed), the q8_0 cache pair is
+// never written (it measured ~6% slower on decode), and a MoE model still
+// gets the plain metal plan —
 // cpu-moe is a CUDA-centric split and must not appear (UsedCPUMoe=false, no
 // bench chain). A darwin-amd64 host (CPU-only release, vendor none) plans the
 // CPU-only branch even for a MoE model.
