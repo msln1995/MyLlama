@@ -2,22 +2,26 @@
 
 <img src="docs/design/logo.png" width="96" alt="MyLlama" />
 
-# MyLlama
+# MyLlama（Android 可用性修复 fork）
 
-**一键调优 GGUF 模型，多个模型共享一个 OpenAI 兼容端点**
+**这个 fork 修的是那一件事：llama.cpp 明明下载并解压完了，应用却说「找不到 llama.cpp」——安卓上必然发生，macOS / Linux 上也会被 tar 里的软链接打断。**
 
-基于 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的跨平台本地大模型客户端：扫描本地 GGUF → 可视化配置推理参数（或一键智能调优）→ 生成 llama-server 预设 → 一个 OpenAI 兼容端点，供内置聊天与任意客户端使用。模型下载、本地聊天与实时监控开箱即用，所有数据不出本机。
+它仍是同一套基于 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的跨平台本地大模型客户端：扫描本地 GGUF → 可视化配置推理参数（或一键智能调优）→ 生成 llama-server 预设 → 一个 OpenAI 兼容端点供内置聊天与任意客户端使用；模型下载、本地聊天与实时监控都在应用内完成，数据不出本机。
+
+**📥 本 fork 的安卓安装包：** [MyLlama-v0.5.3-fork.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.1/MyLlama-v0.5.3-fork.1-android-arm64.apk) ｜ [全部 Release](https://github.com/msln1995/MyLlama/releases)
+
+包名是 `com.msln1995.myllama`，**与上游的 `com.codeneow.llamadesktop` 不同**：两个应用可以并存、互不覆盖，也不需要为了安装本 fork 而先卸载官方包。
 
 <img src="docs/design/promo.png" width="100%" alt="MyLlama 三端预览：Windows · Linux · Android"/>
 
 Windows x64 · Android arm64 · Linux x64 · GPL-3.0
 
-简体中文 · [English](README_en.md)
+简体中文（本仓库） · [English](README_en.md) ｜ 原版与官方下载：跳转到 [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLlama)
 
-[![GitHub release](https://img.shields.io/github/v/release/CodeNeow/MyLlama?logo=github&color=blue)](https://github.com/CodeNeow/MyLlama/releases)
-[![Downloads](https://img.shields.io/github/downloads/CodeNeow/MyLlama/total?logo=github&label=downloads&color=blue)](https://github.com/CodeNeow/MyLlama/releases)
+[![Fork CI](https://img.shields.io/github/actions/workflow/status/msln1995/MyLlama/.github/workflows/ci.yml?branch=main&logo=githubactions&logoColor=white&label=fork%20CI)](https://github.com/msln1995/MyLlama/actions)
+[![Fork release](https://img.shields.io/github/v/release/msln1995/MyLlama?logo=github&color=blue&label=fork%20apk)](https://github.com/msln1995/MyLlama/releases)
+[![Upstream PR](https://img.shields.io/badge/upstream%20PR%20%2343-open-informational?logo=github)](https://github.com/CodeNeow/MyLlama/pull/43)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/CodeNeow/MyLlama/.github/workflows/ci.yml?branch=main&logo=githubactions&logoColor=white)](https://github.com/CodeNeow/MyLlama/actions)
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
 [![Wails](https://img.shields.io/badge/Wails-v3-DF0000?logo=wails&logoColor=white)](https://wails.io/)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
@@ -26,26 +30,43 @@ Windows x64 · Android arm64 · Linux x64 · GPL-3.0
 
 ---
 
-## 📌 关于本仓库：这是 Fork，改动都在「找到 llama.cpp」这条链路上
+## 📌 我们改了什么
 
-本仓库是 [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLlama) 的 fork——**上游那个仓库不属于我们，正式的 Release 也只由上游发布**。所以下面的改动只存在于本仓库，并已按 [PR #43](https://github.com/CodeNeow/MyLlama/pull/43) 提交给上游评审——**PR 合并后这份差异就会消失**，届时请直接用上游。
+这个仓库是 [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLlama) 的 fork。**上游不属于我们，官方 Release 也只由上游发布**——本页只写我们这一份的实际情况，想读原版说明请直接跳转上游仓库，不要在这里找。
 
-除了下面这张表里的运行时识别修复，功能、界面、模型调优、下载与监控全部与上游一致。**如果你要的只是一个官方构建，请去上游；如果你要的是「在安卓手机上装完 llama.cpp 之后还能用」，这个 fork 修的就是那一段。**
+我们只动了一条链路：**运行环境下载完之后，应用能不能真的认它**。修复已按 [PR #43](https://github.com/CodeNeow/MyLlama/pull/43) 提交上游评审，合并后这里的代码差异就会消失；包名（下面第 4 条）是本 fork 自己的决定，不会提交上游。
 
-| 差异点 | 上游行为 | 本仓库（fork） |
-| --- | --- | --- |
-| Android / Linux arm64 选到装不上的包 | 选包打分相同即按 GitHub API 返回顺序取第一个，于是经常拿到 `*-snapdragon` 的 `cmake --install` 布局包，解压完找不到可执行文件 | `pickBestAssetFor` 给 `-snapdragon` 包强降权（−400 分），普通平铺 CPU 包优先；只有实在没有别的可选时才回退 |
-| `release/bin/<binary>` 布局识别不到 | 只在下载目录本身和它的一级子目录里平铺查找 | `findLlamaBinInDir` 额外检查每个子目录下的 `bin/`（硬上限两层），`detectAccel` 与 CUDA runtime 探测同样遍历同级 `lib/` |
-| Android 启动后加载不到共享库 | 只把二进制自身所在目录导出给子进程 | `androidLdEnv` 同时把同级 `lib/` 加进 `LD_LIBRARY_PATH`（冒号分隔；Android 链接器不会自动搜索可执行文件所在目录） |
-| macOS / Linux 解压「已安装却找不到」 | 遇到第一个 tar symlink 就中断解压，而 `llama-server` 排在后面，于是永远没落地 | `archive.go` 两阶段物化：先落普通文件并收集链接条目，再统一建 symlink / hardlink，失败时复制目标文件兜底；复制字节也计入总量上限 |
-| 解压安全 | 无链接条目相关限制 | 链接目标必须留在解压目录内（沿用既有的路径穿越拒绝规则），并新增 `maxExtractTarLinks = 64` 上限 |
+1. **选包**：打分相同时上游按 GitHub API 的返回顺序取第一个，于是安卓 / Linux arm64 经常拿到 `*-snapdragon` 的 `cmake --install` 布局包——解压完目录里没有可执行文件位置对得上。`pickBestAssetFor` 现在给 `-snapdragon` 强降权（−400 分），普通平铺 CPU 包优先，实在没有别的可选时才回退。
+2. **目录布局**：上游只在下载目录本身和它的一级子目录里平铺查找。`findLlamaBinInDir` 现在额外检查每个子目录下的 `bin/`（硬上限两层），`detectAccel` 与 CUDA runtime 探测同样遍历同级 `lib/`，于是 `release/bin/<binary>` 这种布局也能认。
+3. **安卓启动**：安卓的链接器不会自动搜索可执行文件所在目录，只导出二进制自身目录不够。`androidLdEnv` 现在把同级 `lib/` 一起加进 `LD_LIBRARY_PATH`（冒号分隔）。
+4. **包名独立**：`applicationId` / `namespace` 改成 `com.msln1995.myllama`（上游是 `com.codeneow.llamadesktop`）。这样本 fork 的 debug 签名包与官方正式包**互不冲突、可同时安装**，不再需要「先卸载才能装」；代价是两份数据目录彼此独立——配置、llama.cpp 运行时与模型都不互通，需要在本 fork 里重新下一遍。Java 源码仍留在 `com.wails.app`，因为 Wails v3 的 JNI 导出符号是按那个包名硬编码的。
+5. **解压不再被软链接打断**：macOS / Linux 的 tar 包里 `llama-server` 排在软链接条目之后，上游遇到第一个 symlink 就中断，于是「已安装」和「找不到」同时成立。`archive.go` 改成两阶段物化：先落普通文件并收集链接条目，再统一创建 symlink / hardlink，失败时复制目标文件兜底；复制的字节也计入总量上限。
+6. **解压加固**：链接目标必须留在解压目录内（沿用既有的路径穿越拒绝规则），并新增 `maxExtractTarLinks = 64` 上限。
 
-配套的是 `core` 包里的针对性单测：用真实 b11671 资产名与 API 顺序做选包用例、两种目录布局的检测用例、symlink / hardlink 与链接数上限的解压用例。
+配套的针对性单测在 `core` 包里：用真实 b11671 资产名与 API 返回顺序做选包用例、两种目录布局的检测用例、symlink / hardlink 与链接数上限的解压用例。
 
-**本 fork 独有的限制（不是回归，也不是 bug）**
+## 🧭 大致有什么功能
 
-- fork 的 GitHub Actions 拿不到仓库 secrets，CI 产物退回 per-runner **debug keystore** 签名：不能覆盖安装已装的正式包（得先卸载），也不会被 App 内「检查更新」识别——`core/update.go` 的更新接口硬编码指向上游仓库。正式签名版请从上游 Release 获取。
-- 已知但本次未处理的两个缺口也写在 PR #43 里：`RuntimeSection.vue` 在状态为 `done` 时把两个入口都藏掉；`GetLlamaCpp` 的检测结果没有 TTL，也没有重新扫描的 binding。
+- **运行环境自管**：在首页「运行环境」下载 llama.cpp 主程序与 CUDA runtime，支持断点续传，也可指向已有的 llama.cpp 目录。
+- **模型管理**：扫描本地 GGUF 并读取真实元数据（层数、注意力头、KV 几何、训练上下文、MoE 专家占比），从 HF 镜像 / Hugging Face / ModelScope 搜索并下载模型。
+- **一键智能调优**：结合硬件快照与实测内存带宽为每个模型规划推理参数；还有逐模型 llama-bench 实测验收，以及 n-gram 投机解码、q8_0 KV 量化、flash-attention 开关、多卡切分等性能细节。
+- **一个 OpenAI 兼容端点**：生成 llama-server 预设并启动服务（默认 `127.0.0.1:8080`），桌面端是路由模式（懒加载、多模型共用一个端点），安卓是直连单模型模式。
+- **内置聊天与监控**：聊天页发消息即自动拉起服务并按需换入所选模型；API 页有实时 token 速度与服务日志控制台。
+- **本地优先**：无遥测、无云端依赖，断网可用；深浅主题、中英双语，手机档自动切底部导航并适配安全区。
+
+## 📥 安卓安装
+
+1. 下载 [MyLlama-v0.5.3-fork.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.1/MyLlama-v0.5.3-fork.1-android-arm64.apk)（arm64，Android 5.0+；[Releases 页](https://github.com/msln1995/MyLlama/releases) 有全部产物与说明）。
+2. 点开安装，按提示允许「安装未知来源应用」。因为包名不同，**官方包装着也能直接装**，不用卸载。
+3. 打开 App → 首页「运行环境」→ 下载 llama.cpp。现在拿到的是 `...-bin-android-arm64.tar.gz` 平铺包，装完应显示**已安装**（这就是本 fork 修的那一步）。
+4. 模型目录自己指定或下载（llama.cpp 运行时放在应用私有目录，安卓沙箱不允许执行外部存储上的二进制，所以没有「手动把包放进去」这条路）。
+5. 聊天页选模型直接发消息即可，服务会自动拉起。
+
+## ⚠️ 本 fork 独有的边界
+
+- 安装包是 fork CI 产的 per-runner **debug keystore** 签名（fork 拿不到仓库 secrets）。因为包名独立，这只影响「同一个包内不能覆盖不同签名」这一条，与官方包和平共存；升级本 fork 时用相同签名（都来自 fork CI）正常覆盖安装即可。
+- **不要用 App 内「检查更新」**：`core/update.go` 的更新接口硬编码指向上游仓库，它会去下另一个包名的 APK。升级请从本页 Releases 手动装。
+- 两个已知缺口本次没动，也写进了 PR #43：`RuntimeSection.vue` 在状态为 `done` 时把两个入口都藏掉；`GetLlamaCpp` 的检测结果没有 TTL，也没有重新扫描的 binding。
 
 ---
 
@@ -113,6 +134,10 @@ HF 镜像 + ModelScope 双源搜索，批量下载走可断点续传的任务队
 <details>
 <summary><b>📖 目录</b></summary>
 
+- [📌 我们改了什么](#-我们改了什么)
+- [🧭 大致有什么功能](#-大致有什么功能)
+- [📥 安卓安装](#-安卓安装)
+- [⚠️ 本 fork 独有的边界](#-本-fork-独有的边界)
 - [✨ 为什么选择 MyLlama](#-为什么选择-myllama)
 - [🎨 界面与设计](#-界面与设计)
 - [🚀 快速开始](#-快速开始)
@@ -267,7 +292,7 @@ HF 镜像 + ModelScope 双源搜索，批量下载走可断点续传的任务队
 
 ### Android
 
-前往 [Releases 最新版](https://github.com/CodeNeow/MyLlama/releases/latest) 下载 `MyLlama-*-android-arm64.apk`（arm64 设备，Android 5.0+），安装时按提示允许「安装未知来源应用」。应用内「偏好设置 → 检查更新」可下载新版本并由系统安装器完成升级；应用内自更新要求新旧版本使用同一签名（Release 发布的 APK 均以稳定密钥签名），本地 debug 签名的构建请先卸载旧版再安装。
+本 fork 的安卓安装包见上文「📥 安卓安装」一节：从**本仓库**的 Releases 下载 `MyLlama-v0.5.3-fork.1-android-arm64.apk`，包名 `com.msln1995.myllama` 与上游不同，因此和官方应用可以共存、直接装而无需先卸载。原版（`com.codeneow.llamadesktop`）请从 [CodeNeow/MyLlama Releases](https://github.com/CodeNeow/MyLlama/releases/latest) 获取。注意：本 fork 里不要使用「偏好设置 → 检查更新」，那个接口只会去拿上游另一个包名的 APK；升级请回到本仓库 Releases 手动安装（fork CI 的 debug 签名之间可以正常覆盖安装）。
 
 ### Linux
 
@@ -335,7 +360,7 @@ Windows 无头（API 路由）模式下端点照常可用，另有仅回环可�
 - **Windows**：进程工作目录（通常为安装目录 `%PROGRAMFILES64%\MyLlama`）；
 - **Linux**：应用数据目录 `~/.config/myllama/`；
 - **macOS**（源码构建）：`~/Library/Application Support/myllama/`；
-- **Android**：应用私有数据目录（`/data/data/<包名>/files/`）。
+- **Android**：应用私有数据目录，按包名隔离——本 fork 是 `/data/data/com.msln1995.myllama/files/`，上游是 `/data/data/com.codeneow.llamadesktop/files/`，两个包各存一份，配置、llama.cpp 运行时与模型都不互通。
 
 旧版本数据自动迁移：更早期的 `llama-desktop-config.json` / `llama-gui-config.json` 会在首次启动时自动更名迁移（配置、模型库与 llama.cpp 运行时随迁）；Windows 安装程序也会自动迁移旧版 Llama Desktop 安装目录的数据，并静默卸载旧版条目。
 
@@ -442,10 +467,13 @@ Vite 开发服务器绑定 `localhost:5173`（Taskfile 的 `VITE_PORT`，可用 
 Wails v3 的 Linux 构建走 cgo：默认路径需要 GTK4 与 WebKitGTK 6.0 开发包（`libgtk-4-dev`、`libwebkitgtk-6.0-dev`），`-tags gtk3` 变体需要 `libgtk-3-dev`、`libwebkit2gtk-4.1-dev`。按所选构建变体用包管理器安装对应开发包与 `pkg-config` 后重新构建。
 
 **Android 无法安装或应用内更新失败。**
-安装 APK 需允许「安装未知来源应用」。应用内自更新要求设备上已安装的版本与新 APK 使用同一签名——Release 发布的 APK 使用稳定签名密钥，本地 debug 签名或其他来源的构建无法互相覆盖升级；签名不一致时请先卸载旧版再安装。本应用为侧载分发（不上架应用商店），更新包始终从 GitHub Releases 获取。
+安装 APK 需允许「安装未知来源应用」。本 fork 的包名是 `com.msln1995.myllama`，与上游的 `com.codeneow.llamadesktop` 不同，所以两个应用各自独立、互不覆盖，装本 fork 不需要先卸载官方版；「覆盖安装要求同一签名」这条只在**同一个包名内部**生效——本 fork 的升级包都来自 fork CI 的 debug keystore，彼此签名一致，直接覆盖即可。不要用应用内「检查更新」：`core/update.go` 的更新接口硬编码指向上游仓库，它下载的是另一个包名的 APK。本应用为侧载分发（不上架应用商店），本 fork 的更新包始终从本仓库 Releases 获取。
 
 **下载 llama.cpp 很慢或失败。**
-下载源为 GitHub Releases，支持暂停 / 继续与断点续传。网络受限时可手动下载对应平台的发行包并解压，然后在首页「运行环境」标签通过「自定义」选择该目录。
+下载源为 GitHub Releases，支持暂停 / 继续与断点续传。网络受限时可手动下载对应平台的发行包并解压，然后在首页「运行环境」标签通过「自定义」选择该目录——**但安卓没有这条路**：运行环境必须落在应用私有目录 `/data/data/<包名>/files/llama-cpp`，安卓沙箱既写不进那个目录也不允许执行外部存储上的二进制，只能用应用内的下载按钮。
+
+**下载解压都完成了，却还是提示找不到 llama.cpp。**
+这正是本 fork 修的问题，上游版本在三种情况下会发生：① 安卓 / Linux arm64 选到了 `*-snapdragon` 的 cmake-install 布局包；② 包是 `llama-bXXXX/bin/` + `lib/` 布局，而扫描只看平铺目录；③ macOS / Linux 的 tar 包里有软链接条目，上游解压到第一个软链接就中断，而 `llama-server` 排在它后面，于是根本没落地。本仓库的构建三处都修了（见上文「我们改了什么」）。如果仍然报错，先看首页「运行环境」里组件是否显示已安装：`GetLlamaCpp` 的检测结果有进程内缓存，没有 TTL 也不会自动重扫——重启应用再试；另外 `RuntimeSection.vue` 在状态为 `done` 时会把入口都收起。这两点已记录在 [PR #43](https://github.com/CodeNeow/MyLlama/pull/43)，尚未修复。
 
 ---
 

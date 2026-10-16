@@ -2,22 +2,26 @@
 
 <img src="docs/design/logo.png" width="96" alt="MyLlama" />
 
-# MyLlama
+# MyLlama (Android usability-fix fork)
 
-**One-click tuning for GGUF models, many models behind one OpenAI-compatible endpoint**
+**This fork fixes one thing: llama.cpp finishes downloading and extracting, and the app still says "llama.cpp not found" — always on Android, and on macOS / Linux whenever the tarball contains symlinks.**
 
-A cross-platform local-LLM client built on [llama.cpp](https://github.com/ggml-org/llama.cpp): scan local GGUF files → configure inference parameters visually (or one-click auto-tune) → generate llama-server presets → serve one OpenAI-compatible endpoint for the built-in chat and any OpenAI client. Model downloads, local chat and live monitoring are built in — everything stays on your machine.
+It is still the same cross-platform local-LLM client built on [llama.cpp](https://github.com/ggml-org/llama.cpp): scan local GGUF files → configure inference parameters visually (or one-click auto-tune) → generate llama-server presets → serve one OpenAI-compatible endpoint for the built-in chat and any OpenAI client. Model downloads, local chat and live monitoring all happen inside the app, and nothing leaves your machine.
+
+**📥 This fork's Android package:** [MyLlama-v0.5.3-fork.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.1/MyLlama-v0.5.3-fork.1-android-arm64.apk) · [all releases](https://github.com/msln1995/MyLlama/releases)
+
+The package id is `com.msln1995.myllama`, **different from upstream's `com.codeneow.llamadesktop`**: the two apps coexist and never overwrite each other, so installing this fork does not require uninstalling the official one.
 
 <img src="docs/design/promo.png" width="100%" alt="MyLlama across Windows, Linux and Android"/>
 
 Windows x64 · Android arm64 · Linux x64 · GPL-3.0
 
-[简体中文](README.md) · English
+[简体中文](README.md) · English (this repository) · original project and official downloads: [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLlama)
 
-[![GitHub release](https://img.shields.io/github/v/release/CodeNeow/MyLlama?logo=github&color=blue)](https://github.com/CodeNeow/MyLlama/releases)
-[![Downloads](https://img.shields.io/github/downloads/CodeNeow/MyLlama/total?logo=github&label=downloads&color=blue)](https://github.com/CodeNeow/MyLlama/releases)
+[![Fork CI](https://img.shields.io/github/actions/workflow/status/msln1995/MyLlama/.github/workflows/ci.yml?branch=main&logo=githubactions&logoColor=white&label=fork%20CI)](https://github.com/msln1995/MyLlama/actions)
+[![Fork release](https://img.shields.io/github/v/release/msln1995/MyLlama?logo=github&color=blue&label=fork%20apk)](https://github.com/msln1995/MyLlama/releases)
+[![Upstream PR](https://img.shields.io/badge/upstream%20PR%20%2343-open-informational?logo=github)](https://github.com/CodeNeow/MyLlama/pull/43)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/CodeNeow/MyLlama/.github/workflows/ci.yml?branch=main&logo=githubactions&logoColor=white)](https://github.com/CodeNeow/MyLlama/actions)
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
 [![Wails](https://img.shields.io/badge/Wails-v3-DF0000?logo=wails&logoColor=white)](https://wails.io/)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
@@ -26,26 +30,43 @@ Windows x64 · Android arm64 · Linux x64 · GPL-3.0
 
 ---
 
-## 📌 About this repository: it is a fork, and every change is on the "find llama.cpp" path
+## 📌 What we changed
 
-This is a fork of [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLlama) — **upstream, where the official releases live**. We do not own that repository, so the changes below only exist here and have been submitted upstream for review as [PR #43](https://github.com/CodeNeow/MyLlama/pull/43); **once that PR merges, the divergence described here disappears** — use upstream at that point.
+This repository is a fork of [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLlama). **Upstream is not ours and only upstream publishes official releases** — this page describes our build only; for the original project's own description, follow the link above instead of looking for it here.
 
-Apart from the runtime-detection fixes in this table, features, UI, tuning, downloads and monitoring are identical to upstream. **If you want an official build, go upstream. If you want "it actually works on my Android phone after llama.cpp finishes installing", this fork fixes exactly that stretch.**
+We touched exactly one path: **whether the app can actually find the runtime after it finishes downloading it**. The fix is submitted upstream as [PR #43](https://github.com/CodeNeow/MyLlama/pull/43); once it merges, the code divergence here disappears. The package id (item 4 below) is this fork's own decision and will never be submitted upstream.
 
-| Divergence | Upstream behaviour | This fork |
-| --- | --- | --- |
-| Android / Linux arm64 picking an unusable package | Equal scores kept the first candidate in GitHub API order, so the download often landed on a `*-snapdragon` `cmake --install` package whose layout has no binary where the scanner looks | `pickBestAssetFor` heavily deprioritizes `-snapdragon` assets (−400) so the plain flat CPU package wins; snapdragon stays as a last resort |
-| `release/bin/<binary>` layout undetected | Only the download directory itself and its first-level children were probed | `findLlamaBinInDir` also probes `bin/` inside each subdirectory (hard-bounded at two levels), and `detectAccel` / the CUDA-runtime probe walk the sibling `lib/` too |
-| Android started but shared libraries did not load | Only the binary's own directory was exported to the child process | `androidLdEnv` adds the sibling `lib/` to `LD_LIBRARY_PATH` (colon-separated; the Android linker does not search the executable's directory) |
-| macOS / Linux "installed but not found" after extraction | Extraction aborted at the first tar symlink, and `llama-server` sits later in the archive, so it never landed | `archive.go` materializes in two passes: regular files first while link entries are collected, then symlinks / hardlinks are created, falling back to copying the target; copied bytes are charged to the total-size cap |
-| Extraction hardening | No link-specific limits | Link targets must resolve inside the destination (the existing path-traversal rejection rule) plus a new `maxExtractTarLinks = 64` cap |
+1. **Asset selection**: on equal scores upstream kept the first candidate in GitHub API order, so Android / Linux arm64 usually landed on a `*-snapdragon` `cmake --install` package whose layout has no binary where the scanner looks. `pickBestAssetFor` now deprioritizes `-snapdragon` assets (−400), so the plain flat CPU package wins; snapdragon stays as a last resort.
+2. **Directory layout**: upstream probed only the download directory itself and its first-level children. `findLlamaBinInDir` now also probes `bin/` inside each subdirectory (hard-bounded at two levels), and `detectAccel` / the CUDA-runtime probe walk the sibling `lib/`, so a `release/bin/<binary>` layout resolves too.
+3. **Android launch**: the Android linker does not search the executable's own directory, so exporting only that directory was never enough. `androidLdEnv` now adds the sibling `lib/` to `LD_LIBRARY_PATH` (colon-separated).
+4. **Its own package id**: `applicationId` / `namespace` became `com.msln1995.myllama` (upstream: `com.codeneow.llamadesktop`). This fork's debug-signed APK therefore **installs alongside the official app instead of colliding with it** — no more "uninstall first". The cost: the two apps have separate data directories, so config, the llama.cpp runtime and models do not carry over and must be downloaded again inside this fork. The Java sources stay in `com.wails.app` because the Wails v3 JNI export symbols are hard-coded to that package.
+5. **Extraction no longer aborts on symlinks**: in the macOS / Linux tarballs `llama-server` sits after the symlink entries, and upstream aborted at the first symlink — which is why "installed" and "not found" were both true at once. `archive.go` now materializes in two passes: regular files first while link entries are collected, then symlinks / hardlinks are created, falling back to copying the target; copied bytes are charged to the total-size cap.
+6. **Extraction hardening**: link targets must resolve inside the destination (the existing path-traversal rejection rule) plus a new `maxExtractTarLinks = 64` cap.
 
-These come with focused tests in the `core` package: asset-selection cases built from the real b11671 asset names in API order, detection cases for both directory layouts, and extraction cases for symlinks, hardlinks and the link-count cap.
+The matching focused tests live in the `core` package: asset-selection cases built from the real b11671 asset names in API order, detection cases for both directory layouts, and extraction cases for symlinks, hardlinks and the link-count cap.
 
-**Fork-only limitations (not regressions)**
+## 🧭 What the app does
 
-- GitHub Actions on a fork cannot read the repository secrets, so CI artifacts fall back to the per-runner **debug keystore**: they cannot overwrite-install an existing official build (uninstall first) and are invisible to the in-app "check for updates", because `core/update.go` hard-codes the upstream release API. Get formally signed builds from upstream Releases.
-- Two known gaps deliberately left out of this change are noted in PR #43: `RuntimeSection.vue` hides both entry points when the status is `done`, and `GetLlamaCpp`'s result cache has no TTL and no re-scan binding.
+- **Self-managed runtime**: download the llama.cpp binaries and the CUDA runtime from the Home → Runtime tab, with resume support, or point the app at an existing llama.cpp directory.
+- **Model management**: scan local GGUF and read real metadata (layers, attention heads, KV geometry, trained context, MoE expert split); search and download models from HF Mirror / Hugging Face / ModelScope.
+- **One-click auto-tuning**: plan per-model inference parameters from the hardware snapshot plus a measured RAM-bandwidth calibration, with optional per-model llama-bench validation, and performance details such as n-gram speculative decoding, q8_0 KV quantization, a flash-attention switch and multi-GPU splitting.
+- **One OpenAI-compatible endpoint**: generate llama-server presets and serve them (default `127.0.0.1:8080`); desktop runs router mode (lazy load, many models on one endpoint), Android runs direct mode (one resident model started from the chat page).
+- **Built-in chat and monitoring**: sending a message in the chat page auto-starts the service and swaps in the selected model; the API page shows live token throughput and the service log console.
+- **Local-first**: no telemetry, no cloud dependency, usable offline; light/dark themes, bilingual UI, and a phone tier that switches to bottom navigation with safe-area handling.
+
+## 📥 Installing on Android
+
+1. Download [MyLlama-v0.5.3-fork.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.1/MyLlama-v0.5.3-fork.1-android-arm64.apk) (arm64, Android 5.0+; the [release page](https://github.com/msln1995/MyLlama/releases) lists every artifact).
+2. Open it and allow "install unknown apps" when prompted. Because the package id differs, **it installs straight next to the official app** — nothing to uninstall.
+3. Open the app → Home → Runtime tab → download llama.cpp. You now get the flat `...-bin-android-arm64.tar.gz`, and the component should read **installed** afterwards (that is the step this fork fixes).
+4. Add a model directory or download one (the runtime must live in the app-private directory; Android's sandbox forbids executing binaries from shared storage, so there is no "place the files yourself" route).
+5. Pick a model on the chat page and send a message — the service starts on its own.
+
+## ⚠️ Fork-only limitations
+
+- The APK is signed with the per-runner **debug keystore**, because Actions on a fork cannot read the repository secrets. Since the package id is our own, that only affects overwrite-installs *within* this package: upgrades from fork CI share the same debug key and install over each other normally.
+- **Do not use the in-app "check for updates"**: `core/update.go` hard-codes the upstream release API, so it downloads an APK for the other package id. Upgrade manually from this repository's releases.
+- Two known gaps are deliberately left out of this change and are recorded in PR #43: `RuntimeSection.vue` hides both entry points when the status is `done`, and `GetLlamaCpp`'s result cache has no TTL and no re-scan binding.
 
 ---
 
@@ -113,6 +134,10 @@ Dual prompt-processing / generation tok/s metrics with a 60-second speed chart, 
 <details>
 <summary><b>📖 Table of Contents</b></summary>
 
+- [📌 What we changed](#-what-we-changed)
+- [🧭 What the app does](#-what-the-app-does)
+- [📥 Installing on Android](#-installing-on-android)
+- [⚠️ Fork-only limitations](#-fork-only-limitations)
 - [✨ Why MyLlama](#-why-myllama)
 - [🎨 UI and Design](#-ui-and-design)
 - [🚀 Getting Started](#-getting-started)
@@ -267,7 +292,7 @@ Requirements: Windows 10 or later (x64).
 
 ### Android
 
-Grab `MyLlama-*-android-arm64.apk` from the [latest release](https://github.com/CodeNeow/MyLlama/releases/latest) (arm64 devices, Android 5.0+), and allow "install unknown apps" when prompted. "Preferences → Check for Updates" inside the app downloads new versions and hands them to the system installer; in-app self-update requires the installed and the new APK to share one signature (release APKs are signed with a stable key), so debug-signed local builds should uninstall the old version first.
+For this fork, see the "📥 Installing on Android" section above: download `MyLlama-v0.5.3-fork.1-android-arm64.apk` from **this repository's** releases. The package id `com.msln1995.myllama` differs from upstream's `com.codeneow.llamadesktop`, so it coexists with the official app and installs without uninstalling anything. The original build (`com.codeneow.llamadesktop`) still comes from [CodeNeow/MyLlama Releases](https://github.com/CodeNeow/MyLlama/releases/latest). Note: do not use "Preferences → Check for Updates" in this fork — that API only ever fetches an APK built for the other package id; come back to this repository's releases and install manually (fork CI debug-signed builds do overwrite-install each other).
 
 ### Linux
 
@@ -335,7 +360,7 @@ Runtime settings are persisted to `myllama-config.json`, whose location differs 
 - **Windows**: the process working directory (typically the install directory `%PROGRAMFILES64%\MyLlama`);
 - **Linux**: the app-data directory `~/.config/myllama/`;
 - **macOS** (source builds): `~/Library/Application Support/myllama/`;
-- **Android**: the app-private data directory (`/data/data/<package>/files/`).
+- **Android**: the app-private data directory, isolated per package id — this fork lives in `/data/data/com.msln1995.myllama/files/`, upstream in `/data/data/com.codeneow.llamadesktop/files/`; each keeps its own config, llama.cpp runtime and models, and neither is visible to the other.
 
 Legacy data migrates automatically: older `llama-desktop-config.json` / `llama-gui-config.json` files are renamed on first launch (config, model library and llama.cpp runtime all carry over); the Windows installer also migrates a legacy Llama Desktop install's data into the new install directory and silently uninstalls the legacy entry.
 
@@ -442,10 +467,13 @@ The frontend calls the Go backend through Wails v3 bindings generated at build t
 The Wails v3 Linux build goes through cgo: the default path needs the GTK4 and WebKitGTK 6.0 development packages (`libgtk-4-dev`, `libwebkitgtk-6.0-dev`), while the `-tags gtk3` variant needs `libgtk-3-dev` and `libwebkit2gtk-4.1-dev`. Install the packages matching your build variant — plus `pkg-config` — via your package manager and build again.
 
 **Android install or in-app update fails.**
-Installing the APK requires allowing "install unknown apps". In-app self-update requires the installed version and the new APK to share one signature — release APKs are signed with a stable key, while debug-signed local builds or APKs from other sources cannot upgrade each other; when signatures differ, uninstall the old version first. The app is sideload-only (not on any app store) and always fetches updates from GitHub Releases.
+Installing the APK requires allowing "install unknown apps". This fork's package id is `com.msln1995.myllama` and upstream's is `com.codeneow.llamadesktop`, so they are two independent apps that never overwrite each other — installing this fork does not require uninstalling the official one. "Overwrite-install needs one signature" only applies *inside a single package id*: every artifact here comes from fork CI's debug keystore, so upgrades overwrite cleanly, while pushing an APK signed with a different key into the same package id is what fails (and forces an uninstall). Do not use the in-app "check for updates" in this fork: `core/update.go` hard-codes the upstream release API, so it only ever fetches an APK for the other package id. The app is sideload-only (not on any app store), and this fork's updates always come from this repository's releases.
 
-**Downloading llama.cpp is slow or fails.**
-The download comes from GitHub Releases; it supports pause / resume with resumable transfers. On a restricted network, download the release package for your platform manually, extract it, and select the directory via "Custom" in the "Runtime Environment" tab of the Home page.
+**The llama.cpp download is slow or fails.**
+The download source is GitHub Releases and supports pause / resume with range requests. On desktop you can fetch the archive for your platform manually, extract it, and point the app at it via Home → Runtime tab → custom directory — **but Android has no such route**: the runtime must live in the app-private directory `/data/data/<package>/files/llama-cpp`, which a file manager cannot write to, and Android will not execute a binary from shared storage anyway. On Android use the in-app download button.
+
+**llama.cpp finished downloading and extracting, yet the app still says it cannot find it.**
+This is exactly what this fork fixes. Upstream hits it in three situations: (1) Android / Linux arm64 selected a `*-snapdragon` cmake-install package; (2) the package uses the `llama-bXXXX/bin/` + `lib/` layout while the scanner only looked at flat directories; (3) on macOS / Linux the tarball contains symlink entries and upstream aborted extraction at the first one, while `llama-server` sits later in the archive and therefore never landed. All three are fixed here (see "What we changed" above). If it still reports missing, check whether the Runtime tab shows the component installed: `GetLlamaCpp`'s result is cached for the process with no TTL and no re-scan, so restart the app; and note that `RuntimeSection.vue` collapses both entry points once the status is `done`. Those two gaps are recorded in [PR #43](https://github.com/CodeNeow/MyLlama/pull/43) and remain unfixed.
 
 ---
 
