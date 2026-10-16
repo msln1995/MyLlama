@@ -66,6 +66,7 @@ The matching focused tests live in the `core` package: asset-selection cases bui
 
 - The APK is signed with the per-runner **debug keystore**, because Actions on a fork cannot read the repository secrets. Since the package id is our own, that only affects overwrite-installs *within* this package: upgrades from fork CI share the same debug key and install over each other normally.
 - **Do not use the in-app "check for updates"**: `core/update.go` hard-codes the upstream release API, so it downloads an APK for the other package id. Upgrade manually from this repository's releases.
+- The built-in tutorial (Docs page) also fetches its content from **upstream's `main`** — `core/remotedocs.go` hard-codes CodeNeow/MyLlama in both `docsRawBaseURL` and `docsJSDBaseURL` — so the on-device docs do not contain the fork notes above. This README is the description source for this fork.
 - Two known gaps are deliberately left out of this change and are recorded in PR #43: `RuntimeSection.vue` hides both entry points when the status is `done`, and `GetLlamaCpp`'s result cache has no TTL and no re-scan binding.
 
 ---

@@ -66,6 +66,7 @@ Windows x64 · Android arm64 · Linux x64 · GPL-3.0
 
 - 安装包是 fork CI 产的 per-runner **debug keystore** 签名（fork 拿不到仓库 secrets）。因为包名独立，这只影响「同一个包内不能覆盖不同签名」这一条，与官方包和平共存；升级本 fork 时用相同签名（都来自 fork CI）正常覆盖安装即可。
 - **不要用 App 内「检查更新」**：`core/update.go` 的更新接口硬编码指向上游仓库，它会去下另一个包名的 APK。升级请从本页 Releases 手动装。
+- App 内置教程（Docs 页）抓取的也是**上游 main** 的文档（`core/remotedocs.go` 的 `docsRawBaseURL` / `docsJSDBaseURL` 都写死了 CodeNeow/MyLlama），所以手机里看到的教程不含本页这些 fork 差异；本页 README 才是本 fork 的说明来源。
 - 两个已知缺口本次没动，也写进了 PR #43：`RuntimeSection.vue` 在状态为 `done` 时把两个入口都藏掉；`GetLlamaCpp` 的检测结果没有 TTL，也没有重新扫描的 binding。
 
 ---
