@@ -35,7 +35,7 @@ Tuning plans VRAM against the **inference GPU** chosen in Preferences: on multi-
 | KV Cache Type | `q8_0` nearly halves the cache size (longer contexts fit), at a slight decode cost — measured M2 Metal: 28.4 vs 30.1 t/s on f16; pick it when memory is tight; default is f16 |
 | Load Mode | Default mmap loads fastest; mlock prevents swapping when RAM is ample |
 | Split Mode | `none` for a single GPU; `layer` is the stable default for multi-GPU |
-| Speculative Decoding | "Advanced" tab. `ngram-simple` / `ngram-mod` are n-gram self-speculation: no draft model, zero extra VRAM; speeds up repetitive/structured output (code, templated text), can regress elsewhere; `draft-mtp` is MTP speculative prediction, needs model support; empty disables |
+| Speculative Decoding | "Advanced" tab. `ngram-simple` / `ngram-mod` are n-gram self-speculation: no draft model, zero extra VRAM; `draft-mtp` is MTP speculative prediction and needs model support; empty disables. Measured M2 Metal 4B Q4_K_M: on highly repetitive output `ngram-mod` is ~2.8x (86-88 vs 31 t/s baseline), on natural prose it gains nothing, and `ngram-simple` costs ~5% either way — enable it for code / templated output only |
 
 > Note: Android is a CPU-only build, so GPU-only parameters (GPU layers, Flash Attention, cpu-moe) are not shown there; the `dio` load mode is only offered on Windows / Linux. Android detects the SoC model automatically (e.g. Snapdragon / Dimensity, read from system properties); on Android and Apple Silicon, auto-tune caps the thread count at the performance-core count (big.LITTLE efficiency cores and Apple Silicon E-cores do not join inference threads), and the tune-result toast for the CPU-only plan no longer shows a GPU-layers field.
 
