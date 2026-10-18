@@ -572,7 +572,11 @@ export function StopUpdateDownload(): $CancellablePromise<void> {
 /**
  * TuneModelConfig computes hardware-aware optimal inference parameters for the
  * model (GGUF metrics + GPU/CPU/RAM snapshot), persists them via SaveModelConfig
- * validation, and returns the applied config.
+ * validation, and returns the applied config. Two existing selections are
+ * carried into the plan: a pinned q8_0 K/V pair, priced at the q8_0 footprint so
+ * the freed cache converts into context instead of only headroom, and the
+ * model's ubatch size, which the RAM budget is charged at. Every other field of
+ * the current config survives the tune untouched — see mergeTunedConfig.
  */
 export function TuneModelConfig(modelID: string): $CancellablePromise<$models.ModelConfig> {
     return $Call.ByID(899609304, modelID).then(($result: any) => {

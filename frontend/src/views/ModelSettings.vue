@@ -526,19 +526,23 @@ const showPortraitSummary = computed(() => platformState.value.isTablet)
 
 // ─── Live memory estimate (phone + tablet portrait summary islands) ───────────
 // Weights term: the scanned GGUF file size looked up by model name (0 while
-// unknown). Memory terms: the system snapshot captured on mount (0 = probe
-// unavailable). The estimate is a pure computed over the live form values, so
-// every edit (ctx length, KV quant types, μBatch, threads) updates both placements
+// unknown). KV term: the model's own per-token cache geometry from the same scan
+// (0 → the documented typical-model fallback in lib/modelMemory.ts). Memory
+// terms: the system snapshot captured on mount (0 = probe unavailable). The
+// estimate is a pure computed over the live form values, so every edit (ctx
+// length, KV quant types, μBatch, threads) updates both placements
 // immediately. See lib/modelMemory.ts for the honesty rules (unknown inputs
 // drop their rows instead of guessing).
 const GIB = 1024 * 1024 * 1024
 const modelSizeBytes = ref(0)
+const modelKVBytesPerToken = ref(0)
 const sysTotalBytes = ref(0)
 const sysFreeBytes = ref(0)
 
 const memoryEstimate = computed(() =>
   estimateMemory({
     modelSizeBytes: modelSizeBytes.value,
+    kvBytesPerTokenF16: modelKVBytesPerToken.value,
     ctxSize: Number(cfg.ctxSize) || 0,
     cacheTypeK: cfg.cacheTypeK,
     cacheTypeV: cfg.cacheTypeV,
@@ -576,16 +580,22 @@ const summaryRows = computed(() =>
   )
 )
 
-/** Look up the model's scanned GGUF file size (the estimate's weights term). */
-async function lookupModelSize() {
+/** Look up the model's scanned GGUF size and per-token KV geometry (the
+    estimate's weights and KV terms). Both stay 0 when the scan has no entry for
+    this model, which is what the estimate reads as "unknown". */
+async function lookupModelTerms() {
   const name = decodedModelName.value
   if (!name) return
   try {
     const found = (await getModels()).find(
-      (m: { name?: string; sizeBytes?: number }) => m?.name === name
+      (m: { name?: string; sizeBytes?: number; kvBytesPerTokenF16?: number }) => m?.name === name
     )
     const size = Number(found?.sizeBytes)
     modelSizeBytes.value = size > 0 ? size : 0
+    // 0 is "not scanned" here, never "free": modelMemory's estimate falls back
+    // to the documented typical-model constant for it.
+    const perToken = Number(found?.kvBytesPerTokenF16)
+    modelKVBytesPerToken.value = perToken > 0 ? perToken : 0
   } catch {
     // Model scan unavailable (e.g. standalone preview): leave 0 — the summary
     // then honestly omits the estimate rows instead of showing a guess.
@@ -767,7 +777,7 @@ watch(
 watch(modelName, () => {
   loadConfig()
   // The weights term of the memory estimate follows the model too
-  lookupModelSize()
+  lookupModelTerms()
 })
 
 // ─── Load / Reset / Save ──────────────────────────────────────────────────────
@@ -928,7 +938,7 @@ onMounted(async () => {
     sysFreeBytes.value = (Number(info?.memory?.freeGb) || 0) * GIB
   } catch {}
   // Best-effort weights term for the tablet memory estimate
-  lookupModelSize()
+  lookupModelTerms()
 })
 
 // Pending tune/bench feedback timers must not fire after the page is left

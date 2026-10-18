@@ -38,6 +38,17 @@ type ModelInfo struct {
 	// aliasDedup). The API page shows it so users copy-paste an id that
 	// llama-server matches exactly (model lookup is case-sensitive).
 	Alias string `json:"alias"`
+	// KVBytesPerTokenF16 is the f16 KV cache cost of one token for this model,
+	// summed over the layers that actually hold a cache (hybrid-attention
+	// models cache on every Nth layer only). It is the number the auto-tuner
+	// sizes its context against and the start guard prices a load with
+	// (core/memfit.go's modelLoadBytes), exposed so the model-settings memory
+	// estimate charges the real geometry instead of a typical-model constant -
+	// measured: 112 KiB/token for Qwen3-0.6B Q4_K_M, 144 KiB/token for
+	// Qwen3-4B-Instruct-2507, against that 128 KiB stand-in. Unreadable headers
+	// keep the tuner's fallback (32 KiB/token); 0 means "not scanned", not
+	// "cheap".
+	KVBytesPerTokenF16 int64 `json:"kvBytesPerTokenF16"`
 }
 
 var cachedModels []ModelInfo
@@ -311,6 +322,13 @@ func buildModelInfo(path, author, fallbackName string) ModelInfo {
 	if model.Architecture == "" {
 		model.Architecture = guessArchFromName(fallbackName + " " + author)
 	}
+	// The KV geometry the auto-tuner sizes its context against and the start
+	// guard prices a load with, read through the same header reader so the
+	// model-settings estimate charges what the guard charges (an unreadable
+	// header lands on the tuner's fallback geometry, not on 0 - 0 is reserved
+	// for "this model was never scanned").
+	mm, ok := readGGUFModelMetrics(path)
+	model.KVBytesPerTokenF16 = tuneKVBytesPerTokenF16(mm, ok)
 	return model
 }
 

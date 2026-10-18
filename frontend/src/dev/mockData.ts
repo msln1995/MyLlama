@@ -119,6 +119,12 @@ const systemInfo = {
 
 const IMPORT_DIR = 'C:\\Users\\demo\\Imported-Models'
 
+// Per-token f16 KV geometry as the scan would publish it from each model's GGUF
+// header (layers x kv_heads x (key+value) x 2 B) — the number ModelSettings'
+// memory estimate prices the context with. TinyLlama is deliberately 0: that is
+// the "not scanned" value, so `npm run dev:mock` also exercises the fallback
+// path (lib/modelMemory.ts's KV_BYTES_PER_TOKEN_F16) rather than only the real
+// geometry.
 const models: any[] = [
   {
     author: '',
@@ -128,6 +134,7 @@ const models: any[] = [
     sizeHuman: '2.3 GB',
     architecture: 'qwen3',
     quantization: 'Q4_K_M',
+    kvBytesPerTokenF16: 36 * 4096,
     // One vision-capable entry so `npm run dev:mock` exercises the chat page's
     // mmproj gating (attach enabled) and My Models' badge instead of a flat all-false list
     hasMmproj: true,
@@ -142,6 +149,7 @@ const models: any[] = [
     sizeHuman: '4.4 GB',
     architecture: 'qwen2',
     quantization: 'Q4_K_M',
+    kvBytesPerTokenF16: 28 * 2048,
     hasMmproj: false,
     sourceDir: config.modelDownloadDir,
     alias: 'Qwen2.5-Coder-7B-Instruct-Q4_K_M',
@@ -154,6 +162,7 @@ const models: any[] = [
     sizeHuman: '2.1 GB',
     architecture: 'llama',
     quantization: 'Q5_K_M',
+    kvBytesPerTokenF16: 28 * 4096,
     hasMmproj: false,
     sourceDir: IMPORT_DIR,
     alias: 'Llama-3.2-3B-Instruct-Q5_K_M',
@@ -166,6 +175,9 @@ const models: any[] = [
     sizeHuman: '1.1 GB',
     architecture: 'llama',
     quantization: 'Q8_0',
+    // The scan publishes 0 for a model it could not price; the estimate then
+    // uses the fallback constant, so the preview shows both paths.
+    kvBytesPerTokenF16: 0,
     hasMmproj: false,
     sourceDir: IMPORT_DIR,
     alias: 'TinyLlama-1.1B-Chat-v1.0-Q8_0',

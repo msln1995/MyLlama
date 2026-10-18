@@ -621,6 +621,68 @@ func TestBuildTuneModelHybridFold(t *testing.T) {
 	}
 }
 
+// TestTuneKVBytesPerTokenF16MatchesTuner pins that the per-token KV figure the
+// scanned model publishes is the same product the tuner sizes its context ladder
+// against. The settings page prices the KV term with the published number and
+// the start guard prices it with tuneModel's, so a drift between the two is a
+// page that calls a plan affordable while the guard refuses it. Every shape the
+// fold knows about is walked: the unreadable-header fallback, dense GQA, hybrid
+// attention (raw layer count vs the KV subset), MLA latents, and a missing
+// block count.
+func TestTuneKVBytesPerTokenF16MatchesTuner(t *testing.T) {
+	cases := []struct {
+		name string
+		m    modelMetrics
+		ok   bool
+		want int64
+	}{
+		{
+			name: "unreadable header uses the fallback geometry",
+			m:    modelMetrics{},
+			ok:   false,
+			want: 32 * 1024, // 32 layers x 1024 B, buildTuneModel's documented fallback
+		},
+		{
+			name: "dense GQA",
+			m:    modelMetrics{BlockCount: 36, HeadCount: 32, HeadCountKV: 8, KeyLength: 128, ValueLength: 128},
+			ok:   true,
+			want: 4096 * 36,
+		},
+		{
+			// The fold, not the raw block count: only 7 of the 28 blocks hold
+			// a cache, so one token costs 7 x 4096 = 28 KiB. Unfolded, the
+			// same per-layer cost over all 28 layers would claim 112 KiB.
+			name: "hybrid attention charges the KV subset only",
+			m:    modelMetrics{BlockCount: 28, HeadCount: 16, HeadCountKV: 8, KeyLength: 128, ValueLength: 128, FullAttentionInterval: 4},
+			ok:   true,
+			want: 4096 * 7,
+		},
+		{
+			name: "MLA latent",
+			m:    modelMetrics{BlockCount: 61, KVLoRaRank: 512, RopeDimCount: 64},
+			ok:   true,
+			want: 1152 * 61,
+		},
+		{
+			name: "missing block count falls back to 32 layers",
+			m:    modelMetrics{HeadCountKV: 8, KeyLength: 128, ValueLength: 128},
+			ok:   true,
+			want: 4096 * 32,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := tuneKVBytesPerTokenF16(c.m, c.ok); got != c.want {
+				t.Errorf("tuneKVBytesPerTokenF16 = %d, want %d", got, c.want)
+			}
+			tm := buildTuneModel(c.m, c.ok, 1<<30)
+			if got, product := tuneKVBytesPerTokenF16(c.m, c.ok), int64(tm.KVBytesPerTokPerLayerF16*float64(tm.Layers)); got != product {
+				t.Errorf("published per-token KV %d != the tuner's per-layer x layers %d", got, product)
+			}
+		})
+	}
+}
+
 // ─── tuneModelConfig ─────────────────────────────────────────────
 
 // TestTuneModelConfig is a table-driven check of the tuning rules with

@@ -5,11 +5,11 @@
  * summary-row builder shared by the portrait bottom island and the landscape
  * sticky rail (same data, two placements).
  *
- * Honesty rules (mirroring the other tablet phases): the weights term is the
- * scanned GGUF file size (real data from GetModels); the KV term uses a fixed
- * per-token constant because the frontend has no binding exposing GGUF layer
- * geometry (n_layers / kv heads / head dim) — the constant models a typical
- * modern GQA model and every affected row is labeled as an estimate (预估/≈).
+ * Honesty rules (mirroring the other tablet phases): every term is real data.
+ * The weights term is the scanned GGUF file size and the KV term is priced with
+ * the model's own per-token cache geometry, both from GetModels; only a model
+ * whose header could not be read falls back to the documented typical-model
+ * constant below, and every affected row is labeled as an estimate (预估/≈).
  * Rows whose inputs are unknown are dropped entirely instead of guessed.
  *
  * The three terms are the same three the backend's start guard prices
@@ -23,10 +23,14 @@
 import { formatBytes } from './format'
 
 /**
- * Estimated KV-cache bytes per token at f16, K+V combined, for a typical
- * modern GQA model (kv dim ≈ 1024, ~32 layers → 2 × 32 × 1024 × 2 B). The
- * frontend cannot read the real GGUF layer geometry, so this documented
- * constant stands in for it and the row labels say "estimate".
+ * Fallback KV-cache bytes per token at f16, K+V combined, for a typical modern
+ * GQA model (kv dim ≈ 1024, ~32 layers → 2 × 32 × 1024 × 2 B). Scanned models
+ * publish their real geometry through ModelInfo's kvBytesPerTokenF16 (the same
+ * figure the backend tuner sizes its context ladder against), so this constant
+ * only stands in for a model the scan could not price: measured real geometries
+ * spread wide around it — 112 KiB/token for Qwen3-0.6B Q4_K_M, 144 KiB/token for
+ * Qwen3-4B-Instruct-2507, and 28 KiB/token for a hybrid-attention model that
+ * caches on every 4th layer.
  */
 export const KV_BYTES_PER_TOKEN_F16 = 128 * 1024
 
@@ -56,6 +60,11 @@ export type MemoryHeadroom = 'ok' | 'tight' | 'over' | 'unknown'
 export interface MemoryEstimateInput {
   /** Scanned GGUF file size in bytes (0 = model not found in the scan). */
   modelSizeBytes: number
+  /**
+   * Model's real f16 KV bytes per token from the scan (0 = unknown, which
+   * falls back to {@link KV_BYTES_PER_TOKEN_F16}).
+   */
+  kvBytesPerTokenF16: number
   /** Configured context size in tokens (<= 0 / NaN = not usable yet). */
   ctxSize: number
   /** Configured KV cache K type ('' = backend default f16). */
@@ -127,16 +136,28 @@ export function runtimeOverheadBytes(ubatchSize: number): number {
 }
 
 /**
+ * f16 KV bytes per token used for the estimate: the model's real GGUF geometry
+ * when the scan published it, else the documented typical-model fallback. A
+ * negative or non-finite value is "unknown" too — the backend guards the same
+ * field the same way (core/autotune.go's tuneKVBytesPerTokenF16), and 0 from the
+ * binding means the model was never scanned, not that its cache is free.
+ */
+export function kvBytesPerToken(kvBytesPerTokenF16: number): number {
+  return Number.isFinite(kvBytesPerTokenF16) && kvBytesPerTokenF16 > 0 ? kvBytesPerTokenF16 : KV_BYTES_PER_TOKEN_F16
+}
+
+/**
  * Compute the live memory estimate from the current form values and probes.
  * Pure: no reactive state, safe to call from computed properties and tests.
  */
 export function estimateMemory(input: MemoryEstimateInput): MemoryEstimate {
   const ctx = Number.isFinite(input.ctxSize) && input.ctxSize > 0 ? Math.floor(input.ctxSize) : 0
   const weightsBytes = input.modelSizeBytes > 0 ? input.modelSizeBytes : 0
-  // The per-token constant covers K+V at f16; mixed types scale each half.
+  // The per-token figure covers K+V at f16; mixed types scale each half.
+  const perToken = kvBytesPerToken(input.kvBytesPerTokenF16)
   const kvAvgFactor = (kvCacheTypeFactor(input.cacheTypeK) + kvCacheTypeFactor(input.cacheTypeV)) / 2
-  const kvBytes = ctx * KV_BYTES_PER_TOKEN_F16 * kvAvgFactor
-  const kvSavedBytes = ctx > 0 && kvAvgFactor < 1 ? ctx * KV_BYTES_PER_TOKEN_F16 * (1 - kvAvgFactor) : 0
+  const kvBytes = ctx * perToken * kvAvgFactor
+  const kvSavedBytes = ctx > 0 && kvAvgFactor < 1 ? ctx * perToken * (1 - kvAvgFactor) : 0
   // The reserve exists only for a load that has some price on it: with neither
   // weights nor KV known, showing a bare overhead figure would be a number
   // without a subject, and the rows keyed off the total drop instead.

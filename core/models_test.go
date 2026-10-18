@@ -164,6 +164,55 @@ func TestScanModelsDirGGUFMeta(t *testing.T) {
 	}
 }
 
+// TestScanModelsDirCarriesKVGeometry verifies the scan publishes the model's real
+// f16 per-token KV cost - the number the auto-tuner sizes its context ladder
+// against and the start guard prices a load with (core/memfit.go's
+// modelLoadBytes) - so the model-settings estimate can charge the geometry
+// instead of a typical-model constant. A header that parses but carries no
+// attention metadata still lands on the tuner's conservative fallback, never on
+// 0: the frontend reads 0 as "this model was never scanned".
+func TestScanModelsDirCarriesKVGeometry(t *testing.T) {
+	base := t.TempDir()
+	hybridDir := filepath.Join(base, "acme", "with-geometry")
+	plainDir := filepath.Join(base, "acme", "name-only")
+	for _, d := range []string{hybridDir, plainDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 36 blocks with KV on every 3rd layer: 12 cache layers x 4096 B per layer
+	// = 49,152 bytes for one f16 token (the hybrid fold, not 36 x 4096).
+	writeTempGGUF(t, hybridDir, "q4km.gguf", buildGGUF(3,
+		strKV("general.architecture", "qwen35"),
+		u64KV("qwen35.block_count", 36),
+		u32KV("qwen35.attention.head_count", 32),
+		u32KV("qwen35.attention.head_count_kv", 8),
+		u32KV("qwen35.attention.key_length", 128),
+		u32KV("qwen35.attention.value_length", 128),
+		u32KV("qwen35.full_attention_interval", 3),
+	))
+	writeTempGGUF(t, plainDir, "nameless.gguf", buildGGUF(3,
+		strKV("general.architecture", "qwen2"),
+		strKV("general.name", "Name Only"),
+	))
+
+	models := scanModelsDir(base)
+	if len(models) != 2 {
+		t.Fatalf("scanned %d models, want 2", len(models))
+	}
+	got := map[string]int64{}
+	for _, m := range models {
+		got[m.Name] = m.KVBytesPerTokenF16
+	}
+	if got["with-geometry"] != 49152 {
+		t.Errorf("hybrid model KVBytesPerTokenF16 = %d, want 49152 (12 KV layers x 4096)", got["with-geometry"])
+	}
+	if got["Name Only"] != 32*1024 {
+		t.Errorf("metadata-less model KVBytesPerTokenF16 = %d, want the tuner fallback %d",
+			got["Name Only"], 32*1024)
+	}
+}
+
 // TestScanModelsDirGGUFMetaRepoIDName verifies a general.name that embeds the full
 // source repo id ("org/model", written by some converters) is trimmed to the model
 // segment. The generic file name is not a candidate here (the metadata name does

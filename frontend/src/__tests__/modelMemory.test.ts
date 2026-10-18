@@ -14,9 +14,12 @@ import {
 const GIB = 1024 * 1024 * 1024
 
 // Realistic baseline mirroring the mock preview data: a ~2.3 GB Qwen3-4B GGUF,
-// 16 GB device with 9.4 GB free (numbers in bytes).
+// 16 GB device with 9.4 GB free (numbers in bytes). kvBytesPerTokenF16 is 0 here
+// on purpose — that is the "not scanned" value, so every assertion below that
+// prices KV with KV_BYTES_PER_TOKEN_F16 is also the fallback test.
 const BASE = {
   modelSizeBytes: 2_476_000_000,
+  kvBytesPerTokenF16: 0,
   ctxSize: 4096,
   cacheTypeK: '',
   cacheTypeV: '',
@@ -149,6 +152,37 @@ describe('estimateMemory', () => {
   it('a missing μBatch charges the default 512, the llama-server default', () => {
     for (const ub of [0, -512, Number.NaN]) {
       expect(estimateMemory({ ...BASE, ubatchSize: ub }).overheadBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512)
+    }
+  })
+
+  it('a scanned model prices KV with its own GGUF geometry, not the constant', () => {
+    // The measured geometries behind the binding: Qwen3-0.6B Q4_K_M caches
+    // 112 KiB per token and Qwen3-4B-Instruct-2507 144 KiB, against the 128 KiB
+    // fallback. Same context, different model — the old constant gave both the
+    // same KV term, so the page could read "充足" for a model the start guard
+    // (core/memfit.go, which reads the same geometry) refuses.
+    const QWEN3_06B = 112 * 1024
+    const QWEN3_4B = 144 * 1024
+    expect(estimateMemory({ ...BASE, kvBytesPerTokenF16: QWEN3_06B }).kvBytes).toBe(4096 * QWEN3_06B)
+    expect(estimateMemory({ ...BASE, kvBytesPerTokenF16: QWEN3_4B }).kvBytes).toBe(4096 * QWEN3_4B)
+    expect(estimateMemory({ ...BASE, kvBytesPerTokenF16: QWEN3_4B }).totalBytes).toBe(
+      BASE.modelSizeBytes + 4096 * QWEN3_4B + RUNTIME_OVERHEAD_BYTES_AT_512
+    )
+  })
+
+  it('the geometry drives the quantized-cache savings row too', () => {
+    // q8_0 halves whatever the real geometry is; pricing the saving off the
+    // fallback constant while the cost came from the model would invent slack.
+    const hybrid = 28 * 1024 // a model caching on every 4th of its 28 layers
+    const est = estimateMemory({ ...BASE, kvBytesPerTokenF16: hybrid, cacheTypeK: 'q8_0', cacheTypeV: 'q8_0' })
+    expect(est.kvBytes).toBe(4096 * hybrid * 0.5)
+    expect(est.kvSavedBytes).toBe(4096 * hybrid * 0.5)
+    expect(est.kvBytes + est.kvSavedBytes).toBe(4096 * hybrid)
+  })
+
+  it('an unknown or impossible geometry falls back to the documented constant', () => {
+    for (const perToken of [0, -1, Number.NaN]) {
+      expect(estimateMemory({ ...BASE, kvBytesPerTokenF16: perToken }).kvBytes).toBe(4096 * KV_BYTES_PER_TOKEN_F16)
     }
   })
 })

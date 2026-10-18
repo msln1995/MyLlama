@@ -11,10 +11,11 @@ export class CPUInfo {
     "logicalCpus": number;
 
     /**
-     * PerfCores is the performance-cluster core count on big.LITTLE SoCs
-     * (Android): CPUs whose cpufreq cpuinfo_max_freq reaches 80% of the
-     * highest. 0 = unknown (desktop probes never populate it); the auto-tuner
-     * caps its Android thread pool at this count.
+     * PerfCores is the performance-cluster core count on asymmetric CPUs:
+     * Android/big.LITTLE SoCs (CPUs whose cpufreq cpuinfo_max_freq reaches 80%
+     * of the highest) and Apple Silicon (hw.perflevel0.physicalcpu, the P-core
+     * count). 0 = unknown, which means "no capping"; the auto-tuner limits its
+     * worker pool to this count when it knows the split.
      */
     "perfCores"?: number;
 
@@ -429,9 +430,10 @@ export class LlamaCppInfo {
      * "cuda" | "vulkan" | "metal" | "cpu". Official llama.cpp builds are
      * GGML_BACKEND_DL everywhere, so the value is detected from the backend
      * library sitting next to the resolved binary (windows ggml-cuda.dll /
-     * ggml-vulkan.dll, linux libggml-vulkan.so), from the arch on darwin
-     * (arm64 release embeds Metal; x64 release is CPU-only) or the platform
-     * default (android = CPU-only). Empty when llama.cpp is not installed.
+     * ggml-vulkan.dll, linux libggml-vulkan.so, darwin libggml-metal.dylib —
+     * only the arm64 release ships it), with the host arch as the fallback
+     * when the tree keeps its libraries elsewhere, or the platform default
+     * (android = CPU-only). Empty when llama.cpp is not installed.
      */
     "accel": string;
 
@@ -775,6 +777,20 @@ export class ModelInfo {
      */
     "alias": string;
 
+    /**
+     * KVBytesPerTokenF16 is the f16 KV cache cost of one token for this model,
+     * summed over the layers that actually hold a cache (hybrid-attention
+     * models cache on every Nth layer only). It is the number the auto-tuner
+     * sizes its context against and the start guard prices a load with
+     * (core/memfit.go's modelLoadBytes), exposed so the model-settings memory
+     * estimate charges the real geometry instead of a typical-model constant -
+     * measured: 112 KiB/token for Qwen3-0.6B Q4_K_M, 144 KiB/token for
+     * Qwen3-4B-Instruct-2507, against that 128 KiB stand-in. Unreadable headers
+     * keep the tuner's fallback (32 KiB/token); 0 means "not scanned", not
+     * "cheap".
+     */
+    "kvBytesPerTokenF16": number;
+
     /** Creates a new ModelInfo instance. */
     constructor($$source: Partial<ModelInfo> = {}) {
         if (!("author" in $$source)) {
@@ -806,6 +822,9 @@ export class ModelInfo {
         }
         if (!("alias" in $$source)) {
             this["alias"] = "";
+        }
+        if (!("kvBytesPerTokenF16" in $$source)) {
+            this["kvBytesPerTokenF16"] = 0;
         }
 
         Object.assign(this, $$source);

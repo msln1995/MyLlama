@@ -513,6 +513,29 @@ func kvCacheLayers(m modelMetrics) int {
 	return m.BlockCount
 }
 
+// tuneKVBytesPerTokenF16 is the f16 KV cost of one token across every
+// KV-bearing layer of the model - the same product buildTuneModel prices its
+// context ladder with (KVBytesPerTokPerLayerF16 x Layers, including the
+// hybrid-attention folding and the unreadable-header fallback of 32 layers x
+// 1024 B). It is the number a client needs to price a context without
+// re-deriving the geometry, so the model-settings memory estimate and the
+// start guard (core/memfit.go's modelLoadBytes) charge the same KV term;
+// TestTuneKVBytesPerTokenF16MatchesTuner pins that they cannot drift apart.
+func tuneKVBytesPerTokenF16(m modelMetrics, ok bool) int64 {
+	if !ok {
+		return 32 * 1024
+	}
+	layers := m.BlockCount
+	if layers <= 0 {
+		layers = 32
+	}
+	perLayer := kvBytesPerTokenF16(m)
+	if kvLayers := kvCacheLayers(m); kvLayers > 0 && kvLayers != layers {
+		perLayer = perLayer * float64(kvLayers) / float64(layers)
+	}
+	return int64(perLayer * float64(layers))
+}
+
 // ─── Tuning inputs ────────────────────────────────────────────────
 
 // tuneHardware is the hardware snapshot the tuner plans against.
