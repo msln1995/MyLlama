@@ -133,7 +133,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'onboarding.goto.models': '去下载 →',
     'onboarding.goto.service': '去启动 →',
     // Phone-tier per-step muted sub-descriptions (design draft .cstep .sd)
-    'onboarding.sub.runtime': 'CPU 版 · 约 40 MB',
+    'onboarding.sub.runtime': 'CPU 版 · 几十 MB',
     'onboarding.sub.models': '建议 4B 以下 · Q4 量化',
     'onboarding.sub.service': '一键开启本机 OpenAI 端点',
     'onboarding.dismiss': '不再显示',
@@ -964,7 +964,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'onboarding.goto.models': 'Download →',
     'onboarding.goto.service': 'Launch →',
     // Phone-tier per-step muted sub-descriptions (design draft .cstep .sd)
-    'onboarding.sub.runtime': 'CPU build · about 40 MB',
+    'onboarding.sub.runtime': 'CPU build · tens of MB',
     'onboarding.sub.models': '4B or smaller · Q4 quant',
     'onboarding.sub.service': 'One tap to a local OpenAI endpoint',
     'onboarding.dismiss': "Don't show again",
