@@ -738,7 +738,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     // lib/modelMemory.ts builds the row set)
     'modelSettings.summaryCtxThreads': '上下文 / 线程',
     'modelSettings.summaryKv': 'KV 缓存',
-    'modelSettings.summaryEstimate': '权重 + KV 预估',
+    'modelSettings.summaryEstimate': '权重 + KV + 开销预估',
     'modelSettings.summaryKvSaved': 'KV 量化节省',
     'modelSettings.summaryAvailable': '可用内存',
     'modelSettings.summaryHeadroom': '余量',
@@ -1568,7 +1568,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     // lib/modelMemory.ts builds the row set)
     'modelSettings.summaryCtxThreads': 'Context / Threads',
     'modelSettings.summaryKv': 'KV cache',
-    'modelSettings.summaryEstimate': 'Weights + KV est.',
+    'modelSettings.summaryEstimate': 'Weights + KV + overhead est.',
     'modelSettings.summaryKvSaved': 'KV quant. saving',
     'modelSettings.summaryAvailable': 'Available memory',
     'modelSettings.summaryHeadroom': 'Headroom',

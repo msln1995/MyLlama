@@ -3,7 +3,9 @@ import {
   estimateMemory,
   kvCacheTypeFactor,
   memorySummaryRows,
+  runtimeOverheadBytes,
   KV_BYTES_PER_TOKEN_F16,
+  RUNTIME_OVERHEAD_BYTES_AT_512,
   HEADROOM_TIGHT_GAP_BYTES,
   type MemoryEstimate,
   type MemorySummaryCopy,
@@ -18,9 +20,13 @@ const BASE = {
   ctxSize: 4096,
   cacheTypeK: '',
   cacheTypeV: '',
+  ubatchSize: 512,
   totalMemBytes: 16 * GIB,
   freeMemBytes: Math.floor(9.4 * GIB),
 }
+
+/** The three priced terms of BASE, with the runtime overhead at the default μBatch. */
+const BASE_TOTAL = BASE.modelSizeBytes + 4096 * KV_BYTES_PER_TOKEN_F16 + RUNTIME_OVERHEAD_BYTES_AT_512
 
 describe('kvCacheTypeFactor', () => {
   it('empty string and f16/bf16 share the f16 ratio of 1', () => {
@@ -43,11 +49,12 @@ describe('kvCacheTypeFactor', () => {
 })
 
 describe('estimateMemory', () => {
-  it('weights + f16 KV at the documented per-token constant', () => {
+  it('weights + f16 KV at the documented per-token constant + default overhead', () => {
     const est = estimateMemory(BASE)
     expect(est.weightsBytes).toBe(BASE.modelSizeBytes)
     expect(est.kvBytes).toBe(4096 * KV_BYTES_PER_TOKEN_F16)
-    expect(est.totalBytes).toBe(BASE.modelSizeBytes + 4096 * KV_BYTES_PER_TOKEN_F16)
+    expect(est.overheadBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512)
+    expect(est.totalBytes).toBe(BASE_TOTAL)
     expect(est.kvSavedBytes).toBe(0)
     expect(est.availableBytes).toBe(BASE.freeMemBytes)
     expect(est.headroom).toBe('ok')
@@ -68,19 +75,27 @@ describe('estimateMemory', () => {
     expect(mixed.kvSavedBytes).toBeCloseTo(f16Both.kvBytes * 0.25, 6)
   })
 
-  it('invalid ctx drops the KV term but keeps the weights estimate', () => {
+  it('invalid ctx drops the KV term but the weights still carry their overhead', () => {
     for (const ctx of [0, -4096, Number.NaN]) {
       const est = estimateMemory({ ...BASE, ctxSize: ctx })
       expect(est.kvBytes).toBe(0)
       expect(est.kvSavedBytes).toBe(0)
-      expect(est.totalBytes).toBe(BASE.modelSizeBytes)
+      expect(est.overheadBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512)
+      expect(est.totalBytes).toBe(BASE.modelSizeBytes + RUNTIME_OVERHEAD_BYTES_AT_512)
     }
   })
 
-  it('unknown model size yields a KV-only total', () => {
+  it('unknown model size yields a KV + overhead total', () => {
     const est = estimateMemory({ ...BASE, modelSizeBytes: 0 })
     expect(est.weightsBytes).toBe(0)
-    expect(est.totalBytes).toBe(4096 * KV_BYTES_PER_TOKEN_F16)
+    expect(est.totalBytes).toBe(4096 * KV_BYTES_PER_TOKEN_F16 + RUNTIME_OVERHEAD_BYTES_AT_512)
+  })
+
+  it('nothing known prices nothing: no weights and no ctx means no overhead either', () => {
+    const est = estimateMemory({ ...BASE, modelSizeBytes: 0, ctxSize: 0 })
+    expect(est.overheadBytes).toBe(0)
+    expect(est.totalBytes).toBe(0)
+    expect(est.headroom).toBe('unknown')
   })
 
   it('available memory prefers the free probe and falls back to total', () => {
@@ -95,14 +110,66 @@ describe('estimateMemory', () => {
       estimateMemory({ ...BASE, freeMemBytes: 0, totalMemBytes: 2 * GIB }).headroom
     ).toBe('over')
     // Tight: fits but the remaining gap is below the 2 GiB threshold
-    const tightAvailable = BASE.modelSizeBytes + 4096 * KV_BYTES_PER_TOKEN_F16 + HEADROOM_TIGHT_GAP_BYTES - 1
-    expect(estimateMemory({ ...BASE, freeMemBytes: 0, totalMemBytes: tightAvailable }).headroom).toBe('tight')
+    expect(
+      estimateMemory({ ...BASE, freeMemBytes: 0, totalMemBytes: BASE_TOTAL + HEADROOM_TIGHT_GAP_BYTES - 1 }).headroom
+    ).toBe('tight')
     // Unknown: no memory probe
     expect(estimateMemory({ ...BASE, freeMemBytes: 0, totalMemBytes: 0 }).headroom).toBe('unknown')
     // Unknown: nothing to compare (no weights, no ctx)
     expect(
       estimateMemory({ ...BASE, modelSizeBytes: 0, ctxSize: 0 }).headroom
     ).toBe('unknown')
+  })
+
+  it('a device with exactly weights + KV free is over, not tight: the guard prices overhead too', () => {
+    // The regression this term exists for: with the old weights + KV estimate
+    // this device had a zero gap and read "偏紧"; the backend's start guard
+    // (core/memfit.go) refuses the same plan outright.
+    const available = BASE.modelSizeBytes + 4096 * KV_BYTES_PER_TOKEN_F16
+    const est = estimateMemory({ ...BASE, freeMemBytes: 0, totalMemBytes: available })
+    expect(est.totalBytes).toBe(available + RUNTIME_OVERHEAD_BYTES_AT_512)
+    expect(est.headroom).toBe('over')
+  })
+
+  it('μBatch scales the overhead term linearly, as the backend reserves it', () => {
+    // The same law as core/autotune.go's runtimeOverheadBytes: the magnitude is
+    // the phone's (1.19 GB beyond weights + KV at ubatch 512, rounded up), the
+    // linearity is the M2 sweep (128/256/512/1024/2048 → 114/248/518/1051/2130
+    // MiB, i.e. the term doubles when μBatch doubles).
+    expect(estimateMemory({ ...BASE, ubatchSize: 1024 }).overheadBytes).toBe(2 * RUNTIME_OVERHEAD_BYTES_AT_512)
+    expect(estimateMemory({ ...BASE, ubatchSize: 256 }).overheadBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512 / 2)
+    // A bigger μBatch can turn an otherwise comfortable device tight.
+    const available = BASE_TOTAL + HEADROOM_TIGHT_GAP_BYTES + 1
+    expect(estimateMemory({ ...BASE, freeMemBytes: 0, totalMemBytes: available }).headroom).toBe('ok')
+    expect(
+      estimateMemory({ ...BASE, ubatchSize: 2048, freeMemBytes: 0, totalMemBytes: available }).headroom
+    ).toBe('over')
+  })
+
+  it('a missing μBatch charges the default 512, the llama-server default', () => {
+    for (const ub of [0, -512, Number.NaN]) {
+      expect(estimateMemory({ ...BASE, ubatchSize: ub }).overheadBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512)
+    }
+  })
+})
+
+describe('runtimeOverheadBytes', () => {
+  it('is the constant at the reference μBatch and linear through the origin', () => {
+    expect(runtimeOverheadBytes(512)).toBe(RUNTIME_OVERHEAD_BYTES_AT_512)
+    expect(runtimeOverheadBytes(128)).toBe(RUNTIME_OVERHEAD_BYTES_AT_512 / 4)
+    expect(runtimeOverheadBytes(2048)).toBe(4 * RUNTIME_OVERHEAD_BYTES_AT_512)
+    expect(runtimeOverheadBytes(1024) + runtimeOverheadBytes(2048)).toBe(6 * RUNTIME_OVERHEAD_BYTES_AT_512)
+  })
+
+  it('falls back to the default for absent or non-positive values', () => {
+    for (const ub of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(runtimeOverheadBytes(ub)).toBe(RUNTIME_OVERHEAD_BYTES_AT_512)
+    }
+  })
+
+  it('floors a fractional μBatch to whole tokens', () => {
+    // The form field is a token count; 768.5 is charged as 768.
+    expect(runtimeOverheadBytes(768.5)).toBe(Math.round((RUNTIME_OVERHEAD_BYTES_AT_512 * 768) / 512))
   })
 })
 
@@ -155,6 +222,7 @@ describe('memorySummaryRows', () => {
     const est: MemoryEstimate = {
       weightsBytes: 0,
       kvBytes: 0,
+      overheadBytes: 0,
       totalBytes: 0,
       kvSavedBytes: 0,
       availableBytes: 0,

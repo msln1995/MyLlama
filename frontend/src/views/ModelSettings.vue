@@ -528,7 +528,7 @@ const showPortraitSummary = computed(() => platformState.value.isTablet)
 // Weights term: the scanned GGUF file size looked up by model name (0 while
 // unknown). Memory terms: the system snapshot captured on mount (0 = probe
 // unavailable). The estimate is a pure computed over the live form values, so
-// every edit (ctx length, KV quant types, threads) updates both placements
+// every edit (ctx length, KV quant types, μBatch, threads) updates both placements
 // immediately. See lib/modelMemory.ts for the honesty rules (unknown inputs
 // drop their rows instead of guessing).
 const GIB = 1024 * 1024 * 1024
@@ -542,6 +542,7 @@ const memoryEstimate = computed(() =>
     ctxSize: Number(cfg.ctxSize) || 0,
     cacheTypeK: cfg.cacheTypeK,
     cacheTypeV: cfg.cacheTypeV,
+    ubatchSize: Number(cfg.ubatchSize) || 0,
     totalMemBytes: sysTotalBytes.value,
     freeMemBytes: sysFreeBytes.value,
   })
