@@ -674,6 +674,13 @@ const (
 	tuneComputeBufLargeFrom = 16384
 	tuneComputeBufHugeMB    = 512
 	tuneComputeBufHugeFrom  = 65536
+	// A CPU-only load also keeps resident what never touches VRAM: the batch
+	// compute buffers, graph scratch and sampler arenas. Measured on an
+	// Exynos 1080 phone running a 4.17 GB Qwen3.5-4B at n_batch 2048:
+	// steady-state RSS minus weights minus f16 KV was 1.19 GB at ctx 4096 and
+	// 1.10 GB at ctx 32768, i.e. the term is context-independent and the
+	// ctx-keyed VRAM curve above (384 MB base) does not cover it. Rounded up.
+	tuneCPURuntimeOverheadMB = 1280
 	// Flash-attention headroom guard: if the chosen f16 full-offload plan
 	// leaves less than 15% of usable VRAM free and a q8_0 plan buys a larger
 	// context, prefer the q8_0 plan.
@@ -809,8 +816,8 @@ func tuneModelConfig(hw tuneHardware, m tuneModel) ModelConfig {
 //
 // Strategy:
 //  1. No usable GPU → CPU-only plan: GPULayers=0, FlashAttn off, f16 cache
-//     (no cache-type written), largest ladder context whose weights + KV fit
-//     in usable RAM (smallest entry when none fits).
+//     (no cache-type written), largest ladder context whose weights + KV + CPU
+//     runtime overhead fit in usable RAM (smallest entry when none fits).
 //  2. GPU present → try full offload first:
 //     A) f16 KV everywhere, or B) q8_0 KV (NVIDIA only, 0.53125 the size).
 //     Prefer A unless B enables a strictly larger context, or A leaves less
@@ -905,26 +912,29 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	cfg := defaultModelConfig()
 	cfg.Threads = threads
 
-	// ramCtxSize picks the largest ladder context whose f16 weights + KV fit
-	// in usable RAM, falling back to the smallest ladder entry. Shared by the
-	// CPU-only plan and the Metal plan (unified memory bounds both the same
-	// way).
-	ramCtxSize := func() int {
+	// ramCtxSize picks the largest ladder context whose f16 weights + KV plus
+	// the given reserve fit in usable RAM, falling back to the smallest ladder
+	// entry. The reserve is the memory a load needs that is neither weights nor
+	// KV; the CPU-only plan passes tuneCPURuntimeOverheadMB (see its
+	// measurement note), the Metal plan passes 0 to stay byte-identical — no
+	// Apple measurement isolates that term yet, so it is not guessed there.
+	ramCtxSize := func(reserve float64) int {
 		for _, ctx := range ladder {
-			if w+kvPerTok*float64(ctx) <= usableRAM {
+			if w+kvPerTok*float64(ctx)+reserve <= usableRAM {
 				return ctx
 			}
 		}
 		return ladder[len(ladder)-1]
 	}
 
-	// cpuOnlyPlan: no GPU offload; largest ladder context whose weights + KV
-	// fit in usable RAM, falling back to the smallest ladder entry.
+	// cpuOnlyPlan: no GPU offload; largest ladder context whose weights + KV +
+	// CPU runtime overhead fit in usable RAM, falling back to the smallest
+	// ladder entry.
 	cpuOnlyPlan := func() {
 		cfg.GPULayers = "0"
 		cfg.FlashAttn = false
 		cfg.CacheTypeK, cfg.CacheTypeV = "", ""
-		cfg.CtxSize = ramCtxSize()
+		cfg.CtxSize = ramCtxSize(tuneCPURuntimeOverheadMB * MB)
 	}
 
 	// Metal plan (Apple Silicon): unified memory puts every weight one
@@ -941,7 +951,7 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 		cfg.GPULayers = "all"
 		cfg.FlashAttn = false
 		cfg.CacheTypeK, cfg.CacheTypeV = "", ""
-		cfg.CtxSize = ramCtxSize()
+		cfg.CtxSize = ramCtxSize(0)
 		return cfg
 	}
 

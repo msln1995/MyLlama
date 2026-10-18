@@ -715,11 +715,13 @@ func TestTuneModelConfig(t *testing.T) {
 			wantGPU: "36", wantCtx: 8192, wantFlash: true, wantCacheK: "", wantCacheV: "", wantThreads: 8,
 		},
 		{
-			// CPU-only: 65536 needs 13824+3240 = 17064 > 15.3 GiB; 32768 fits
-			// at 13824+1620 = 15444.
+			// CPU-only: usable RAM 15667 MiB (min(18, 27.9)*0.85). The plan pays
+			// the runtime overhead on top of weights + f16 KV, so 16384 is
+			// 13824+810+1280 = 15914 > 15667 and the largest fitting tier is
+			// 8192 at 13824+405+1280 = 15509.
 			name: "23B without GPU: CPU-only, largest ctx fitting usable RAM",
 			hw:   baseNone, tm: tm23B,
-			wantGPU: "0", wantCtx: 32768, wantFlash: false, wantCacheK: "", wantCacheV: "", wantThreads: 8,
+			wantGPU: "0", wantCtx: 8192, wantFlash: false, wantCacheK: "", wantCacheV: "", wantThreads: 8,
 		},
 		{
 			// AMD (no q8_0 plan): 65536 = 5837+10240+1152 = 17229 > 15684;
@@ -1139,11 +1141,14 @@ func TestTuneModelConfigMetal(t *testing.T) {
 	}
 
 	// darwin-amd64: the x64 release is CPU-only (no GPU entry at all → vendor
-	// none) — a MoE model plans CPU-only, no cpu-moe flags.
+	// none) — a MoE model plans CPU-only, no cpu-moe flags. Usable RAM stays
+	// 20889.6 MiB, but the CPU-only plan also pays the 1280 MiB runtime
+	// overhead: 131072 is 13435+6768+1280 = 21483 > 20889.6, so 65536
+	// (13435+3384+1280 = 18099) is the largest fitting tier.
 	hwCPUOnly := tuneHardware{GPUVendor: vendorNone, RAMTotalGB: 32, RAMFreeGB: 24, PhysicalCores: 8, LogicalCPUs: 16}
 	cfg = tuneModelConfig(hwCPUOnly, tmGLM)
-	if cfg.GPULayers != "0" || cfg.CtxSize != 131072 {
-		t.Errorf("darwin-amd64 CPU-only = gpuLayers %q ctx %d, want 0 / 131072", cfg.GPULayers, cfg.CtxSize)
+	if cfg.GPULayers != "0" || cfg.CtxSize != 65536 {
+		t.Errorf("darwin-amd64 CPU-only = gpuLayers %q ctx %d, want 0 / 65536", cfg.GPULayers, cfg.CtxSize)
 	}
 	if cfg.FlashAttn || cfg.CPUMoe || cfg.NCpuMoe != 0 {
 		t.Errorf("darwin-amd64 plan must be plain CPU-only: %+v", cfg)

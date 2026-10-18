@@ -160,12 +160,13 @@ func startServerInternalWithModel(requested string) error {
 		prev := directServingModel
 		serverMu.Unlock()
 		action := directStartDecision(running, prev, m.Name)
+		mcfg := directModelConfig(cfgs, m.Name)
 		if action != directStartNoop {
-			// Checked before the restart decision is acted on: a model whose
-			// weights exceed the available memory gets the process killed by
+			// Checked before the restart decision is acted on: a load that
+			// needs more memory than the device has gets its process killed by
 			// the low-memory killer instead of failing as an error, and an
 			// already-running server must not be lost to the attempt.
-			if err := modelLoadFitError(m); err != nil {
+			if err := modelLoadFitError(m, mcfg); err != nil {
 				addServerLog("[WARN] " + err.Error())
 				return err
 			}
@@ -180,7 +181,7 @@ func startServerInternalWithModel(requested string) error {
 				return err
 			}
 		}
-		llamaServer, args, err = buildServerCommand(cfg, "", &directModel{info: m, cfg: cfgs[m.Name]})
+		llamaServer, args, err = buildServerCommand(cfg, "", &directModel{info: m, cfg: mcfg})
 		if err != nil {
 			return err
 		}
@@ -343,6 +344,20 @@ func spawnServerProcess(llamaServer string, args []string, cfg ServerConfig, res
 	}(cmd, tailer, done)
 
 	return nil
+}
+
+// directModelConfig resolves the per-model config for one Android direct-mode
+// start: a model with no stored config falls back to defaultModelConfig(), the
+// same rule the GetModelConfig binding uses. The fallback matters because the
+// preset writer only emits --ctx-size when the config carries one, and
+// llama-server's own default is "0 = the context the model was trained with" —
+// hundreds of thousands of tokens of KV on a phone, which the low-memory killer
+// then fights over. The remaining defaults match llama-server's own figures.
+func directModelConfig(cfgs map[string]ModelConfig, name string) ModelConfig {
+	if c, ok := cfgs[name]; ok {
+		return c
+	}
+	return defaultModelConfig()
 }
 
 // directModel carries the resolved Android direct-mode launch target to
