@@ -259,6 +259,52 @@ func TestTunedQ8PlanPassesTheMemoryGuard(t *testing.T) {
 	}
 }
 
+// TestTunedUbatchPlanPassesTheMemoryGuard is the same loop closed for the other
+// pricing input: a model whose user raised --ubatch-size must get a plan priced
+// at that ubatch, or the guard refuses the configuration the tuner wrote.
+//
+// Same phone fixture (4 GiB weights, 48 KiB of f16 KV per token, q8_0 pinned, 10
+// GiB free of 12): at the carried ubatch 2048 the runtime overhead is 5 GiB, so
+// nothing but the smallest ladder rung is affordable and the load costs
+// 4 + 5 GiB + the 2048-token cache. Repriced at the default 1.25 GiB reserve the
+// plan would have reached 131072 — which at ubatch 2048 needs 12.19 GiB, more
+// than the device has.
+func TestTunedUbatchPlanPassesTheMemoryGuard(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMemfitGGUF(t, dir)
+	m := ModelInfo{Name: "phone-model", Path: path, SizeBytes: 4 * (1 << 30)}
+
+	metrics, ok := readGGUFModelMetrics(path)
+	if !ok {
+		t.Fatal("fixture GGUF is not readable")
+	}
+	tm := buildTuneModel(metrics, ok, tuneWeightsBytes(m))
+	tm.PinnedQ8KV = true
+	tm.UBatchSize = 2048
+	cfg := tuneModelConfig(tuneHardware{
+		GPUVendor:       vendorNone,
+		RAMTotalGB:      12,
+		RAMFreeGB:       10,
+		PhysicalCores:   8,
+		AndroidPlatform: true,
+	}, tm)
+	if cfg.UBatchSize != 2048 || cfg.CtxSize != tuneCtxMin {
+		t.Fatalf("tuner plan = ubatch %d ctx %d, want 2048 / %d: the 5 GiB overhead must be paid in context",
+			cfg.UBatchSize, cfg.CtxSize, tuneCtxMin)
+	}
+
+	pinProbeFreeMemoryGB(t, 10)
+	if err := modelLoadFitError(m, cfg); err != nil {
+		t.Errorf("modelLoadFitError(ubatch-2048 plan) = %v, want nil: the guard must not refuse the plan the tuner emitted", err)
+	}
+	// The mismatch this closes: the same model tuned at the default ubatch keeps
+	// its 131072 window, and adding the user's 2048 ubatch afterwards is a start
+	// that gets refused.
+	if err := modelLoadFitError(m, ModelConfig{CtxSize: 131072, CacheTypeK: "q8_0", CacheTypeV: "q8_0", UBatchSize: 2048}); err == nil {
+		t.Error("modelLoadFitError(131072 window at ubatch 2048) = nil, want a refusal: the fixture no longer straddles the boundary")
+	}
+}
+
 // TestModelLoadFitError verifies the scanned-model entry point against the
 // probe: the overhead and the context are part of the decision, and a failed
 // probe never blocks a start.

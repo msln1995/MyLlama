@@ -24,8 +24,13 @@ MyLlama 的硬件感知一键调优：读 GGUF 真实指标 + 本地硬件快照
 `buildTuneModel`（把指标折算成输入）。核心没有任何可变性可出 bug。
 
 绑定链路（`TuneModelConfig(modelID)`）：按扫描名找模型 → 解析 GGUF → `buildTuneModel` →
-`tuneModelConfig` → **`SaveModelConfig` 持久化**并返回 `ModelConfig`；GGUF 不可读时打固定措辞的
-`[INFO]`（`tuneFallbackLogLine`，可 grep）并走保守回退。前端 `ModelSettings.vue` 调
+`tuneModelConfig` → **`mergeTunedConfig(existing, plan)`**（只把 tuner 负责的字段
+——线程 / GPU 层数 / 上下文 / Flash Attention / KV 类型 / cpu-moe / ctx-checkpoints / μBatch——
+覆盖为新方案，其余用户手选字段原样保留）→ **`SaveModelConfig` 持久化**并返回 `ModelConfig`；
+GGUF 不可读时打固定措辞的
+`[INFO]`（`tuneFallbackLogLine`，可 grep）并走保守回退。μBatch 同时经
+`tuneModel.UBatchSize` 回灌进方案，让内存预算按用户真实 ubatch 计价（与启动前的
+`modelLoadBytes` 一致，否则守护会拒绝调优刚写下的方案）。前端 `ModelSettings.vue` 调
 `wails.ts` 的 `tuneModelConfig`，把返回值套进表单后由用户确认保存；成功提示的插值参数由
 `lib/modelTune.ts` 的 `tunedSummaryParams` 生成（`cacheTypeK` 为空串 → 展示为 "f16"，空串即
 后端默认 f16，不写 cache-type 行）。

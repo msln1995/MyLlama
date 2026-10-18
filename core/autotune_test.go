@@ -1281,6 +1281,175 @@ func TestPinnedQ8KVRequiresThePair(t *testing.T) {
 	}
 }
 
+// TestTuneModelConfigPricesTheCarriedUBatch pins the RAM-bounded plans against
+// the user's own --ubatch-size: the runtime overhead is linear in ubatch (1.25
+// GiB at 512, 5 GiB at 2048), so a model raised to 2048 for faster prefill must
+// pay for it out of context, not get a plan sized for 512 that the start-time
+// memory guard then refuses for charging the saved config's real ubatch.
+//
+// Fixture: 6 GiB of weights, 32 KiB of f16 KV per token, 16 GB of RAM (12.24 GiB
+// usable). At the default ubatch the 131072 rung costs 6 + 4 + 1.25 = 11.25 GiB
+// and is affordable; at 2048 the same rung costs 15 GiB, 65536 costs 13 GiB and
+// 32768 costs 12 GiB, so the plan drops two rungs.
+func TestTuneModelConfigPricesTheCarriedUBatch(t *testing.T) {
+	tm := tuneModel{WeightsBytes: 6 << 30, Layers: 32, KVBytesPerTokPerLayerF16: 1024, TrainCtx: 262144}
+	hw := tuneHardware{GPUVendor: vendorNone, RAMTotalGB: 16, RAMFreeGB: 16, PhysicalCores: 8, LogicalCPUs: 8}
+
+	cfg := tuneModelConfig(hw, tm)
+	if cfg.UBatchSize != 512 || cfg.CtxSize != 131072 {
+		t.Errorf("default ubatch: plan = ubatch %d ctx %d, want 512 / 131072", cfg.UBatchSize, cfg.CtxSize)
+	}
+
+	tm.UBatchSize = 2048
+	cfg = tuneModelConfig(hw, tm)
+	if cfg.UBatchSize != 2048 {
+		t.Errorf("carried ubatch: plan emits ubatch %d, want 2048 (the plan must price what it writes)", cfg.UBatchSize)
+	}
+	if cfg.CtxSize != 32768 {
+		t.Errorf("carried ubatch: ctx = %d, want 32768 (the 5 GiB overhead costs two ladder rungs)", cfg.CtxSize)
+	}
+	// Batch size is not a pricing input and is not the tuner's to decide; the
+	// plan keeps its default and the merge keeps the user's value.
+	if cfg.BatchSize != 2048 {
+		t.Errorf("batch size = %d, want the plan default 2048", cfg.BatchSize)
+	}
+
+	// The Apple Silicon plan shares the budget, so it reacts to ubatch the same
+	// way (no Metal pool figure here, so the RAM budget is the only ceiling).
+	apple := hw
+	apple.GPUVendor = vendorApple
+	if cfg := tuneModelConfig(apple, tm); cfg.CtxSize != 32768 || cfg.UBatchSize != 2048 {
+		t.Errorf("metal plan = ubatch %d ctx %d, want 2048 / 32768", cfg.UBatchSize, cfg.CtxSize)
+	}
+}
+
+// TestMergeTunedConfigKeepsUserKnobs pins the ownership split: a re-tune writes
+// the fields the plan decides and leaves every field the user picked. Before the
+// merge the plan (built from defaultModelConfig) replaced the whole struct, so
+// auto-tune silently discarded speculative decoding, the mmproj override, the
+// load mode, the GPU split, rope scaling and the reasoning toggle.
+func TestMergeTunedConfigKeepsUserKnobs(t *testing.T) {
+	existing := ModelConfig{
+		Threads: 2, GPULayers: "8", CtxSize: 1024,
+		BatchSize: 4096, UBatchSize: 1024,
+		FlashAttn: true, CacheTypeK: "q4_0", CacheTypeV: "q4_0",
+		LoadMode: "mmap", SplitMode: "layer", TensorSplit: "3,1", MainGPU: 1,
+		RopeScaling: "yarn", RopeScale: 2, MMProj: "mmproj-model.gguf",
+		Reasoning: true, SpecType: "ngram-mod", SpecDraftNMax: 8,
+		CPUMoe: true, NCpuMoe: 3,
+	}
+	plan := ModelConfig{
+		Threads: 8, GPULayers: "all", CtxSize: 32768,
+		BatchSize: 2048, UBatchSize: 512,
+		CacheTypeK: "q8_0", CacheTypeV: "q8_0",
+		CtxCheckpointsOff: true,
+	}
+
+	// Every tuner-owned field is set differently in the two fixtures, and every
+	// user-owned field is set only in existing, so one comparison pins both
+	// directions of the split.
+	want := plan
+	want.BatchSize = existing.BatchSize
+	want.LoadMode = existing.LoadMode
+	want.SplitMode = existing.SplitMode
+	want.TensorSplit = existing.TensorSplit
+	want.MainGPU = existing.MainGPU
+	want.RopeScaling = existing.RopeScaling
+	want.RopeScale = existing.RopeScale
+	want.MMProj = existing.MMProj
+	want.Reasoning = existing.Reasoning
+	want.SpecType = existing.SpecType
+	want.SpecDraftNMax = existing.SpecDraftNMax
+
+	if got := mergeTunedConfig(existing, plan); got != want {
+		t.Errorf("mergeTunedConfig(user config, plan) =\n  %+v\nwant\n  %+v", got, want)
+	}
+}
+
+// TestMergeTunedConfigWithoutUserKnobsReducesToPlan proves the owned-field set
+// covers everything a plan can express: merged over a stock default config — no
+// user selection anywhere — the result is the plan itself, so no tuned value is
+// silently dropped back to a default.
+func TestMergeTunedConfigWithoutUserKnobsReducesToPlan(t *testing.T) {
+	plan := ModelConfig{
+		Threads: 4, GPULayers: "0", CtxSize: 65536,
+		BatchSize: 2048, UBatchSize: 1024,
+		CacheTypeK: "q8_0", CacheTypeV: "q8_0",
+		CtxCheckpointsOff: true,
+	}
+	if got := mergeTunedConfig(defaultModelConfig(), plan); got != plan {
+		t.Errorf("merge(defaults, plan) = %+v, want %+v", got, plan)
+	}
+}
+
+// TestTuneModelConfigBindingKeepsUserKnobs drives the whole binding — the
+// buttons' path, from the scanned model to the persisted config — because the
+// defect lived in the wiring, not in the plan: auto-tune saved its plan over the
+// entire per-model config and dropped everything the user had picked. The
+// fixture GGUF is unreadable on purpose, so the plan runs the documented
+// conservative fallback and the assertions only check what no plan can produce
+// (ctx 1, an "auto" offload value, a q4_0 pair), which keeps the test
+// machine-neutral. The RAM-bandwidth calibration is stubbed so the tune costs no
+// real measurement.
+func TestTuneModelConfigBindingKeepsUserKnobs(t *testing.T) {
+	withTempCwd(t)
+	saveConfigState(t)
+	stubBench(t, 60, nil, 0)
+
+	dir := t.TempDir()
+	modelDownloadDirMu.Lock()
+	modelDownloadDirOverride = dir
+	modelDownloadDirMu.Unlock()
+	modelsDirMu.Lock()
+	customModelsDir = ""
+	modelsDirMu.Unlock()
+	t.Cleanup(func() {
+		modelDownloadDirMu.Lock()
+		modelDownloadDirOverride = ""
+		modelDownloadDirMu.Unlock()
+		modelsDirMu.Lock()
+		customModelsDir = ""
+		modelsDirMu.Unlock()
+	})
+	makeVariant(t, dir, "tune-author", "tune-model", "model.gguf", 1024)
+	scanned := scanModels()
+	if len(scanned) == 0 {
+		t.Fatal("the fixture model is not scannable")
+	}
+	id := scanned[0].Name
+
+	app := &App{}
+	user := ModelConfig{
+		Threads: 1, GPULayers: "auto", CtxSize: 1,
+		BatchSize: 4096, UBatchSize: 2048,
+		CacheTypeK: "q4_0", CacheTypeV: "q4_0",
+		LoadMode: "mmap", MMProj: "mmproj.gguf",
+		Reasoning: true, SpecType: "ngram-mod", SpecDraftNMax: 6,
+	}
+	if err := app.SaveModelConfig(id, user); err != nil {
+		t.Fatalf("SaveModelConfig(%s) = %v", id, err)
+	}
+
+	got, err := app.TuneModelConfig(id)
+	if err != nil {
+		t.Fatalf("TuneModelConfig(%s) = %v", id, err)
+	}
+	if got.BatchSize != user.BatchSize || got.LoadMode != user.LoadMode || got.MMProj != user.MMProj ||
+		!got.Reasoning || got.SpecType != user.SpecType || got.SpecDraftNMax != user.SpecDraftNMax {
+		t.Errorf("tune dropped user knobs: got %+v, want the selections of %+v", got, user)
+	}
+	if got.UBatchSize != user.UBatchSize {
+		t.Errorf("ubatch = %d, want %d: the plan prices its RAM budget at it and must keep writing it", got.UBatchSize, user.UBatchSize)
+	}
+	if got.CtxSize <= 1 || got.GPULayers == "auto" || got.CacheTypeK == "q4_0" || got.CacheTypeV == "q4_0" {
+		t.Errorf("tuner-owned fields kept the user's placeholders: ctx %d gpuLayers %q K/V %q/%q",
+			got.CtxSize, got.GPULayers, got.CacheTypeK, got.CacheTypeV)
+	}
+	if persisted := app.GetModelConfig(id); persisted != got {
+		t.Errorf("persisted config %+v differs from the returned %+v", persisted, got)
+	}
+}
+
 // ─── Asymmetric-CPU awareness ────────────────────────────────────
 
 // TestTuneModelConfigClusterThreadCap verifies the performance-cluster thread

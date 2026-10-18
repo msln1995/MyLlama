@@ -578,6 +578,14 @@ type tuneModel struct {
 	// hardware (see the Metal plan note) and the only one the NVIDIA A/B merge
 	// ever selects.
 	PinnedQ8KV bool
+	// UBatchSize carries the model's existing --ubatch-size into the plan so the
+	// RAM-bounded budget is priced at the ubatch the plan actually emits
+	// (runtimeOverheadBytes is linear in ubatch: +2130 MiB measured at 2048 on an
+	// M2 against +518 MiB at 512). A user who raised it for faster prefill
+	// therefore pays for it with context instead of silently getting a plan
+	// sized for 512 that the start-time memory guard then refuses — the guard
+	// charges the saved config's own ubatch. 0 keeps the plan default.
+	UBatchSize int
 	// TrainCtx is the trained context window; <=0 is treated as 32768.
 	TrainCtx int
 	// ExpertBytes / DenseBytes split WeightsBytes into MoE expert weights and
@@ -855,6 +863,37 @@ func tuneModelConfig(hw tuneHardware, m tuneModel) ModelConfig {
 	return cfg
 }
 
+// mergeTunedConfig folds a fresh plan over the model's existing per-model config
+// and returns what gets persisted. The plan is authoritative only for the fields
+// it actually decides from the GGUF metrics and the hardware snapshot: threads,
+// GPU layers, context size, flash-attn, the K/V cache pair, the MoE split,
+// context checkpoints and the ubatch it was priced at. Everything else the user
+// picked on the model settings page survives a re-tune — batch size, load mode
+// (mmap/mlock), the multi-GPU split, the mmproj override, rope scaling, the
+// reasoning toggle and speculative decoding. Before this, the plan started from
+// defaultModelConfig() and was saved over the whole struct, so one click on
+// auto-tune silently discarded every other knob, including a speculative-decoding
+// setting the user had deliberately turned on.
+//
+// UBatchSize is in the owned set because the RAM-bounded plans now price their
+// budget at the carried value (see tuneModel.UBatchSize): the merged config and
+// the start-time memory guard must charge the same ubatch, or the guard refuses
+// the plan the tuner just emitted.
+func mergeTunedConfig(existing, tuned ModelConfig) ModelConfig {
+	out := existing
+	out.Threads = tuned.Threads
+	out.GPULayers = tuned.GPULayers
+	out.CtxSize = tuned.CtxSize
+	out.UBatchSize = tuned.UBatchSize
+	out.FlashAttn = tuned.FlashAttn
+	out.CacheTypeK = tuned.CacheTypeK
+	out.CacheTypeV = tuned.CacheTypeV
+	out.CPUMoe = tuned.CPUMoe
+	out.NCpuMoe = tuned.NCpuMoe
+	out.CtxCheckpointsOff = tuned.CtxCheckpointsOff
+	return out
+}
+
 // tuneModelConfigPlan is the sizing core of tuneModelConfig.
 //
 // Strategy:
@@ -982,6 +1021,11 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 
 	cfg := defaultModelConfig()
 	cfg.Threads = threads
+	// The carried ubatch must land on cfg before the reserve is priced, so the
+	// ladder and the emitted plan agree on one number (see tuneModel.UBatchSize).
+	if m.UBatchSize > 0 {
+		cfg.UBatchSize = m.UBatchSize
+	}
 
 	// ramReserve: what a load keeps resident beyond weights + KV, priced at the
 	// ubatch the plan emits (the default 512 unless a caller changed it).
@@ -1093,6 +1137,9 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 			out.CtxSize = moeCtx
 			out.FlashAttn = nvidia
 			out.CPUMoe = true
+			// The carried ubatch belongs to the user, not to the plan shape, so
+			// the cpu-moe plan emits it too (see tuneModel.UBatchSize).
+			out.UBatchSize = cfg.UBatchSize
 			// Threads 0 omits the threads line so llama-server sizes threads
 			// automatically: with expert GEMMs running on the CPU the auto
 			// sizing measured >= pinning threads to the physical core count.

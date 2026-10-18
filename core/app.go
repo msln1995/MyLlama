@@ -763,9 +763,11 @@ func (a *App) SaveModelConfig(modelID string, config ModelConfig) error {
 
 // TuneModelConfig computes hardware-aware optimal inference parameters for the
 // model (GGUF metrics + GPU/CPU/RAM snapshot), persists them via SaveModelConfig
-// validation, and returns the applied config. A pinned q8_0 K/V pair is the one
-// existing selection carried into the plan: it is priced at the q8_0 footprint so
-// the freed cache converts into context instead of only headroom.
+// validation, and returns the applied config. Two existing selections are
+// carried into the plan: a pinned q8_0 K/V pair, priced at the q8_0 footprint so
+// the freed cache converts into context instead of only headroom, and the
+// model's ubatch size, which the RAM budget is charged at. Every other field of
+// the current config survives the tune untouched — see mergeTunedConfig.
 func (a *App) TuneModelConfig(modelID string) (ModelConfig, error) {
 	var model *ModelInfo
 	models := scanModels()
@@ -783,9 +785,11 @@ func (a *App) TuneModelConfig(modelID string) (ModelConfig, error) {
 	if !ok {
 		log.Println(tuneFallbackLogLine(modelID))
 	}
+	existing := a.GetModelConfig(modelID)
 	tm := buildTuneModel(metrics, ok, tuneWeightsBytes(*model))
-	tm.PinnedQ8KV = pinnedQ8KV(a.GetModelConfig(modelID))
-	cfg := tuneModelConfig(a.tuneHardware(), tm)
+	tm.PinnedQ8KV = pinnedQ8KV(existing)
+	tm.UBatchSize = existing.UBatchSize
+	cfg := mergeTunedConfig(existing, tuneModelConfig(a.tuneHardware(), tm))
 	if err := a.SaveModelConfig(modelID, cfg); err != nil {
 		return ModelConfig{}, fmt.Errorf(tr("保存调优参数失败: %w", "failed to save tuned config: %w"), err)
 	}
