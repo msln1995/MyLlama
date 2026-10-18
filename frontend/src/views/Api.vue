@@ -168,11 +168,9 @@
               <button type="button" class="cfg-done" @click="showCfg = false">{{ t('api.done') }}</button>
             </div>
           </div>
-          <!-- Restart failure banner: a dedicated reactive state instead of a
-               pushed log line — the 1s incremental log poll replaces the view
-               wholesale on retention gaps and would wipe log-pushed errors
-               (issue #28 frontend half). -->
-          <p v-if="restartError" class="restart-error" role="alert">{{ restartError }}</p>
+          <!-- Start / stop / restart / model-switch failure banner: a dedicated
+               reactive state instead of a pushed log line (see actionError). -->
+          <p v-if="actionError" class="action-error" role="alert">{{ actionError }}</p>
         </div>
 
         <!-- Right column (tablet draft ⑬): the speed island leads on tablet
@@ -569,14 +567,23 @@ async function pollServerLog() {
 // Button tri-state driven by serverRunning + busy: start (stopped enabled), stop/restart (running enabled);
 // busy=true disables all during execution. Status is refreshed asynchronously by checkServerStatus;
 // no optimistic local flipping (#14)
+//
+// Start/stop/restart/model-switch failures all land in this banner rather than a
+// pushed log line: the 1s incremental log poll replaces serverLog wholesale on
+// retention gaps and would wipe a log-pushed error (issue #28 frontend half),
+// and on the phone tier the console clips each line at the right edge — a
+// memory-fit refusal reads as "the tap did nothing" if it lives only there.
+const actionError = ref('')
+
 async function doStart() {
   if (busy.value || serverRunning.value) return
   busy.value = true
+  actionError.value = ''
   try {
     await refreshModels() // Force a model rescan before start so presets use the latest model list (#18)
     await startServer()
   } catch (e) {
-    serverLog.value.push(t('api.toggleFailed', { msg: e instanceof Error ? e.message : String(e) }))
+    actionError.value = t('api.toggleFailed', { msg: e instanceof Error ? e.message : String(e) })
   } finally {
     busy.value = false
     setTimeout(checkServerStatus, 500)
@@ -586,10 +593,11 @@ async function doStart() {
 async function doStop() {
   if (busy.value || !serverRunning.value) return
   busy.value = true
+  actionError.value = ''
   try {
     await stopServer()
   } catch (e) {
-    serverLog.value.push(t('api.toggleFailed', { msg: e instanceof Error ? e.message : String(e) }))
+    actionError.value = t('api.toggleFailed', { msg: e instanceof Error ? e.message : String(e) })
   } finally {
     busy.value = false
     setTimeout(checkServerStatus, 500)
@@ -598,20 +606,16 @@ async function doStop() {
 
 // Restart = the shared stop → wait-for-stopped → start routine
 // (lib/serverControls, issue #28): an immediate stop→start used to hit the
-// backend's already-running guard and silently no-op the start half. Failure
-// surfaces in the restartError banner instead of a pushed log line — the 1s
-// incremental log poll replaces serverLog wholesale on retention gaps and
-// would wipe a log-pushed error.
-const restartError = ref('')
+// backend's already-running guard and silently no-op the start half.
 
 async function doRestart() {
   if (busy.value || !serverRunning.value) return
   busy.value = true
-  restartError.value = ''
+  actionError.value = ''
   try {
     await restartServer()
   } catch (e) {
-    restartError.value = t('api.restartFailed', { msg: e instanceof Error ? e.message : String(e) })
+    actionError.value = t('api.restartFailed', { msg: e instanceof Error ? e.message : String(e) })
   } finally {
     busy.value = false
     setTimeout(checkServerStatus, 500)
@@ -642,11 +646,12 @@ function logLineClass(line: string): string {
 // so Chat's deterministic single-model memory runs after it: unload every
 // OTHER loaded model (best effort) so the tapped chip's model is the only
 // resident and lazy-loads on the next request. On Android (direct mode) the
-// backend itself restarts the service with the tapped model. Errors land in
-// the log console exactly like start/stop failures.
+// backend itself restarts the service with the tapped model. Errors land in the
+// same banner as start/stop failures.
 async function loadModel(m: string) {
   if (switchingModel.value || m === activeModelName.value) return
   switchingModel.value = true
+  actionError.value = ''
   try {
     if (!serverRunning.value) {
       await refreshModels()
@@ -669,7 +674,7 @@ async function loadModel(m: string) {
       }
     }
   } catch (e) {
-    serverLog.value.push(t('api.toggleFailed', { msg: e instanceof Error ? e.message : String(e) }))
+    actionError.value = t('api.toggleFailed', { msg: e instanceof Error ? e.message : String(e) })
   } finally {
     switchingModel.value = false
     setTimeout(checkServerStatus, 500)
@@ -1073,12 +1078,17 @@ html[data-theme='dark'] .speed-baseline {
   background: var(--hover-bg);
 }
 
-/* Restart failure banner (#28): red alert line right below the action row */
-.restart-error {
+/* Action failure banner (#28): red alert box right below the action row */
+.action-error {
   margin: -4px 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--danger-bg);
   font-size: 13px;
   font-weight: 600;
+  line-height: 1.5;
   color: var(--danger);
+  overflow-wrap: anywhere;
 }
 
 /* ─── Server parameters popover ─── */
