@@ -601,29 +601,15 @@ func sampleMemLinux() (total, used uint64) {
 	return total, used
 }
 
-// sampleMemDarwin computes (total, used) bytes using `sysctl -n hw.memsize`
-// (total bytes) + `vm_stat` (free page count). Falls back to 16384 for
-// hw.pagesize on parse failure (arm64 default page size).
+// sampleMemDarwin computes (total, used) bytes from the shared macOS probe, so
+// "used" here means the same thing it does on Linux — everything the machine has
+// not got available for a new load — and file cache stops being reported as used.
 func sampleMemDarwin() (total, used uint64) {
-	out := runCmd("sysctl", "-n", "hw.memsize")
-	total, _ = strconv.ParseUint(strings.TrimSpace(out), 10, 64)
-	freePages := parseVMStat(runCmd("vm_stat"), "free")
-	if freePages == 0 {
+	total, available, ok := darwinMemoryBytes()
+	if !ok || available >= total {
 		return total, 0
 	}
-	pageSize := uint64(16384)
-	if psStr := strings.TrimSpace(runCmd("sysctl", "-n", "hw.pagesize")); psStr != "" {
-		if ps, err := strconv.ParseUint(psStr, 10, 64); err == nil && ps > 0 {
-			pageSize = ps
-		}
-	}
-	free := freePages * pageSize
-	if free <= total {
-		used = total - free
-	} else {
-		used = 0
-	}
-	return total, used
+	return total, total - available
 }
 
 // ─── GPU Sampling ─────────────────────────────────────────────────

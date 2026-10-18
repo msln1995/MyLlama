@@ -206,6 +206,10 @@ func getTotalMemoryGB() float64 {
 	return 0
 }
 
+// getFreeMemoryGB reports the memory a new load can obtain right now, in GiB —
+// "available", not "unallocated": Linux/Android read MemAvailable, Windows reads
+// FreePhysicalMemory, and macOS counts the reclaimable file cache
+// (darwinMemoryBytes). 0 means the probe got no answer.
 func getFreeMemoryGB() float64 {
 	switch runtime.GOOS {
 	case "windows":
@@ -224,16 +228,97 @@ func getFreeMemoryGB() float64 {
 			return float64(kb) / (1024 * 1024)
 		}
 	case "darwin":
-		// macOS memory pressure — approximate free
-		out := runCmd("vm_stat")
-		freePages := parseVMStat(out, "free")
-		if freePages > 0 {
-			pageSizeStr := strings.TrimSpace(runCmd("sysctl", "-n", "hw.pagesize"))
-			pageSize, err := strconv.ParseUint(pageSizeStr, 10, 64)
-			if err != nil || pageSize == 0 {
-				pageSize = 16384 // fallback for arm64
-			}
-			return float64(freePages*pageSize) / (1024 * 1024 * 1024)
+		// macOS hands out cache pages on demand, so the figure a load can get
+		// is not "unallocated RAM" (see darwinMemoryBytes).
+		if _, available, ok := darwinMemoryBytes(); ok {
+			return float64(available) / (1024 * 1024 * 1024)
+		}
+	}
+	return 0
+}
+
+// darwinMemoryBytes reads macOS's physical RAM and the memory a new load can
+// obtain right now. ok is false when neither vm_stat counter could be read, and
+// then available is 0 — the unknown-probe value every caller already treats as
+// "do not plan against this". Shared by both macOS memory surfaces (the static
+// system-info figure and the live monitor sample) so they cannot drift into two
+// different definitions of "available".
+func darwinMemoryBytes() (total uint64, available uint64, ok bool) {
+	out := runCmd("sysctl", "-n", "hw.memsize")
+	total, err := strconv.ParseUint(strings.TrimSpace(out), 10, 64)
+	if err != nil || total == 0 {
+		return 0, 0, false
+	}
+	vmStat := runCmd("vm_stat")
+	freePages := parseVMStat(vmStat, "free")
+	inactivePages := parseVMStat(vmStat, "inactive")
+	if freePages == 0 && inactivePages == 0 {
+		return total, 0, false
+	}
+	pageSize := uint64(16384)
+	if psStr := strings.TrimSpace(runCmd("sysctl", "-n", "hw.pagesize")); psStr != "" {
+		if ps, err := strconv.ParseUint(psStr, 10, 64); err == nil && ps > 0 {
+			pageSize = ps
+		}
+	}
+	swapUsed := parseSwapUsageBytes(runCmd("sysctl", "-n", "vm.swapusage"))
+	return total, darwinAvailableBytes(freePages, inactivePages, swapUsed, pageSize), true
+}
+
+// darwinAvailableBytes turns vm_stat's page counters into the memory a new load
+// can actually obtain. "Pages free" alone is the pager's un-handed-out residue:
+// macOS keeps RAM busy with file cache (the inactive queue) and evicts it the
+// moment a process asks, so a free-only reading reports a machine as full while
+// it is serving multi-GB allocations. Measured on a 24 GiB M2 running a llama-
+// server whose KV brought RSS to 3.97 GiB: free fell to 0.06 GiB, inactive held
+// 7.14 GiB, and swap did not move (3.79 GiB before and after, +193 page-ins over
+// three generations) — the free-only figure would have refused that very load
+// four times over, and with it the context the auto-tuner can buy (ctx 2048
+// instead of 16384 for a 4B Q4_K_M on that machine).
+//
+// The inactive queue is counted minus the swap already in use: reclaiming a
+// dirty inactive page costs a write-out, and a machine deep in swap is already
+// paying that bill, so its remaining cache is worth less headroom. Speculative
+// and purgeable pages are left out — they are members of the same queues
+// (measured together at 0.38 GiB on that M2) and counting them apart would
+// double-take the same RAM. The result is never below the free-only figure it
+// replaces.
+func darwinAvailableBytes(freePages, inactivePages, swapUsedBytes, pageSize uint64) uint64 {
+	free := freePages * pageSize
+	reclaimable := uint64(0)
+	if inactive := inactivePages * pageSize; inactive > swapUsedBytes {
+		reclaimable = inactive - swapUsedBytes
+	}
+	return free + reclaimable
+}
+
+// parseSwapUsageBytes reads the used figure out of `sysctl -n vm.swapusage`
+// ("total = 5120.00M  used = 3885.44M  free = 1234.56M  (encrypted)"). Any
+// unrecognisable output is 0 — no swap debt recorded.
+func parseSwapUsageBytes(out string) uint64 {
+	const (
+		kib = 1 << 10
+		mib = 1 << 20
+		gib = 1 << 30
+	)
+	fields := strings.Fields(out)
+	for i, f := range fields {
+		if f != "used" || i+2 >= len(fields) || fields[i+1] != "=" {
+			continue
+		}
+		value := fields[i+2]
+		unit := value[len(value)-1]
+		n, err := strconv.ParseFloat(strings.TrimRight(value, "KMG"), 64)
+		if err != nil || n <= 0 {
+			return 0
+		}
+		switch unit {
+		case 'K':
+			return uint64(n * kib)
+		case 'G':
+			return uint64(n * gib)
+		default: // 'M', and an unlabelled number is read as the M this tool prints
+			return uint64(n * mib)
 		}
 	}
 	return 0

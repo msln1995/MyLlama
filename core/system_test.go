@@ -72,6 +72,72 @@ func TestParseVMStat(t *testing.T) {
 	}
 }
 
+// TestDarwinAvailableBytes verifies the macOS available-memory figure counts the
+// inactive queue (which the pager hands out on demand) minus the swap already in
+// use, and never falls below the free-only figure it replaces. The fixtures use
+// a 24 GiB M2's real proportions: 4 GiB free, 7 GiB inactive, 3.75 GiB swapped.
+func TestDarwinAvailableBytes(t *testing.T) {
+	const arm64PageSize = 16384
+	gib := func(n float64) uint64 { return uint64(n * (1 << 30)) }
+	pages := func(n float64) uint64 { return gib(n) / arm64PageSize } // GiB -> page counts
+	cases := []struct {
+		name     string
+		free     uint64
+		inactive uint64
+		swap     uint64
+		pageSize uint64
+		want     uint64
+	}{
+		{"cache without swap debt counts as available", pages(4), pages(7), 0, arm64PageSize, gib(11)},
+		{"measured M2 split: swap is charged against the cache", pages(4), pages(7), gib(3.75), arm64PageSize, gib(7.25)},
+		{"swap deeper than the cache never drops below free-only", pages(4), pages(2), gib(6), arm64PageSize, gib(4)},
+		{"empty free queue still gets the reclaimable cache", 0, pages(8), gib(1), arm64PageSize, gib(7)},
+		{"4 KiB pages convert at their own size", gib(1) / 4096, 0, 0, 4096, gib(1)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := darwinAvailableBytes(c.free, c.inactive, c.swap, c.pageSize); got != c.want {
+				t.Errorf("darwinAvailableBytes(%d, %d, %d, %d) = %d, want %d",
+					c.free, c.inactive, c.swap, c.pageSize, got, c.want)
+			}
+		})
+	}
+}
+
+// TestParseSwapUsageBytes verifies reading the used figure out of
+// `sysctl -n vm.swapusage`, in whatever unit that line prints, with unparsable
+// or absent output meaning no recorded swap debt.
+func TestParseSwapUsageBytes(t *testing.T) {
+	mib := func(n float64) uint64 { return uint64(n * (1 << 20)) }
+	cases := []struct {
+		name string
+		out  string
+		want uint64
+	}{
+		{"measured macOS line", "total = 5120.00M  used = 3885.44M  free = 1234.56M  (encrypted)", mib(3885.44)},
+		{"no swap in use", "total = 1024.00M  used = 0.00M  free = 1024.00M  (encrypted)", 0},
+		{"gigabyte unit", "total = 8.00G  used = 2.50G  free = 5.50G", mib(2560)},
+		{"kilobyte unit", "total = 1024.00M  used = 524288.00K", mib(512)},
+		{"empty output", "", 0},
+		{"garbage value", "used = abcM", 0},
+		{"missing used field", "total = 5120.00M  free = 5120.00M", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := parseSwapUsageBytes(c.out)
+			// The decimal figure this tool prints is not exactly representable in
+			// binary, so compare within one MiB rather than pinning a rounding.
+			diff := got - c.want
+			if c.want > got {
+				diff = c.want - got
+			}
+			if diff > 1<<20 {
+				t.Errorf("parseSwapUsageBytes(%q) = %d, want %d (±1 MiB)", c.out, got, c.want)
+			}
+		})
+	}
+}
+
 // TestDefaultServerConfig verifies server config default-value fallback (accessMode local,
 // host derived 127.0.0.1, port 8080).
 func TestDefaultServerConfig(t *testing.T) {

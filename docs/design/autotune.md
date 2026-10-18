@@ -56,6 +56,16 @@ GGUF 不可读时打固定措辞的
   qwen3.5）只有 `ceil(block_count/interval)` 层带 KV，因此 `buildTuneModel` 把每层成本按
   `kvCacheLayers/BlockCount` 折算——两个公式同时保持正确，且每层权重 `W/L` 仍用真实层数。
 - **保守回退**（GGUF 不可读）：32 层 / 1024 B/层/token / ctx 32768 / 全 dense。
+- **内存口径 = 可回收的「可用」，不是「未分配」**（`getFreeMemoryGB` → `darwinMemoryBytes`）：
+  Linux 走 `MemAvailable`，Android 走系统上报值，macOS 早期只用 `vm_stat` 的 `Pages free`，实测
+  会把机器读成已满——24 GiB M2 上跑起 RSS 3.97 GiB 的 llama-server（KV 撑起来的）时 free 只剩
+  0.06 GiB，而 inactive 队列还挂着 7.14 GiB、swap 三轮不动（3.79 GiB → 3.79 GiB，page-ins 仅
+  +193）：文件缓存是随要随给的，这个读数会把上下文梯子钉死在最小档（同一模型 ctx 2048 而非
+  16384），并让桌面 prompt 缓存预算直接归零。现在 macOS 取 `free + max(0, inactive − swap 已用)`：
+  dirty inactive 换出去要付写盘成本，且已经深陷 swap 的机器剩下的缓存值钱更少；speculative 与
+  purgeable 不单独再计（它们本就是同一队列的成员，实测合计 0.38 GiB，单列就是重复记账）。结果
+  永远不低于原先的 free-only 值，只可能更宽。同一探针同时供 Home 内存卡取数，两处不会漂移成两个
+  定义（修后该机可用内存 3.8 → 7.3 GiB，「已用」84% → 68%）。
 
 ## 五步决策树
 
@@ -95,7 +105,7 @@ cpu-moe 方案细节：`GPULayers="all"` + `CPUMoe=true`（专家驻留系统 RA
 
 | 常量 | 值 | 含义 |
 | --- | --- | --- |
-| `tuneRAMTotalCapRatio` | 0.90 | 可用 RAM = min(空闲, 总量×0.90)，再乘安全系数 |
+| `tuneRAMTotalCapRatio` | 0.90 | 可用 RAM = min(可用内存*, 总量×0.90)，再乘安全系数（*口径见「输入折算要点」，macOS 含可回收文件缓存） |
 | `tuneRAMSafetyFactor` | 0.85 | 15% 留给 OS 与其他进程 |
 | `tuneMinUsableRAM` | 1 GiB | 退化快照的兜底下限 |
 | `tuneGPUActiveMinVRAMMB` | 1536 | 低于此不算可用 GPU（512MB 级共享内存 iGPU 视为无 GPU） |
