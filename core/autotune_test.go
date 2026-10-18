@@ -1097,14 +1097,15 @@ func TestTunePlanTargetApple(t *testing.T) {
 
 // TestTuneModelConfigMetal pins the Apple Silicon plan: all layers offload
 // (GPULayers="all"), the context is sized by the usable-RAM budget (unified
-// memory), flash-attn is left unset so llama-server keeps its own -fa auto
+// memory) clamped to the device's Metal working-set pool when the probe knows
+// it, flash-attn is left unset so llama-server keeps its own -fa auto
 // (measured on an M2 at tg128: auto/on/off = 30.02/29.70/27.16 t/s — auto is
 // never the loser, forcing it on can only cost speed), the q8_0 cache pair is
 // never written (it measured ~6% slower on decode), and a MoE model still
 // gets the plain metal plan —
 // cpu-moe is a CUDA-centric split and must not appear (UsedCPUMoe=false, no
 // bench chain). A darwin-amd64 host (CPU-only release, vendor none) plans the
-// CPU-only branch even for a MoE model.
+// CPU-only branch even for a MoE model, and is never clamped by a Metal pool.
 func TestTuneModelConfigMetal(t *testing.T) {
 	// usableRAM = min(24, 32*0.90) * 0.85 GiB = 20.4 GiB = 20889.6 MiB
 	hwApple := tuneHardware{GPUVendor: vendorApple, RAMTotalGB: 32, RAMFreeGB: 24, PhysicalCores: 10, LogicalCPUs: 10}
@@ -1159,6 +1160,42 @@ func TestTuneModelConfigMetal(t *testing.T) {
 	}
 	if cfg.FlashAttn || cfg.CPUMoe || cfg.NCpuMoe != 0 {
 		t.Errorf("darwin-amd64 plan must be plain CPU-only: %+v", cfg)
+	}
+
+	// The Metal working-set pool is a tighter ceiling than the RAM budget, and
+	// the clamp is what keeps a plan from wedging the server (measured on a
+	// 24 GiB M2: the device reports 18186 MiB while a freshly freed machine
+	// yields an 18.36 GiB = 18799.6 MiB budget; over the pool the load answers
+	// /health and then fails every command buffer with
+	// kIOGPUCommandBufferCallbackErrorOutOfMemory forever). A 24 GiB Mac plus a
+	// 13800 MiB weight file with tmGLM's KV geometry: the 65536 rung costs
+	// 13800+3384+1280 = 18464 MiB — inside the RAM budget, outside the pool —
+	// so the pool decides between it and 32768 (13800+1692+1280 = 16772 MiB).
+	tmPool := tuneModel{
+		WeightsBytes: 13800 << 20, Layers: 47, KVBytesPerTokPerLayerF16: 1152,
+		TrainCtx: 202752,
+	}
+	hwPool := tuneHardware{GPUVendor: vendorApple, RAMTotalGB: 24, RAMFreeGB: 24,
+		PhysicalCores: 10, LogicalCPUs: 10, MetalPoolMB: 18186}
+	cfg = tuneModelConfig(hwPool, tmPool)
+	if cfg.CtxSize != 32768 {
+		t.Errorf("metal plan over the working-set pool = ctx %d, want 32768 (the 65536 rung costs 18464 MiB > the 18186 MiB pool)", cfg.CtxSize)
+	}
+	if cfg.GPULayers != "all" {
+		t.Errorf("pool-clamped plan must still offload: %+v", cfg)
+	}
+
+	// Without a pool figure the plan is the pre-clamp behavior, tier for tier;
+	// and a non-Metal plan is never clamped by a pool it cannot reach.
+	hwNoPool := hwPool
+	hwNoPool.MetalPoolMB = 0
+	if cfg := tuneModelConfig(hwNoPool, tmPool); cfg.CtxSize != 65536 {
+		t.Errorf("unknown pool = ctx %d, want 65536: the RAM budget alone, no clamp", cfg.CtxSize)
+	}
+	hwCPUPool := hwPool
+	hwCPUPool.GPUVendor = vendorNone
+	if cfg := tuneModelConfig(hwCPUPool, tmPool); cfg.CtxSize != 65536 {
+		t.Errorf("CPU-only plan clamped by a Metal pool = ctx %d, want 65536", cfg.CtxSize)
 	}
 }
 

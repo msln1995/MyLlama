@@ -547,6 +547,11 @@ type tuneHardware struct {
 	// static behavior. Gates the cramped-full-offload → cpu-moe flip in
 	// tuneModelConfig.
 	RAMBandwidthGBs float64
+	// MetalPoolMB is the default Metal device's working-set ceiling in MiB
+	// (metalWiredPoolMB), filled only when the plan targets Apple Silicon:
+	// 0 = unknown, which leaves the plan on its RAM budget alone. Only the
+	// Metal branch is clamped by it, at the budget site in tuneModelConfigPlan.
+	MetalPoolMB int
 }
 
 // tuneModel is the model-side input derived from the GGUF metrics and the
@@ -898,6 +903,27 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	if usableRAM < tuneMinUsableRAM {
 		usableRAM = tuneMinUsableRAM
 	}
+	// A Metal plan has a second, tighter ceiling than the RAM budget: the GPU may
+	// only pin the device's working-set limit, and on a Mac that limit sits
+	// *below* the budget just computed (a 24 GiB M2 reports 18186 MiB = 0.74 of
+	// RAM, against an 18.36 GiB budget when memory is freshly free), so a plan
+	// can afford the RAM and still be over the pool. Measured on that M2 with a
+	// 378 MiB 0.6B model at -ngl 99, bracketing the context: 155648 tokens load
+	// and generate; 159744 tokens loads "successfully", passes /health, then
+	// fails every command buffer with kIOGPUCommandBufferCallbackErrorOutOfMemory
+	// and keeps answering every later request with HTTP 500 "Compute error"
+	// ("backend is in error state from a previous command buffer failure -
+	// recreate the backend to recover"). An over-pool plan is a wedged service,
+	// not a refused load — so the ceiling is taken from the device itself
+	// (metalWiredPoolMB, the same figure the server prints for its MTL0 device)
+	// rather than guessed as a ratio; 0 (no answer, or a plan that never touches
+	// the GPU) leaves the RAM budget as the only ceiling. Only the Metal branch
+	// can reach a pool, so only it is clamped.
+	if hw.GPUVendor == vendorApple && hw.MetalPoolMB > 0 {
+		if pool := float64(hw.MetalPoolMB) * MB; pool < usableRAM {
+			usableRAM = pool
+		}
+	}
 
 	gpuActive := hw.GPUVendor != vendorNone && hw.VRAMMB >= tuneGPUActiveMinVRAMMB
 	vramUsable := 0.0
@@ -1004,17 +1030,18 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	}
 
 	// Metal plan (Apple Silicon): unified memory puts every weight one
-	// GPU-visible allocation away, so all layers offload (GPULayers="all")
-	// while the context is bounded by the same usable-RAM budget as the
-	// CPU-only plan — GPU and CPU share one physical pool, there is no VRAM
-	// budget to merge against, and the same ramReserve is charged here (measured
-	// on an M2: the idle-to-first-batch RSS step is +518 MiB on Metal and +525
-	// MiB with -ngl 0 at the app's default ubatch 512, so the term does not
-	// shrink because the batch ran on the GPU). FlashAttn deliberately stays
-	// false, which means "emit nothing" (see core/preset.go) and leaves the
-	// choice to llama-server's own -fa auto. Measured on an M2 with a 4B Q4_K_M
-	// model at -ngl 99, tg128: auto is never slower than explicit on (31.91 vs
-	// 28.69 t/s on b10537, 30.02 vs 29.70 within noise on a current build) and
+	// GPU-visible allocation away, so all layers offload (GPULayers="all") while
+	// the context is bounded by the usable-RAM budget — clamped to the device's
+	// Metal working-set pool above, the ceiling that RAM alone does not see. GPU
+	// and CPU share one physical pool, there is no VRAM budget to merge against,
+	// and the same ramReserve is charged here (measured on an M2: the
+	// idle-to-first-batch RSS step is +518 MiB on Metal and +525 MiB with -ngl 0
+	// at the app's default ubatch 512, so the term does not shrink because the
+	// batch ran on the GPU). FlashAttn deliberately stays false, which means
+	// "emit nothing" (see core/preset.go) and leaves the choice to llama-server's
+	// own -fa auto. Measured on an M2 with a 4B Q4_K_M model at -ngl 99, tg128:
+	// auto is never slower than explicit on (31.91 vs 28.69 t/s on b10537, 30.02
+	// vs 29.70 within noise on a current build) and
 	// explicit off is the loser of the three (27.16 t/s, -9%), so forcing the flag
 	// can only cost speed while leaving it unset captures whatever the engine
 	// decides is best. The q8_0 cache pair is the same story in reverse — it only
@@ -1294,10 +1321,16 @@ func (a *App) tuneHardware() tuneHardware {
 	target := tunePlanTarget(gpus, cuda.Available, deviceID)
 	hw.VRAMMB = target.VRAMMB
 	hw.GPUVendor = target.Vendor
+	if target.Vendor == vendorApple {
+		// The Metal device's own working-set ceiling, tighter than the RAM
+		// budget on a Mac (see tuneHardware's MetalPoolMB field); 0 when the
+		// probe cannot answer, which leaves the plan unclamped.
+		hw.MetalPoolMB = metalWiredPoolMB()
+	}
 	if target.Name != "" {
 		log.Printf("[INFO] tune: planning against GPU %s (uuid %.8s)", target.Name, target.UUID)
 	} else if target.Vendor == vendorApple {
-		log.Printf("[INFO] tune: planning against Apple Silicon (Metal, unified memory)")
+		log.Printf("[INFO] tune: planning against Apple Silicon (Metal, unified memory, working-set pool %d MiB)", hw.MetalPoolMB)
 	} else if len(gpus) > 0 {
 		log.Printf("[INFO] tune: planning against largest-VRAM GPU (auto)")
 	}
