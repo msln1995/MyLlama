@@ -103,22 +103,74 @@ func maxModelLoadBytes(models []ModelInfo, cfgs map[string]ModelConfig) int64 {
 }
 
 // routerModelPlan resolves the config a router-mode load runs m with: the stored
-// per-model config when there is one, otherwise what the preset writer actually
-// emits for an untuned model — no --ctx-size, so llama-server brings up the
-// context the model was trained with. Pricing that case at the settings page's
-// 4096 default instead would under-charge the library's largest resident by
-// orders of magnitude, which is exactly the load the cache budget has to make
-// room for. Metrics that cannot be read keep the app default, the same fallback
-// modelLoadBytes uses for the rest of the geometry.
+// per-model config when there is one, otherwise the untuned entry the preset
+// writer emits (see routerUntunedCtx). A model whose stored config carries no
+// context is treated as untuned here too, so the price and the preset always
+// describe the same load — the one number the library's prompt-cache budget is
+// sized against.
 func routerModelPlan(cfgs map[string]ModelConfig, m ModelInfo) ModelConfig {
-	if c, ok := cfgs[m.Name]; ok {
-		return c
+	c, ok := cfgs[m.Name]
+	if !ok {
+		c = defaultModelConfig()
 	}
-	c := defaultModelConfig()
-	if mm, ok := readGGUFModelMetrics(m.Path); ok && mm.ContextLength > 0 {
-		c.CtxSize = mm.ContextLength
+	if !ok || c.CtxSize <= 0 {
+		c.CtxSize = routerUntunedCtx(m)
 	}
 	return c
+}
+
+// routerUntunedCtx picks the context an unconfigured model gets in router mode,
+// and the preset writer now writes that number into the entry instead of leaving
+// it out. Omitting it is not a saving: llama-server's default is "0 = the context
+// the model was trained with" and it really does build that cache. Measured on a
+// 24 GiB M2 with Qwen3-0.6B Q4_K_M (378 MiB of weights, 112 KiB of f16 KV per
+// token), an entry with no ctx-size came up as "n_ctx_slot = 40960" — the context
+// its GGUF metadata records — with a 4.86 GiB worker RSS, indistinguishable from
+// the same model whose entry states ctx-size = 40960 (4.84 GiB), while the
+// ctx-size = 32768 entry cost 3.98 GiB. The 0.88 GiB between those two runs is
+// the 8,192 tokens of context they differ by, at the f16 geometry, so the
+// allocation tracks the trained context rung for rung.
+//
+// The unbounded allocation is the smaller half of the harm. The library's
+// prompt-cache budget is sized against the heaviest planned load
+// (maxModelLoadBytes), which already priced an unconfigured model at its trained
+// context — so one model whose context exceeds the machine is by itself enough to
+// push the headroom negative and turn prompt caching off for every model in the
+// app, in every session. On an 8,218 MiB host an entry priced at the 262,144
+// tokens a Qwen3-4B-Instruct-2507 records in its own metadata costs 30,330 MiB
+// and bounds --cache-ram to 0; the same machine keeps 1,021 MiB once the entry
+// states a context it can pay for.
+//
+// The rule keeps the model's own context whenever the app's load price fits the
+// memory available now (so an untuned model on a roomy machine behaves as it does
+// today, just stated explicitly and priced at what the server will build), and
+// otherwise takes the largest rung of the tuner's ladder that fits, down to the
+// ladder's floor. Unreadable metadata or a failed memory probe land on the
+// settings page default, the same fallback the rest of this file uses.
+func routerUntunedCtx(m ModelInfo) int {
+	fallback := defaultModelConfig()
+	mm, ok := readGGUFModelMetrics(m.Path)
+	if !ok || mm.ContextLength <= 0 {
+		return fallback.CtxSize
+	}
+	avail := availableMemoryBytes()
+	if avail <= 0 {
+		return fallback.CtxSize
+	}
+	withCtx := func(ctx int) ModelConfig {
+		c := fallback
+		c.CtxSize = ctx
+		return c
+	}
+	if modelLoadBytes(m, withCtx(mm.ContextLength)) <= avail {
+		return mm.ContextLength
+	}
+	for _, ctx := range ctxLadderFor(mm.ContextLength, tuneCtxLadder) {
+		if modelLoadBytes(m, withCtx(ctx)) <= avail {
+			return ctx
+		}
+	}
+	return tuneCtxMin
 }
 
 // promptCacheRAMMiB bounds llama-server's prompt-cache budget (MiB) for one

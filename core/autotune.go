@@ -750,6 +750,12 @@ func runtimeOverheadBytes(ubatch int) int64 {
 	return int64(tuneRuntimeOverheadMB) * int64(ubatch) / tuneRuntimeOverheadUBatch * (1 << 20)
 }
 
+// tuneCtxLadder is the descending context ladder the RAM-bounded plans size
+// against; the router-mode preset writer walks the same rungs when it has to
+// bound an unconfigured model's context (routerUntunedCtx), so a preset entry and
+// a tuned plan can never disagree by a tier.
+var tuneCtxLadder = []int{131072, 65536, 32768, 16384, 8192, 4096, tuneCtxMin}
+
 // ctxLadderFor filters ladder (descending) to entries not exceeding trainCtx
 // (trainCtx <= 0 is treated as 32768), always keeping at least the smallest
 // entry so every plan has a context.
@@ -1007,7 +1013,7 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	kvPerTok := m.KVBytesPerTokPerLayerF16 * float64(layers)
 	w := float64(m.WeightsBytes)
 
-	ladder := ctxLadderFor(m.TrainCtx, []int{131072, 65536, 32768, 16384, 8192, 4096, tuneCtxMin})
+	ladder := ctxLadderFor(m.TrainCtx, tuneCtxLadder)
 	computeBuf := func(ctx int) float64 {
 		buf := tuneComputeBufBaseMB
 		if ctx >= tuneComputeBufLargeFrom {

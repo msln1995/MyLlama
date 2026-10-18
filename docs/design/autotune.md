@@ -7,9 +7,8 @@ MyLlama 的硬件感知一键调优：读 GGUF 真实指标 + 本地硬件快照
 > `frontend/src/views/ModelSettings.vue` + `frontend/src/lib/modelTune.ts`（前端联动）。
 > 本文描述**当前工作区**实现；与代码冲突时以代码为准。
 >
-> 注：「serving-GPU 规划目标」（`tunePlanTarget`，按服务器配置里的 DeviceID 选卡）是另一批
-> **进行中（未提交）的工作区改动**，本文按工作区现状记录；评审合并前若该特性被回退，
-> 请同步删除相关段落。
+> 注：「serving-GPU 规划目标」（`tunePlanTarget`，按服务器配置里的 DeviceID 选卡）已落地在
+> `core/autotune.go`，本文按当前实现记录。
 
 ## 目标与纯函数契约
 
@@ -155,6 +154,32 @@ q8_0 仅 NVIDIA，仅在能买到**严格更大** ctx、或 f16 已紧（剩余 
 3.2×/2.4× 的灾难（pp 6.89/7.16、tg 2.87/3.24），而这个档位恰好对应 App 历史上观察到的
 3.1–3.6 t/s。单性能核机型（1+7，质核频率高过 80 % 阈值）不按此封顶——读成 1 线程的代价远大于
 省掉的小核，`cpuThreadDefault` 对 `PerfCores < 2` 一律返回 0。
+
+## 路由模式：没调优模型的上下文兜底（`core/memfit.go` + `core/preset.go`）
+
+调优器只覆盖跑过一键调优的模型；桌面路由模式的预设生成器（`generateModelsPresetFrom`）历史上
+给没配置项的模型**不写 `ctx-size`**，把决定权交给 llama-server，而后者的默认是「0 = 按模型训练的
+上下文」。实测（M2 24 GiB，Qwen3-0.6B Q4_K_M：权重 378 MiB、f16 KV 112 KiB/token）：
+
+| 预设条目 | 服务端日志 | worker RSS |
+| --- | --- | --- |
+| 不写 `ctx-size` | `n_ctx_slot = 40960`（元数据里的训练上下文） | 4.86 GiB |
+| `ctx-size = 40960` | `n_ctx_slot = 40960` | 4.84 GiB |
+| `ctx-size = 32768` | `n_ctx_slot = 32768` | 3.98 GiB |
+
+省略与显式写出来是同一份分配，32,768→40,960 的 8,192 token 差恰好对应 0.88 GiB，即 KV 逐档线性
+增长。真正的问题在预算侧：`--cache-ram` 按库里最重的一次加载计价（`heaviestRouterLoad` →
+`promptCacheRAMMiB`），所以一个上下文超出本机余量的模型，单凭自己就能把剩余压成负数，于是**整个
+库、每一次会话都不再缓存**——8,218 MiB 可用的机器上，一条按 Qwen3-4B-Instruct-2507 元数据 262,144
+token 计价的条目是 30,330 MiB，`--cache-ram` 落到 0；同一台机器把条目改成付得起的档位后还剩
+1,021 MiB。
+
+`routerUntunedCtx` 因此把这件事显式写死：本机当前余量付得起训练上下文就照原样保留（今天的行为，
+只是写出来并计价），付不起就沿 `tuneCtxLadder` 往下取能付得起的最大档，直到梯子下界
+`tuneCtxMin`；元数据读不出或内存探针失败时落回设置页默认 4096，与本文件其余兜底一致。计价侧
+`routerModelPlan` 用同一个函数，且把「配置存在但 `CtxSize <= 0`」也当未调优处理，所以预设条目与
+预算价永远描述同一次加载。安卓直连模式不受影响：它的启动前内存检查已经会拒绝放不下的加载，
+历史默认 4096 在 X60 上已验证可用。
 
 ## 实测 RAM 带宽校准（`core/benchbw.go`）
 

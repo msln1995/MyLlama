@@ -82,9 +82,12 @@ func TestGenerateModelsPresetFromConfigs(t *testing.T) {
 	}
 }
 
-// TestGenerateModelsPresetFromNoConfig verifies a model with no configured parameters
-// only outputs a model line.
+// TestGenerateModelsPresetFromNoConfig verifies a model with no configured
+// parameters still states a context: the writer resolves one through
+// routerUntunedCtx instead of leaving ctx-size out, and a model whose metadata
+// cannot be read lands on the app default.
 func TestGenerateModelsPresetFromNoConfig(t *testing.T) {
+	pinProbeFreeMemoryGB(t, 64)
 	models := []ModelInfo{{Name: "plain", Path: "/models/plain.gguf"}}
 	path, err := generateModelsPresetFrom(models, nil)
 	if err != nil {
@@ -94,8 +97,8 @@ func TestGenerateModelsPresetFromNoConfig(t *testing.T) {
 
 	data, _ := os.ReadFile(path)
 	content := string(data)
-	if content != "[plain]\nmodel = /models/plain.gguf\n\n" {
-		t.Errorf("preset content does not match expected: %q", content)
+	if want := "[plain]\nmodel = /models/plain.gguf\nctx-size = 4096\n\n"; content != want {
+		t.Errorf("preset content does not match expected:\n got %q\nwant %q", content, want)
 	}
 }
 
@@ -550,6 +553,7 @@ func iniFromKVs(alias string, kvs []presetKV) string {
 // through the INI printer reproduces the generateModelsPresetFrom file byte
 // for byte (alias dedup included).
 func TestModelPresetKVGoldenINI(t *testing.T) {
+	pinProbeFreeMemoryGB(t, 64)
 	dir := t.TempDir()
 	autoMMProj := filepath.Join(dir, "mmproj-auto.gguf")
 	if err := os.WriteFile(autoMMProj, []byte("proj"), 0644); err != nil {
@@ -590,7 +594,13 @@ func TestModelPresetKVGoldenINI(t *testing.T) {
 	var want strings.Builder
 	for _, m := range models {
 		alias := aliasDedup(m.Name, used)
-		kvs, err := modelPresetKV(m, cfgs[m.Name])
+		// The writer's untuned-context fill, mirrored in the reference so this
+		// still checks the serializer and the file agree rather than the number.
+		cfg := cfgs[m.Name]
+		if cfg.CtxSize <= 0 {
+			cfg.CtxSize = routerUntunedCtx(m)
+		}
+		kvs, err := modelPresetKV(m, cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -860,5 +870,28 @@ func TestGenerateModelsPresetRemovesPreviousTempFile(t *testing.T) {
 	}
 	if _, err := os.Stat(second); err != nil {
 		t.Errorf("current preset %s must survive: %v", second, err)
+	}
+}
+
+// TestGenerateModelsPresetFromBoundsUntunedContext checks the writer's side of
+// routerUntunedCtx: an unconfigured model whose trained context does not fit the
+// memory available gets that bounded value written into its entry, instead of no
+// ctx-size at all (which hands the decision to llama-server and the trained
+// context it allocates).
+func TestGenerateModelsPresetFromBoundsUntunedContext(t *testing.T) {
+	pinProbeFreeMemoryGB(t, gibFromMiB(2340))
+	dir := t.TempDir()
+	path := geomGGUF(t, dir, "geom.gguf")
+
+	out, err := generateModelsPresetFrom([]ModelInfo{{Name: "geom", Path: path, SizeBytes: 1 << 30}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(out)
+
+	data, _ := os.ReadFile(out)
+	content := string(data)
+	if want := "[geom]\nmodel = " + filepath.ToSlash(path) + "\nctx-size = 16384\n\n"; content != want {
+		t.Errorf("bounded preset entry does not match:\n got %q\nwant %q", content, want)
 	}
 }

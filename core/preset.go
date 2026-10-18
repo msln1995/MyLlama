@@ -104,7 +104,9 @@ type presetKV struct {
 // values are exactly the ones the INI writer has always produced; validation
 // errors fire with the same messages as before. A zero ModelConfig (model
 // without a config entry) yields only the model line plus auto-detected
-// options.
+// options. The router-mode writer no longer passes a zero config: it fills an
+// unconfigured model's context through routerUntunedCtx first, so every entry
+// states the context its load is priced at.
 func modelPresetKV(m ModelInfo, cfg ModelConfig) ([]presetKV, error) {
 	kvs := make([]presetKV, 0, 24)
 	kvs = append(kvs, presetKV{key: "model", value: filepath.ToSlash(m.Path)})
@@ -316,9 +318,16 @@ func generateModelsPresetFrom(models []ModelInfo, cfgs map[string]ModelConfig) (
 	for _, m := range models {
 		alias := aliasDedup(m.Name, used)
 		buf.WriteString(fmt.Sprintf("[%s]\n", alias))
-		// A model without a config entry gets the zero ModelConfig: only the
-		// model line (plus auto-detected options) is emitted.
-		kvs, err := modelPresetKV(m, cfgs[m.Name])
+		// A model without a usable context gets one written into its entry
+		// (routerUntunedCtx): leaving ctx-size out hands the decision to
+		// llama-server, which then builds the cache the model was trained
+		// with — a context the machine may not have and that the library's
+		// prompt-cache budget is priced against.
+		cfg := cfgs[m.Name]
+		if cfg.CtxSize <= 0 {
+			cfg.CtxSize = routerUntunedCtx(m)
+		}
+		kvs, err := modelPresetKV(m, cfg)
 		if err != nil {
 			return "", err
 		}

@@ -467,10 +467,13 @@ func mib(n int64) int64 { return n * (1 << 20) }
 // TestMaxModelLoadBytes prices every entry of a library and keeps the heaviest,
 // which is what the router-mode prompt-cache budget is bounded against (models
 // load lazily, so the launch-time resident set proves nothing). The case that
-// matters is the untuned model: the preset writer emits no --ctx-size for it, so
-// llama-server brings up the trained 32768-token context, and pricing it at the
-// settings page's 4096 default would under-charge it by 56 MiB on this fixture.
+// matters is the untuned model: the writer resolves its context through
+// routerUntunedCtx, and on a machine that can pay for the trained 32768-token
+// context pricing it at the settings page's 4096 default would under-charge it by
+// 56 MiB on this fixture. The probe is pinned so the expectation does not follow
+// the test host's free RAM.
 func TestMaxModelLoadBytes(t *testing.T) {
+	pinProbeFreeMemoryGB(t, 64)
 	dir := t.TempDir()
 	path := geomGGUF(t, dir, "geom.gguf")
 	weights := int64(1 << 30) // 1024 MiB
@@ -499,5 +502,73 @@ func TestMaxModelLoadBytes(t *testing.T) {
 	cfgs["big"] = ModelConfig{CtxSize: 131072, UBatchSize: 512}
 	if got := maxModelLoadBytes([]ModelInfo{tuned, untuned, big}, cfgs); got != weights+mib(256)+overhead {
 		t.Errorf("heaviest = %d MiB, want %d (stored ctx 131072)", got/(1<<20), (weights+mib(256)+overhead)/(1<<20))
+	}
+}
+
+// gibFromMiB converts a MiB figure into the GiB value probeFreeMemoryGB returns,
+// so memory thresholds can be written in the same unit the estimates are asserted
+// in.
+func gibFromMiB(n int64) float64 { return float64(n) / 1024 }
+
+// TestRouterUntunedCtx pins the context an unconfigured model gets in router
+// mode. geomGGUF trains at 32768 and costs 2 KiB of f16 KV per token, so with
+// 1024 MiB of weights and the 1280 MiB runtime reserve its trained context prices
+// at 2368 MiB and the ladder rungs below at 2336 (16384), 2320 (8192), 2312 (4096)
+// and 2308 (2048).
+func TestRouterUntunedCtx(t *testing.T) {
+	dir := t.TempDir()
+	path := geomGGUF(t, dir, "geom.gguf")
+	m := ModelInfo{Name: "untuned", Path: path, SizeBytes: 1 << 30}
+
+	cases := []struct {
+		name string
+		gb   float64
+		want int
+	}{
+		{"a machine that can pay keeps the trained context", gibFromMiB(4096), 32768},
+		{"one MiB short of the trained price drops a rung", gibFromMiB(2340), 16384},
+		{"cramped memory walks down to the rung that fits", gibFromMiB(2310), 2048},
+		{"nothing affordable still gets the ladder floor", gibFromMiB(2300), 2048},
+		{"a failed probe lands on the app default", 0, 4096},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pinProbeFreeMemoryGB(t, c.gb)
+			if got := routerUntunedCtx(m); got != c.want {
+				t.Errorf("routerUntunedCtx with %d MiB available = %d, want %d", int64(c.gb*1024), got, c.want)
+			}
+		})
+	}
+
+	// Unreadable metadata cannot be priced against a trained context, so the
+	// app default is written instead of leaving the entry without one.
+	pinProbeFreeMemoryGB(t, 64)
+	blind := ModelInfo{Name: "blind", Path: filepath.Join(dir, "missing.gguf"), SizeBytes: 1 << 30}
+	if got := routerUntunedCtx(blind); got != 4096 {
+		t.Errorf("unreadable metrics = %d, want the 4096 app default", got)
+	}
+}
+
+// TestUnconfiguredModelKeepsLibraryPromptCache is the regression for the harm the
+// bounded context removes: with the untuned entry left without ctx-size, its
+// trained context priced above the machine's memory made the library's heaviest
+// load exceed available RAM, and the router-mode --cache-ram bound collapsed to 0
+// for every model in the app. Priced at the largest context the machine affords,
+// the same library keeps a cache budget.
+func TestUnconfiguredModelKeepsLibraryPromptCache(t *testing.T) {
+	pinProbeFreeMemoryGB(t, gibFromMiB(2340))
+	path := geomGGUF(t, t.TempDir(), "geom.gguf")
+	m := ModelInfo{Name: "untuned", Path: path, SizeBytes: 1 << 30}
+
+	heavy := maxModelLoadBytes([]ModelInfo{m}, nil)
+	if want := mib(1024 + 32 + 1280); heavy != want {
+		t.Errorf("heaviest = %d MiB, want %d (bounded ctx 16384)", heavy/(1<<20), want/(1<<20))
+	}
+	if got := promptCacheRAMMiB(8192, heavy, availableMemoryBytes()); got <= 0 {
+		t.Errorf("prompt cache budget = %d MiB, want a positive bound over the affordable load", got)
+	}
+	// The figure this replaces: the same machine, priced at the trained context.
+	if got := promptCacheRAMMiB(8192, mib(2368), availableMemoryBytes()); got != 0 {
+		t.Errorf("trained-context price = %d MiB budget, want 0 (the collapse the bound removes)", got)
 	}
 }
