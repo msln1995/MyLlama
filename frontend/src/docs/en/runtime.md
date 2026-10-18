@@ -8,14 +8,14 @@ The tab shows llama.cpp information as a card:
 - **Version**: the detected version once installed;
 - **Install path / Download path**: where the main program lives and where new downloads land;
 - **Component list** (shown once installed):
-  - `llama-server main program`: the inference service itself, annotated with the actually detected acceleration build (CUDA / Vulkan / Metal / CPU);
+  - `llama-server main program`: the inference service itself, annotated with the actually detected acceleration build (CUDA / Vulkan / Metal / CPU); on macOS the answer comes from whether the Metal backend library sits in that directory, so an x86_64 (CPU-only) build installed on an Apple Silicon Mac honestly reports CPU;
   - `CUDA runtime (cudart)`: Windows only, annotated with the detected CUDA major family (e.g. `CUDA 12`). It is downloaded automatically with CUDA builds of llama.cpp; without it, NVIDIA GPU acceleration cannot work.
 
 ## Downloading llama.cpp
 
 When nothing is installed, it offers two actions:
 
-- **Download llama.cpp**: fetches the latest release from GitHub — two packages in one download, the main program and the CUDA runtime (Windows), each with its own progress bar. Linux picks the Vulkan build (accelerating NVIDIA / AMD / Intel GPUs alike); macOS picks the Metal build (Apple Silicon) or the CPU build (Intel).
+- **Download llama.cpp**: fetches the latest release from GitHub — two packages in one download, the main program and the CUDA runtime (Windows), each with its own progress bar. Linux picks the Vulkan build (accelerating NVIDIA / AMD / Intel GPUs alike); macOS picks the Metal build (Apple Silicon) or the CPU build (Intel). On Apple Silicon the machine decides, so an app launched through Rosetta still gets the Metal build (a translated parent runs arm64 children natively).
 - **Custom**: browse to an existing llama.cpp directory and the app will use it instead of downloading.
 
 While downloading you can **pause**, **resume** (resumable — it never starts over), or **cancel** at any time. Transient network failures are retried automatically (up to 3 times, 3 seconds apart); after a hard failure the tab shows the reason plus a retry button.

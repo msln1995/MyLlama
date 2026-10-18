@@ -58,9 +58,10 @@ type LlamaCppInfo struct {
 	// "cuda" | "vulkan" | "metal" | "cpu". Official llama.cpp builds are
 	// GGML_BACKEND_DL everywhere, so the value is detected from the backend
 	// library sitting next to the resolved binary (windows ggml-cuda.dll /
-	// ggml-vulkan.dll, linux libggml-vulkan.so), from the arch on darwin
-	// (arm64 release embeds Metal; x64 release is CPU-only) or the platform
-	// default (android = CPU-only). Empty when llama.cpp is not installed.
+	// ggml-vulkan.dll, linux libggml-vulkan.so, darwin libggml-metal.dylib —
+	// only the arm64 release ships it), with the host arch as the fallback
+	// when the tree keeps its libraries elsewhere, or the platform default
+	// (android = CPU-only). Empty when llama.cpp is not installed.
 	Accel string `json:"accel"`
 }
 
@@ -336,7 +337,7 @@ func getLlamaCppInfo() LlamaCppInfo {
 		info.Path = p
 		fillLlamaCppVersion(&info, p)
 		setCudartInfo(&info, filepath.Dir(p))
-		info.Accel = detectAccel(filepath.Dir(p), runtime.GOOS, runtime.GOARCH)
+		info.Accel = detectAccel(filepath.Dir(p), runtime.GOOS, hostIsArm64(runtime.GOOS))
 		return info
 	}
 
@@ -359,7 +360,7 @@ func getLlamaCppInfo() LlamaCppInfo {
 				info.Path = p
 				fillLlamaCppVersion(&info, p)
 				setCudartInfo(&info, filepath.Dir(p))
-				info.Accel = detectAccel(filepath.Dir(p), runtime.GOOS, runtime.GOARCH)
+				info.Accel = detectAccel(filepath.Dir(p), runtime.GOOS, hostIsArm64(runtime.GOOS))
 				return info
 			}
 		}
@@ -375,13 +376,15 @@ func getLlamaCppInfo() LlamaCppInfo {
 // sits next to them — in dir itself (flat release layout) or in its sibling
 // lib/ (cmake-install layout), see llamaCompanionDirs.
 // windows: ggml-cuda.dll → "cuda", ggml-vulkan.dll → "vulkan"; linux:
-// libggml-vulkan.so (or plain ggml-vulkan.so) → "vulkan"; darwin: the arm64
-// release embeds Metal ("metal", no file to find) while the x64 release is
-// CPU-only; android: CPU-only arm64 packages → "cpu". A build with no
-// recognized GPU backend library falls back to "cpu". Pure over the directory
-// listing (no process spawns), directly unit-testable with a fixture directory
-// and explicit goos/goarch values.
-func detectAccel(dir, goos, goarch string) string {
+// libggml-vulkan.so (or plain ggml-vulkan.so) → "vulkan"; darwin: the Metal
+// backend library → "metal", which is exactly what separates the arm64 release
+// from the CPU-only x64 one, with the host arch answering for a tree that keeps
+// its libraries elsewhere (a CMake build dir has none next to the binaries);
+// android: CPU-only arm64 packages → "cpu". A build with no recognized GPU
+// backend library falls back to "cpu". Pure over the directory listing (no
+// process spawns), directly unit-testable with a fixture directory and explicit
+// goos/hostArm64 values.
+func detectAccel(dir, goos string, hostArm64 bool) string {
 	if dir == "" {
 		return ""
 	}
@@ -405,7 +408,23 @@ func detectAccel(dir, goos, goarch string) string {
 			}
 		}
 	case "darwin":
-		if goarch == "arm64" {
+		// The Metal backend library is the strong signal: upstream ships it in
+		// the arm64 release and not in the x64 one (measured against the b10537
+		// tarballs), so its presence says what the installed build can do
+		// instead of guessing from the slice this process runs as.
+		for _, d := range dirs {
+			if dirHasFileFoldPrefix(d, "libggml-metal.") || dirHasFileFoldPrefix(d, "ggml-metal.") {
+				return "metal"
+			}
+		}
+		// No Metal library. When the tree still carries its other ggml shared
+		// libraries it is an install layout, and those always sit next to the
+		// binaries in every official tarball — so this is the CPU-only x64
+		// release. Only a tree with no libraries at all (a CMake build directory
+		// keeps them away from the executables) leaves the question open, and
+		// there the hardware arch answers it as it always did: Metal is
+		// arm64-only upstream.
+		if !hasGGMLSharedLibs(dirs) && hostArm64 {
 			return "metal"
 		}
 		return "cpu"
@@ -413,6 +432,25 @@ func detectAccel(dir, goos, goarch string) string {
 		return "cpu"
 	}
 	return "cpu"
+}
+
+// dirHasFileFoldPrefix reports whether dir holds a regular file whose name
+// starts with prefix (case-insensitive). The macOS backend lookups match a stem
+// rather than one file name because the same library exists under three names
+// that differ by release (libggml-metal.dylib, libggml-metal.0.dylib,
+// libggml-metal.0.<ver>.dylib) and only the versioned one survives an
+// extraction that drops the alias symlinks.
+func dirHasFileFoldPrefix(dir, prefix string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && len(e.Name()) > len(prefix) && strings.HasPrefix(strings.ToLower(e.Name()), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // dirHasFileFold reports whether dir contains a regular entry whose name
@@ -426,6 +464,20 @@ func dirHasFileFold(dir, name string) bool {
 	}
 	for _, e := range entries {
 		if !e.IsDir() && strings.EqualFold(e.Name(), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasGGMLSharedLibs reports whether any of dirs carries a ggml shared library
+// (the base/cpu pair every official macOS tarball ships next to the binaries).
+// Its absence means the listing cannot describe the build — a CMake build
+// directory keeps the dylibs away from the executables — so the darwin branch
+// falls back to the hardware arch.
+func hasGGMLSharedLibs(dirs []string) bool {
+	for _, d := range dirs {
+		if dirHasFileFoldPrefix(d, "libggml-base.") || dirHasFileFoldPrefix(d, "libggml-cpu.") {
 			return true
 		}
 	}
@@ -1181,7 +1233,7 @@ func pickBestAsset(assets []GitHubAsset) *GitHubAsset {
 	if cc, ok := gpuComputeCap(); ok {
 		floor = cudaFloorForComputeCap(cc)
 	}
-	return pickBestAssetFor(assets, runtime.GOOS, runtime.GOARCH, len(getGPUInfo()) > 0, cudaVersionFromToolkit(), floor)
+	return pickBestAssetFor(assets, runtime.GOOS, hostAssetArch(), len(getGPUInfo()) > 0, cudaVersionFromToolkit(), floor)
 }
 
 // cudaVersionFromToolkit derives the "major.minor" version used in asset

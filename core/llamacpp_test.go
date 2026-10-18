@@ -340,21 +340,30 @@ func TestDetectAccelCompanionLibDir(t *testing.T) {
 
 	// No backend library anywhere: still cpu (the companion dir is searched,
 	// not assumed).
-	if got := detectAccel(binDir, "linux", "arm64"); got != "cpu" {
+	if got := detectAccel(binDir, "linux", false); got != "cpu" {
 		t.Errorf("bin/ with no backends = %q, want cpu", got)
 	}
 
 	if err := os.WriteFile(filepath.Join(libDir, "libggml-vulkan.so"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if got := detectAccel(binDir, "linux", "arm64"); got != "vulkan" {
+	if got := detectAccel(binDir, "linux", false); got != "vulkan" {
 		t.Errorf("linux bin/ + sibling lib/libggml-vulkan.so = %q, want vulkan", got)
+	}
+
+	// darwin reads the same companion dir, and a versioned library name counts
+	// even without the alias symlink next to the binaries.
+	if err := os.WriteFile(filepath.Join(libDir, "libggml-metal.0.20.2.dylib"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectAccel(binDir, "darwin", false); got != "metal" {
+		t.Errorf("darwin bin/ + sibling lib/libggml-metal.0.20.2.dylib = %q, want metal", got)
 	}
 
 	if err := os.WriteFile(filepath.Join(libDir, "ggml-cuda.dll"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if got := detectAccel(binDir, "windows", "amd64"); got != "cuda" {
+	if got := detectAccel(binDir, "windows", false); got != "cuda" {
 		t.Errorf("windows bin/ + sibling lib/ggml-cuda.dll = %q, want cuda", got)
 	}
 }
@@ -953,9 +962,10 @@ func TestDownloadLlamaCppStopWhilePaused(t *testing.T) {
 // directory holding the resolved llama-server binary: official builds are
 // GGML_BACKEND_DL, so the GPU support is whichever backend library sits next
 // to the binaries (windows ggml-cuda.dll / ggml-vulkan.dll; linux
-// libggml-vulkan.so or plain ggml-vulkan.so); darwin is arch-driven (arm64 =
-// embedded Metal, amd64 = CPU-only release), android is CPU-only, an empty
-// directory means "not installed", and unrecognized builds degrade to "cpu".
+// libggml-vulkan.so or plain ggml-vulkan.so; darwin any libggml-metal*.dylib,
+// with the hardware arch answering only when the tree holds no libraries at
+// all), android is CPU-only, an empty directory means "not installed", and
+// unrecognized builds degrade to "cpu".
 func TestDetectAccel(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string) {
@@ -966,28 +976,28 @@ func TestDetectAccel(t *testing.T) {
 	}
 
 	// Not installed: empty dir argument
-	if got := detectAccel("", "windows", "amd64"); got != "" {
+	if got := detectAccel("", "windows", false); got != "" {
 		t.Errorf("detectAccel(empty) = %q, want empty", got)
 	}
 
 	// No recognized backend library → cpu (every platform)
-	if got := detectAccel(dir, "windows", "amd64"); got != "cpu" {
+	if got := detectAccel(dir, "windows", false); got != "cpu" {
 		t.Errorf("bare dir on windows = %q, want cpu", got)
 	}
 
 	write("ggml-cuda.dll")
-	if got := detectAccel(dir, "windows", "amd64"); got != "cuda" {
+	if got := detectAccel(dir, "windows", false); got != "cuda" {
 		t.Errorf("windows + ggml-cuda.dll = %q, want cuda", got)
 	}
 	// CUDA wins over vulkan when both are present (deterministic preference)
 	write("ggml-vulkan.dll")
-	if got := detectAccel(dir, "windows", "amd64"); got != "cuda" {
+	if got := detectAccel(dir, "windows", false); got != "cuda" {
 		t.Errorf("windows + both backends = %q, want cuda", got)
 	}
 	if err := os.Remove(filepath.Join(dir, "ggml-cuda.dll")); err != nil {
 		t.Fatal(err)
 	}
-	if got := detectAccel(dir, "windows", "amd64"); got != "vulkan" {
+	if got := detectAccel(dir, "windows", false); got != "vulkan" {
 		t.Errorf("windows + ggml-vulkan.dll = %q, want vulkan", got)
 	}
 
@@ -995,31 +1005,84 @@ func TestDetectAccel(t *testing.T) {
 		t.Fatal(err)
 	}
 	write("libggml-vulkan.so")
-	if got := detectAccel(dir, "linux", "amd64"); got != "vulkan" {
+	if got := detectAccel(dir, "linux", false); got != "vulkan" {
 		t.Errorf("linux + libggml-vulkan.so = %q, want vulkan", got)
 	}
 	if err := os.Remove(filepath.Join(dir, "libggml-vulkan.so")); err != nil {
 		t.Fatal(err)
 	}
 	write("ggml-vulkan.so")
-	if got := detectAccel(dir, "linux", "amd64"); got != "vulkan" {
+	if got := detectAccel(dir, "linux", false); got != "vulkan" {
 		t.Errorf("linux + ggml-vulkan.so = %q, want vulkan", got)
 	}
-	if got := detectAccel(dir, "linux", "amd64"); got == "cuda" {
+	if got := detectAccel(dir, "linux", false); got == "cuda" {
 		t.Errorf("linux has no cuda backend lib form, got %q", got)
 	}
 
-	// darwin: arch-driven, no file needed
-	if got := detectAccel(dir, "darwin", "arm64"); got != "metal" {
-		t.Errorf("darwin arm64 = %q, want metal", got)
+	// darwin: the directory has no Metal library and no other ggml library
+	// either (a build tree that keeps its dylibs elsewhere), so the listing
+	// cannot answer and the hardware arch decides — arm64 metal, Intel cpu.
+	if got := detectAccel(dir, "darwin", true); got != "metal" {
+		t.Errorf("darwin, no libraries in tree, arm64 host = %q, want metal", got)
 	}
-	if got := detectAccel(dir, "darwin", "amd64"); got != "cpu" {
-		t.Errorf("darwin amd64 = %q, want cpu (x64 release is CPU-only)", got)
+	if got := detectAccel(dir, "darwin", false); got != "cpu" {
+		t.Errorf("darwin, no libraries in tree, Intel host = %q, want cpu", got)
 	}
 
 	// android: CPU-only regardless of directory contents
-	if got := detectAccel(dir, "android", "arm64"); got != "cpu" {
+	if got := detectAccel(dir, "android", false); got != "cpu" {
 		t.Errorf("android = %q, want cpu", got)
+	}
+}
+
+// TestDetectAccelDarwinOfficialLayouts pins the macOS answers for trees that do
+// carry their shared libraries next to the binaries — the case the arch guess
+// used to get wrong. The arm64 release ships the Metal backend and the x64 one
+// does not (verified against the upstream b10537 tarballs), so a library
+// listing, not runtime.GOARCH, decides: an x64 install on Apple Silicon — which
+// is what a Rosetta-launched app used to download — is CPU-only even though the
+// machine is arm64, and the Metal library names "metal" without asking.
+func TestDetectAccelDarwinOfficialLayouts(t *testing.T) {
+	write := func(dir, name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// arm64 release layout: base + cpu + metal
+	arm := t.TempDir()
+	for _, n := range []string{"libggml-base.dylib", "libggml-cpu.dylib", "libggml-metal.dylib"} {
+		write(arm, n)
+	}
+	if got := detectAccel(arm, "darwin", true); got != "metal" {
+		t.Errorf("arm64 release = %q, want metal", got)
+	}
+	if got := detectAccel(arm, "darwin", false); got != "metal" {
+		t.Errorf("arm64 release with an unverifiable host = %q, want metal", got)
+	}
+
+	// x64 release layout: base + cpu, no metal — on an arm64 host this is the
+	// CPU-only build that silently cost Metal before the listing decided.
+	x64 := t.TempDir()
+	write(x64, "libggml-base.dylib")
+	write(x64, "libggml-cpu.dylib")
+	if got := detectAccel(x64, "darwin", true); got != "cpu" {
+		t.Errorf("x64 release on an arm64 host = %q, want cpu", got)
+	}
+	if got := detectAccel(x64, "darwin", false); got != "cpu" {
+		t.Errorf("x64 release on an Intel host = %q, want cpu", got)
+	}
+
+	// Versioned-only layout (an extraction that dropped the alias symlinks):
+	// the Metal library is still there under its full name, so the stem match
+	// finds it and the answer stays metal on both hosts.
+	versioned := t.TempDir()
+	for _, n := range []string{"libggml-base.0.20.2.dylib", "libggml-cpu.0.20.2.dylib", "libggml-metal.0.20.2.dylib"} {
+		write(versioned, n)
+	}
+	if got := detectAccel(versioned, "darwin", true); got != "metal" {
+		t.Errorf("versioned-name arm64 tree = %q, want metal", got)
 	}
 }
 

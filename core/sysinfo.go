@@ -299,8 +299,8 @@ func getGPUInfo() []GPUInfo {
 	if gpuProbesUnsupported() {
 		return nil
 	}
-	// macOS: the arm64 release embeds Metal (one Apple GPU entry), the x64
-	// release is CPU-only (no GPU entry at all).
+	// macOS: Apple Silicon reports the one integrated GPU entry (the Metal
+	// release is the arm64 build); an Intel Mac has no GPU entry at all.
 	if runtime.GOOS == "darwin" {
 		return probeDarwinGPUs()
 	}
@@ -321,12 +321,15 @@ func getGPUInfo() []GPUInfo {
 	return gpus
 }
 
-// probeDarwinGPUs reports the integrated Apple Silicon GPU on darwin/arm64:
-// unified memory means there is no discrete VRAM to report (MemoryMB stays 0 —
-// the UI hides VRAM rows for unified-memory cards). darwin/amd64 release
-// builds are CPU-only (Metal OFF upstream), so no GPU entry exists there.
+// probeDarwinGPUs reports the integrated Apple Silicon GPU: unified memory
+// means there is no discrete VRAM to report (MemoryMB stays 0 — the UI hides
+// VRAM rows for unified-memory cards). The Metal-capable llama.cpp release is
+// the arm64 one, and an arm64 Mac runs that build whatever slice the app itself
+// was started in (see core/hostarch.go), so the machine decides and a Rosetta
+// session still sees its GPU. darwin on Intel silicon has no entry — that
+// release is CPU-only.
 func probeDarwinGPUs() []GPUInfo {
-	if runtime.GOARCH != "arm64" {
+	if !darwinHasAppleGPU(runtime.GOARCH, hostIsArm64("darwin")) {
 		return nil
 	}
 	return []GPUInfo{{
