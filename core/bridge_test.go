@@ -1138,3 +1138,101 @@ func TestResolveDirectModel(t *testing.T) {
 		t.Errorf("empty scan error = %v, want the no-models message", err)
 	}
 }
+
+// routerModelDir writes a scannable model into an already-pinned model
+// directory: <dir>/<author>/<variant>/model.gguf carrying geomGGUF's exact KV
+// geometry, extended to a sparse 1 GiB so the scan reports exact weights without
+// the test writing that many bytes.
+func routerModelDir(t *testing.T, dir, author, variant string) {
+	t.Helper()
+	vdir := filepath.Join(dir, author, variant)
+	if err := os.MkdirAll(vdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := geomGGUF(t, vdir, "model.gguf")
+	if err := os.Truncate(path, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBuildServerCommandRouterCacheRAMBounded verifies the router-mode branch
+// bounds the prompt cache the way direct mode does, against the heaviest entry
+// of the library rather than against the nothing that is resident when a
+// router-mode server launches. Measured desktop impact: at the unbounded 8192
+// default, six distinct ~6,890-token requests added 756 MiB of RSS each with no
+// plateau, so a plan that already spends the RAM budget over-commits the machine
+// mid-session and the user sees swapping, not an error.
+func TestBuildServerCommandRouterCacheRAMBounded(t *testing.T) {
+	dir := pinDirectModelDir(t)
+	routerModelDir(t, dir, "router-author", "router-model")
+	pinProbeFreeMemoryGB(t, 4) // 4096 MiB free at launch
+
+	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 8192}
+	_, args, err := buildServerCommand(cfg, "/tmp/preset.ini", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The one model is untuned, so it is priced at its trained context:
+	// 1024 MiB weights + 64 MiB KV + 1280 MiB overhead = 2368 MiB, which leaves
+	// 1728 MiB of the 4096 and therefore a 864 MiB cache.
+	if v, ok := argValue(args, "--cache-ram"); !ok || v != "864" {
+		t.Errorf("--cache-ram = %q (present %v), want 864: %v", v, ok, args)
+	}
+	for _, a := range args {
+		if a == "8192" {
+			t.Errorf("the unbounded budget leaked into the router args: %v", args)
+		}
+	}
+	var noted bool
+	for _, line := range serverLogsCopy() {
+		if strings.Contains(line, "prompt cache budget 8192 -> 864") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Error("the bounded router prompt cache was not reported to the server log")
+	}
+}
+
+// TestBuildServerCommandRouterCacheRAMZeroDisables covers the bound that leaves
+// no room at all: a stored config whose context exceeds the free memory has to
+// emit --cache-ram 0, because omitting the flag would hand the budget to
+// llama-server's own default of 8192 MiB — the opposite of what was measured.
+func TestBuildServerCommandRouterCacheRAMZeroDisables(t *testing.T) {
+	dir := pinDirectModelDir(t)
+	routerModelDir(t, dir, "router-author", "router-model")
+	modelConfigsMu.Lock()
+	cachedModelConfigs["router-model"] = ModelConfig{CtxSize: 131072, UBatchSize: 512}
+	modelConfigsMu.Unlock()
+	pinProbeFreeMemoryGB(t, 2) // below this plan's 1024 + 256 KV + 1280 overhead
+
+	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 8192}
+	_, args, err := buildServerCommand(cfg, "/tmp/preset.ini", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := argValue(args, "--cache-ram"); !ok || v != "0" {
+		t.Errorf("--cache-ram = %q (present %v), want the explicit 0: %v", v, ok, args)
+	}
+}
+
+// TestBuildServerCommandAndroidCacheRAMZeroDisables covers the same pass-through
+// on the direct-mode branch: with no headroom the bounded budget is emitted as
+// --cache-ram 0 instead of being dropped.
+func TestBuildServerCommandAndroidCacheRAMZeroDisables(t *testing.T) {
+	withPlatformGOOS(t, "android")
+	pinProbeFreeMemoryGB(t, 3) // below this load's 4096 + 128 + 1280 MiB
+	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 8192}
+	d := &directModel{
+		info: ModelInfo{Name: "phone-model", Path: "/models/q.gguf", SizeBytes: 4 << 30},
+		cfg:  ModelConfig{CtxSize: 4096},
+	}
+	_, args, err := buildServerCommand(cfg, "", d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := argValue(args, "--cache-ram"); !ok || v != "0" {
+		t.Errorf("--cache-ram = %q (present %v), want the explicit 0: %v", v, ok, args)
+	}
+}

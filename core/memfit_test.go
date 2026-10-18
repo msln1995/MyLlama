@@ -442,3 +442,62 @@ func TestAndroidDirectStartNoopSkipsFitCheck(t *testing.T) {
 		t.Error("no-op start must not stop the running server")
 	}
 }
+
+// geomGGUF writes a readable GGUF header with a small exact KV geometry: 4
+// layers, 512 bytes of f16 KV per token per layer (4 layers x 512 B = 2 MiB per
+// 4096 tokens), trained context 32768. Every byte figure the tests below assert
+// is arithmetic from these keys.
+func geomGGUF(t *testing.T, dir, name string) string {
+	t.Helper()
+	return writeTempGGUF(t, dir, name, buildGGUF(3,
+		strKV("general.architecture", "qwen2"),
+		u32KV("qwen2.block_count", 4),
+		u64KV("qwen2.context_length", 32768),
+		u32KV("qwen2.embedding_length", 512),
+		u32KV("qwen2.attention.head_count", 4),
+		u32KV("qwen2.attention.head_count_kv", 1),
+		u32KV("qwen2.attention.key_length", 128),
+		u32KV("qwen2.attention.value_length", 128),
+	))
+}
+
+// mib is the MiB multiplier the load estimates are asserted in.
+func mib(n int64) int64 { return n * (1 << 20) }
+
+// TestMaxModelLoadBytes prices every entry of a library and keeps the heaviest,
+// which is what the router-mode prompt-cache budget is bounded against (models
+// load lazily, so the launch-time resident set proves nothing). The case that
+// matters is the untuned model: the preset writer emits no --ctx-size for it, so
+// llama-server brings up the trained 32768-token context, and pricing it at the
+// settings page's 4096 default would under-charge it by 56 MiB on this fixture.
+func TestMaxModelLoadBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := geomGGUF(t, dir, "geom.gguf")
+	weights := int64(1 << 30) // 1024 MiB
+	overhead := mib(1280)     // runtimeOverheadBytes at the default ubatch
+
+	if got := maxModelLoadBytes(nil, nil); got != 0 {
+		t.Errorf("empty library = %d, want 0", got)
+	}
+
+	untuned := ModelInfo{Name: "untuned", Path: path, SizeBytes: weights}
+	tuned := ModelInfo{Name: "tuned", Path: path, SizeBytes: weights}
+	cfgs := map[string]ModelConfig{"tuned": {CtxSize: 4096, UBatchSize: 512}}
+
+	// 1024 weights + 8 KV (4096 tokens) + 1280 overhead.
+	if got := modelLoadBytes(tuned, cfgs["tuned"]); got != weights+mib(8)+overhead {
+		t.Errorf("tuned ctx 4096 = %d MiB, want %d", got/(1<<20), (weights+mib(8)+overhead)/(1<<20))
+	}
+	// The untuned entry must be priced at the trained context (64 MiB of KV),
+	// not at the app's 4096 default.
+	if got := maxModelLoadBytes([]ModelInfo{untuned}, nil); got != weights+mib(64)+overhead {
+		t.Errorf("untuned model = %d MiB, want %d (trained ctx 32768)", got/(1<<20), (weights+mib(64)+overhead)/(1<<20))
+	}
+	// Heaviest of the three shapes wins, and a stored config can be heavier than
+	// the trained-context fallback.
+	big := ModelInfo{Name: "big", Path: path, SizeBytes: weights}
+	cfgs["big"] = ModelConfig{CtxSize: 131072, UBatchSize: 512}
+	if got := maxModelLoadBytes([]ModelInfo{tuned, untuned, big}, cfgs); got != weights+mib(256)+overhead {
+		t.Errorf("heaviest = %d MiB, want %d (stored ctx 131072)", got/(1<<20), (weights+mib(256)+overhead)/(1<<20))
+	}
+}

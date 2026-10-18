@@ -420,14 +420,15 @@ func buildServerCommand(cfg ServerConfig, presetPath string, d *directModel) (st
 			// The prompt cache keeps copying prompt state into host RAM while
 			// the session runs, which the start-time guard cannot see because
 			// it happens after the check, so on a phone the budget is bounded
-			// by the memory that check left over (see promptCacheRAMMiB).
+			// by the memory that check left over (see promptCacheRAMMiB). The
+			// bounded figure always reaches argv, including 0: omitting the
+			// flag would hand llama-server's own 8192 MiB default to a load
+			// that just measured no headroom at all.
 			cacheRAM := promptCacheRAMMiB(cfg.CacheRAM, modelLoadBytes(d.info, d.cfg), availableMemoryBytes())
 			if cacheRAM != cfg.CacheRAM {
 				addServerLog(fmt.Sprintf("[INFO] direct mode: prompt cache budget %d -> %d MiB, the memory this load leaves free", cfg.CacheRAM, cacheRAM))
 			}
-			if cacheRAM > 0 {
-				args = append(args, "--cache-ram", strconv.Itoa(cacheRAM))
-			}
+			args = append(args, "--cache-ram", strconv.Itoa(cacheRAM))
 		}
 		// Optional bearer-token authentication for the inference API is NOT
 		// passed on argv: the key is delivered through the LLAMA_API_KEY
@@ -450,7 +451,16 @@ func buildServerCommand(cfg ServerConfig, presetPath string, d *directModel) (st
 		"--no-webui",
 	}
 	if cfg.CacheRAM > 0 {
-		args = append(args, "--cache-ram", strconv.Itoa(cfg.CacheRAM))
+		// Router mode loads models lazily, so the memory the prompt cache may
+		// grow into during the session is bounded against the heaviest entry in
+		// the library rather than against whatever is resident at launch (see
+		// heaviestRouterLoad and promptCacheRAMMiB). As in direct mode the
+		// bounded figure always reaches argv, 0 included.
+		cacheRAM := promptCacheRAMMiB(cfg.CacheRAM, heaviestRouterLoad(), availableMemoryBytes())
+		if cacheRAM != cfg.CacheRAM {
+			addServerLog(fmt.Sprintf("[INFO] prompt cache budget %d -> %d MiB, the memory the heaviest configured model leaves free", cfg.CacheRAM, cacheRAM))
+		}
+		args = append(args, "--cache-ram", strconv.Itoa(cacheRAM))
 	}
 	// Optional bearer-token authentication for the inference API is NOT passed
 	// on argv: the key is delivered through the LLAMA_API_KEY environment

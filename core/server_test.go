@@ -121,8 +121,12 @@ func TestBuildServerCommandLANHost(t *testing.T) {
 }
 
 // TestBuildServerCommandCacheRAM verifies CacheRAM config appends the --cache-ram argument,
-// and MaxModels minimum is 1 (prevents passing 0 to llama-server).
+// and MaxModels minimum is 1 (prevents passing 0 to llama-server). The router-mode budget is
+// bounded by what the library and the free memory allow, so this passes an empty library and
+// a machine with room to spare — the point here is the figure reaching argv unchanged.
 func TestBuildServerCommandCacheRAM(t *testing.T) {
+	pinDirectModelDir(t)
+	pinProbeFreeMemoryGB(t, 64) // 64 GiB free, nothing loaded: 4096 fits
 	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 0, CacheRAM: 4096}
 	_, args, err := buildServerCommand(cfg, "/tmp/preset.ini", nil)
 	if err != nil {

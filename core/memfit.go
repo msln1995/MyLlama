@@ -2,7 +2,7 @@ package core
 
 import "fmt"
 
-// ─── Direct-mode memory pre-check ─────────────────────────────────
+// ─── Memory fit pre-check (direct mode) ───────────────────────────
 // Android has no swap and runs a low-memory killer: when a load asks for more
 // memory than the kernel reports as available, it does not fail as an error —
 // the process thrashes until the app (and its WebView renderer) is killed,
@@ -56,11 +56,68 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 	return total + runtimeOverheadBytes(cfg.UBatchSize)
 }
 
-// promptCacheShare is how much of the memory the start guard leaves over the
-// planned load the prompt cache may retain. The rest stays with the OS: a phone
-// that begins a session with zero slack has nothing left for the next turn's
-// allocator, and the low-memory killer is the fallback.
+// ─── Prompt-cache budget (both serving modes) ─────────────────────
+
+// promptCacheShare is how much of the memory the planned load leaves over the
+// prompt cache may retain. The rest stays with the OS: a machine that begins a
+// session with zero slack has nothing left for the next turn's allocator, and on
+// a phone the low-memory killer is the fallback.
 const promptCacheShare = 0.5
+
+// heaviestRouterLoad estimates the largest load a router-mode server may bring
+// up during its lifetime. Models load lazily on their first request, so the
+// start-time prompt-cache budget cannot be priced against what is resident at
+// launch (nothing) — it has to assume the heaviest entry in the library gets
+// loaded at some point in the session. 0 for an empty or unreadable library.
+//
+// The whole load is charged against host RAM, including the KV cache a desktop
+// plan would keep on the GPU. That over-charges a GPU-offloaded plan on purpose:
+// the bound only ever shrinks a budget, and guessing which layers a given preset
+// will actually offload would need the runtime's own allocation, not this
+// estimate.
+func heaviestRouterLoad() int64 {
+	models := scanModels()
+	modelConfigsMu.Lock()
+	cfgs := make(map[string]ModelConfig, len(cachedModelConfigs))
+	for k, v := range cachedModelConfigs {
+		cfgs[k] = v
+	}
+	modelConfigsMu.Unlock()
+	return maxModelLoadBytes(models, cfgs)
+}
+
+// maxModelLoadBytes is heaviestRouterLoad's pure core: the largest modelLoadBytes
+// over the given models and per-model configs. Pure so tests drive the
+// library-shape cases (which config wins, the untuned fallback, an empty list)
+// without a device or a model directory.
+func maxModelLoadBytes(models []ModelInfo, cfgs map[string]ModelConfig) int64 {
+	var heaviest int64
+	for _, m := range models {
+		if n := modelLoadBytes(m, routerModelPlan(cfgs, m)); n > heaviest {
+			heaviest = n
+		}
+	}
+	return heaviest
+}
+
+// routerModelPlan resolves the config a router-mode load runs m with: the stored
+// per-model config when there is one, otherwise what the preset writer actually
+// emits for an untuned model — no --ctx-size, so llama-server brings up the
+// context the model was trained with. Pricing that case at the settings page's
+// 4096 default instead would under-charge the library's largest resident by
+// orders of magnitude, which is exactly the load the cache budget has to make
+// room for. Metrics that cannot be read keep the app default, the same fallback
+// modelLoadBytes uses for the rest of the geometry.
+func routerModelPlan(cfgs map[string]ModelConfig, m ModelInfo) ModelConfig {
+	if c, ok := cfgs[m.Name]; ok {
+		return c
+	}
+	c := defaultModelConfig()
+	if mm, ok := readGGUFModelMetrics(m.Path); ok && mm.ContextLength > 0 {
+		c.CtxSize = mm.ContextLength
+	}
+	return c
+}
 
 // promptCacheRAMMiB bounds llama-server's prompt-cache budget (MiB) for one
 // planned load. The cache is not a ceiling on something already allocated: every
@@ -73,8 +130,20 @@ const promptCacheShare = 0.5
 // tokens x the KV geometry; the same requests with --cache-ram 0 left RSS flat
 // (+41 MiB over 10,561 tokens), and --cache-ram 256 grew to a peak and fell back
 // as it evicted. So the budget is a real cap and the retention is the load's
-// only unbounded term — which is why a phone gets min(requested, share of the
-// headroom) instead of a desktop-sized 8 GiB.
+// only unbounded term.
+//
+// Re-measured at the desktop default of 8192 MiB with the same model serving six
+// distinct ~6,890-token requests: +756 MiB of RSS per request and no plateau
+// before the probe aborted at 5 GiB total — eleven requests of that size reach
+// the full 8 GiB. That is why both serving modes bound the budget and not only
+// the phone: a plan that already spends the RAM budget plus an 8 GiB cache is
+// over-committed by design, and on a desktop it shows up as swapping mid-session
+// instead of a killed process.
+//
+// A bound of 0 means "this load has no room left to retain anything", so callers
+// must pass it through as --cache-ram 0 (disable): omitting the flag instead
+// hands the budget to llama-server's own default, which is 8192 MiB — the exact
+// opposite of what was measured.
 //
 // requestedMiB <= 0 (the cache is off) and an unknown availBytes (failed probe)
 // both pass through untouched: this function only ever shrinks a budget the
