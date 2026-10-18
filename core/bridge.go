@@ -304,9 +304,18 @@ func spawnServerProcess(llamaServer string, args []string, cfg ServerConfig, res
 	serverDone = done
 	serverMu.Unlock()
 
+	// Android only in practice (no-op seams elsewhere): a backgrounded app is
+	// moved to the little-core cpuset and can be frozen outright, and the
+	// llama-server child inherits both, so an in-flight generation would stop
+	// the moment the user leaves the app or the screen goes off. The
+	// foreground service holds the process up for exactly as long as the child
+	// serves (see core/foreground.go).
+	keepAwakeOnFn(servingNotification(resident))
+
 	go func(cmd *exec.Cmd, tailer *serverLogTailer, done chan struct{}) {
 		err := cmd.Wait()
 		serverMu.Lock()
+		wasCurrent := serverCmd == cmd
 		serverRunning = false
 		serverStartTime = time.Time{}
 		serverPort = 0
@@ -323,6 +332,12 @@ func spawnServerProcess(llamaServer string, args []string, cfg ServerConfig, res
 			serverDone = nil
 		}
 		serverMu.Unlock()
+		// Release the foreground-service hold only when this instance was the
+		// current server: a model switch restarts the child, and the outgoing
+		// goroutine must not tear down the service the new start just raised.
+		if wasCurrent {
+			keepAwakeOffFn()
+		}
 		// close(done) strictly AFTER the serverMu critical section (a
 		// graceful-stop waiter in stopServerInternal must resume only once
 		// the lifecycle state is fully cleared, so it can never observe or
