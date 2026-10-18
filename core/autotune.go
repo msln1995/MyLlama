@@ -935,11 +935,20 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	cfg.Threads = threads
 
 	// ramCtxSize picks the largest ladder context whose weights + KV plus the
-	// given reserve fit in usable RAM, falling back to the smallest ladder
-	// entry. The reserve is the memory a load needs that is neither weights nor
-	// KV; the CPU-only plan passes tuneCPURuntimeOverheadMB (see its
-	// measurement note), the Metal plan passes 0 to stay byte-identical — no
-	// Apple measurement isolates that term yet, so it is not guessed there.
+	// reserve charged for that context fit in usable RAM, falling back to the
+	// smallest ladder entry. The reserve is the memory a load needs that is
+	// neither weights nor KV: the CPU-only plan passes the flat
+	// tuneCPURuntimeOverheadMB (see its measurement note), the Metal plan
+	// passes computeBuf — the curve the discrete-GPU full-offload plans already
+	// charge for the same batch buffers and graph scratch. Measured on an M2:
+	// a Metal load of a 24-layer model reports 10.76 MiB of MTL0 plus 4.01 MiB
+	// of CPU compute buffers in llama.cpp's own memory breakdown, and the
+	// device pool it allocates them from (recommendedMaxWorkingSetSize, 18186
+	// MiB on this 24 GB machine) is the same physical RAM the RAM budget
+	// already counts — so the term exists on this path too and passing 0 was
+	// not "no overhead", it was an uncharged load. The curve's context growth
+	// is what pays for the superlinear logits/graph at the huge rungs this
+	// ladder can pick.
 	// ramKVPerTok prices the ladder at the pinned q8_0 pair so the cache saving
 	// converts into context instead of only into headroom; ramKVCache writes the
 	// matching pair, and the two are always used together.
@@ -947,13 +956,16 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	if m.PinnedQ8KV {
 		ramKVPerTok *= tuneQ8KVSizeRatio
 	}
-	ramCtxSize := func(reserve float64) int {
+	ramCtxSize := func(reserve func(ctx int) float64) int {
 		for _, ctx := range ladder {
-			if w+ramKVPerTok*float64(ctx)+reserve <= usableRAM {
+			if w+ramKVPerTok*float64(ctx)+reserve(ctx) <= usableRAM {
 				return ctx
 			}
 		}
 		return ladder[len(ladder)-1]
+	}
+	flatReserve := func(bytes float64) func(int) float64 {
+		return func(int) float64 { return bytes }
 	}
 
 	// ramKVCache returns the KV cache pair matching the ladder pricing above:
@@ -973,7 +985,7 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 		cfg.GPULayers = "0"
 		cfg.FlashAttn = false
 		cfg.CacheTypeK, cfg.CacheTypeV = ramKVCache()
-		cfg.CtxSize = ramCtxSize(tuneCPURuntimeOverheadMB * MB)
+		cfg.CtxSize = ramCtxSize(flatReserve(tuneCPURuntimeOverheadMB * MB))
 	}
 
 	// Metal plan (Apple Silicon): unified memory puts every weight one
@@ -1004,7 +1016,7 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 		cfg.GPULayers = "all"
 		cfg.FlashAttn = false
 		cfg.CacheTypeK, cfg.CacheTypeV = ramKVCache()
-		cfg.CtxSize = ramCtxSize(0)
+		cfg.CtxSize = ramCtxSize(computeBuf)
 		return cfg
 	}
 

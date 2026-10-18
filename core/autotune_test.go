@@ -1109,8 +1109,8 @@ func TestTuneModelConfigMetal(t *testing.T) {
 	// usableRAM = min(24, 32*0.90) * 0.85 GiB = 20.4 GiB = 20889.6 MiB
 	hwApple := tuneHardware{GPUVendor: vendorApple, RAMTotalGB: 32, RAMFreeGB: 24, PhysicalCores: 10, LogicalCPUs: 10}
 
-	// Dense 4B fixture: ctx 131072 needs 2765 + 18432 = 21197 MiB > 20889.6 →
-	// caps at 65536 (2765 + 9216 = 11981 MiB, fits).
+	// Dense 4B fixture: ctx 131072 needs 2765 + 18432 + 1152 = 22349 MiB >
+	// 20889.6 → caps at 65536 (2765 + 9216 + 640 = 12621 MiB, fits).
 	tm4B := tuneModel{WeightsBytes: 2765 << 20, Layers: 36, KVBytesPerTokPerLayerF16: 4096, TrainCtx: 262144}
 	cfg := tuneModelConfig(hwApple, tm4B)
 	if cfg.GPULayers != "all" || cfg.CtxSize != 65536 {
@@ -1134,10 +1134,14 @@ func TestTuneModelConfigMetal(t *testing.T) {
 		WeightsBytes: 13435 << 20, Layers: 47, KVBytesPerTokPerLayerF16: 1152,
 		TrainCtx: 202752, ExpertBytes: 11995 << 20, DenseBytes: 1440 << 20,
 	}
-	// ctx 131072: 13435 + 6768 = 20203 MiB ≤ 20889.6 → fits.
+	// ctx 131072 costs 13435 + 6768 + 1152 (computeBuf at the huge rung) =
+	// 21355 MiB > 20889.6, so the Metal plan now caps at 65536 (13435 + 3384 +
+	// 640 = 17459 MiB) — the reserve the discrete-GPU full-offload plans charge
+	// is charged here too, because the Metal load allocates the same buffers
+	// out of the same physical RAM.
 	cfg = tuneModelConfig(hwApple, tmGLM)
-	if cfg.GPULayers != "all" || cfg.CtxSize != 131072 {
-		t.Errorf("MoE on apple = gpuLayers %q ctx %d, want all / 131072", cfg.GPULayers, cfg.CtxSize)
+	if cfg.GPULayers != "all" || cfg.CtxSize != 65536 {
+		t.Errorf("MoE on apple = gpuLayers %q ctx %d, want all / 65536", cfg.GPULayers, cfg.CtxSize)
 	}
 	if cfg.CPUMoe || cfg.NCpuMoe != 0 {
 		t.Errorf("MoE on apple must stay on the plain metal plan: %+v", cfg)
