@@ -8,6 +8,10 @@ Before starting, the app scans the model directories (the model download path pl
 - Or point the "Model Download Path" row on the Preferences page at your existing model folder;
 - Or import an existing model directory with "Choose Folder" on the "My Models" tab of the Models page (imported models are recognized by the service too).
 
+## "only ... of memory is available" when starting the service on a phone
+
+Android has no swap: once a load needs more memory than the system currently reports as available, it does not fail with an error — the low-memory killer takes the process down, which looks like the app simply crashing without explanation. Before launching llama-server the app works out what that load needs (model weights + the KV cache for the configured context size + the runtime overhead) and, when it cannot fit, reports both numbers instead of letting the system kill it; a server that is already running is left untouched. Fix it by lowering the "Context Size", picking a smaller quantization (a 4B at Q4_K_M is roughly 2.5 GB), or using a phone-sized model. A model you never configured starts with the app's default 4096-token context rather than the context the model was trained with (hundreds of thousands of tokens of cache — impossible on a phone). The check only applies to Android direct-load mode; desktop still lazy-loads models on demand.
+
 ## Port already in use
 
 - **Service port (default 8080)**: if starting fails and the log reports the port is taken, check what occupies 8080; for a lasting conflict, change Port to another value between 1024–65535 in "API Router → Settings" (while the service is stopped).

@@ -1,6 +1,10 @@
 package core
 
-import "testing"
+import (
+	"runtime"
+	"slices"
+	"testing"
+)
 
 // ─── parseAndroidCPUModel ────────────────────────────────────────
 
@@ -86,5 +90,83 @@ func TestCountPerformanceCPUs(t *testing.T) {
 	}
 	if got := countPerformanceCPUs([]int{0, 0, 0}); got != 0 {
 		t.Errorf("all zeros: countPerformanceCPUs = %d, want 0", got)
+	}
+}
+
+// ─── CPU presence list ───────────────────────────────────────────
+
+func pinProbeCPUPresent(t *testing.T, out string) {
+	t.Helper()
+	orig := probeCPUPresent
+	probeCPUPresent = func() string { return out }
+	t.Cleanup(func() { probeCPUPresent = orig })
+}
+
+// TestParseCPUPresentList covers the kernel CPU list format (ranges, singles,
+// mixed and unordered lists, duplicate collapse) and the guards: malformed
+// tokens, reversed ranges and implausibly wide ranges are skipped, leaving nil
+// when nothing usable was parsed.
+func TestParseCPUPresentList(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []int
+	}{
+		{"0-7\n", []int{0, 1, 2, 3, 4, 5, 6, 7}},
+		{"0-3,4-7", []int{0, 1, 2, 3, 4, 5, 6, 7}},
+		{"4-7,0-3", []int{0, 1, 2, 3, 4, 5, 6, 7}},
+		{"0,2,4", []int{0, 2, 4}},
+		{"0-2,1-3", []int{0, 1, 2, 3}},
+		{"", nil},
+		{"garbage", nil},
+		{"-1", nil},
+		{"3-1", nil},
+		{"0-2147483647", nil},
+	}
+	for _, tt := range tests {
+		if got := parseCPUPresentList(tt.in); !slices.Equal(got, tt.want) {
+			t.Errorf("parseCPUPresentList(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestCPUPresentIDsUsesHardwareTruth is the regression for the affinity-skewed
+// topology sample: an Android app confined to a little-core cpuset reports
+// fewer CPUs through runtime.NumCPU than the SoC has, which used to shrink both
+// the frequency sample and the reported core count. The presence list decides.
+func TestCPUPresentIDsUsesHardwareTruth(t *testing.T) {
+	pinProbeCPUPresent(t, "0-7")
+	ids := cpuPresentIDs()
+	if !slices.Equal(ids, []int{0, 1, 2, 3, 4, 5, 6, 7}) {
+		t.Errorf("cpuPresentIDs = %v, want the 8 CPUs the hardware presents", ids)
+	}
+
+	// Unreadable sysfs keeps the historical 0..NumCPU-1 range.
+	pinProbeCPUPresent(t, "")
+	ids = cpuPresentIDs()
+	if len(ids) != runtime.NumCPU() {
+		t.Fatalf("cpuPresentIDs fallback = %v, want %d entries", ids, runtime.NumCPU())
+	}
+	for i, id := range ids {
+		if id != i {
+			t.Errorf("fallback ids[%d] = %d, want %d", i, id, i)
+		}
+	}
+}
+
+// TestPresentCoreCount verifies the presence list can only raise the sampled
+// processor count, never lower it, and that an unreadable list falls back to
+// the affinity-based count.
+func TestPresentCoreCount(t *testing.T) {
+	pinProbeCPUPresent(t, "0-7")
+	if got := presentCoreCount(4); got != 8 {
+		t.Errorf("presentCoreCount(4) = %d, want 8 (a cpuset-confined sample)", got)
+	}
+	if got := presentCoreCount(12); got != 12 {
+		t.Errorf("presentCoreCount(12) = %d, want 12 (never lowered)", got)
+	}
+
+	pinProbeCPUPresent(t, "")
+	if got := presentCoreCount(0); got != runtime.NumCPU() {
+		t.Errorf("presentCoreCount(0) fallback = %d, want NumCPU %d", got, runtime.NumCPU())
 	}
 }
