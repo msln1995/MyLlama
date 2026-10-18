@@ -666,8 +666,8 @@ export const messages: Record<Locale, Record<string, string>> = {
     'modelSettings.cacheTypeK': 'KV 缓存 K 类型',
     // design draft frame ⑫ pselect option labels (both tiers)
     'modelSettings.defaultF16': '默认 f16',
-    'modelSettings.q8Recommended': 'q8_0（缓存省一半）',
-    'modelSettings.cacheTypeKHint': 'q8_0 缓存体积几乎减半,代价是解码略慢(实测 M2 Metal:28.4 vs f16 30.1 t/s)。K 和 V 都选 q8_0 才算完整的量化对:自动调参会保留它,并按减半后的缓存定价上下文,省下的内存直接换成更大的窗口(实测 4B Q4_K_M + 24GB:64K 档的空闲内存门槛从约 13.4 GB 降到 8.4 GB);f32/f16 精度高体积大;q4 系最省,但自动调参会重置回默认',
+    'modelSettings.q8Recommended': 'q8_0（缓存近乎减半）',
+    'modelSettings.cacheTypeKHint': 'q8_0 缓存体积几乎减半(M2 实测为 f16 的 0.53×),代价是解码略慢(实测 M2 Metal:28.4 vs f16 30.1 t/s)。K、V 不同型按两者的平均计价(q8_0 / f16 实测 0.77×);每种类型都按 M2 实测到的真实体积计价,内存预估和启动前的内存检查用同一张表。K 和 V 都选 q8_0 才算完整的量化对:自动调参会保留它,并按 0.53× 的缓存定价上下文,省下的内存直接换成更大的窗口(实测 4B Q4_K_M + 24GB 机器:64K 档的空闲内存门槛从约 12.6 GiB 降到 8.4 GiB);f32/f16 精度高体积大;q4 系最省,但自动调参会重置回默认',
     'modelSettings.cacheTypeV': 'KV 缓存 V 类型',
     'modelSettings.cacheTypeVHint': '同 K 类型,一般跟随 K 保持一致;只有 K/V 都是 q8_0 时自动调参才会保留量化并放大上下文',
     'modelSettings.loadMode': '加载方式',
@@ -1497,8 +1497,8 @@ export const messages: Record<Locale, Record<string, string>> = {
     'modelSettings.cacheTypeK': 'KV Cache K Type',
     // design draft frame ⑫ pselect option labels (both tiers)
     'modelSettings.defaultF16': 'Default (f16)',
-    'modelSettings.q8Recommended': 'q8_0 (half the cache)',
-    'modelSettings.cacheTypeKHint': 'q8_0 nearly halves the cache at a small decode cost (measured M2 Metal: 28.4 vs 30.1 t/s on f16). K and V both on q8_0 is a complete quantized pair: auto-tune keeps it and prices the context ladder at the halved cache footprint, so the saved memory turns into a larger window (measured 4B Q4_K_M + 24 GB: the 64K tier needs ~13.4 GB free in f16 but only ~8.4 GB with q8_0); f32/f16 higher precision, larger footprint; q4 is the most compact but auto-tune resets it to the default',
+    'modelSettings.q8Recommended': 'q8_0 (cache nearly halved)',
+    'modelSettings.cacheTypeKHint': 'q8_0 nearly halves the cache — measured on an M2 at 0.53× the f16 footprint — at a small decode cost (measured M2 Metal: 28.4 vs 30.1 t/s on f16). A mismatched pair is priced as the mean of its halves (q8_0 / f16 measured 0.77×); every type is priced at the size measured on that M2, and the memory estimate and the pre-start memory check use the same table. K and V both on q8_0 is a complete quantized pair: auto-tune keeps it and prices the context ladder at the 0.53× cache footprint, so the saved memory turns into a larger window (measured 4B Q4_K_M + 24 GB machine: the 64K tier needs about 12.6 GiB free, only about 8.4 GiB with q8_0); f32/f16 higher precision, larger footprint; q4 is the most compact but auto-tune resets it to the default',
     'modelSettings.cacheTypeV': 'KV Cache V Type',
     'modelSettings.cacheTypeVHint': 'Same as the K type; usually follow K — auto-tune only keeps the quantization (and grows the context) when both K and V are q8_0',
     'modelSettings.loadMode': 'Load Mode',

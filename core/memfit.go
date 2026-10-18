@@ -32,27 +32,26 @@ func availableMemoryBytes() int64 {
 // faster prefill is charged for the memory it actually costs.
 //
 // The KV figure reuses the same tuneModel geometry the auto-tuner sizes its
-// context against, so the guard refuses exactly the plans that budget cannot
-// pay for. The q8_0 pair is priced at tuneQ8KVSizeRatio because that is the one
-// cache selection the RAM-bounded plans keep and price the same way (see
-// tuneModel.PinnedQ8KV): pricing it at f16 instead would have this guard refuse
-// the very context the tuner just selected, and direct mode does pass
-// --cache-type-k/v through, so the halved cache is real here. Every other cache
-// type stays charged at f16, the upper bound, since a quantized cache only makes
-// the load smaller and only q8_0 has a measured footprint ratio on this tuner's
-// hardware. cfg.CtxSize <= 0 charges no KV; the router-mode callers price the
-// same models through routerModelPlan, which bounds an untuned context first, so
-// nothing that reaches this function is actually unbounded.
+// context against and prices it with the cache type the config actually selects
+// (kvCacheSizeFactor's measured table), so the guard refuses exactly the plans
+// that budget cannot pay for. Pricing every selection but a pinned q8_0 pair at
+// f16 was not the conservatism it looked like: it charged a q4_0 pair 3.6 times
+// what llama.cpp allocates for it, which both refused loads that fit and made
+// fittingCtxRung name a tier two rungs below the one the user could afford. Only
+// the q8_0 pair was ever honored because it was the only selection with a
+// measured footprint ratio - the table now has one for every type the settings
+// page offers, on the same backend this guard runs on. Both serving modes pass
+// --cache-type-k/v through, so the halved cache is real here. cfg.CtxSize <= 0
+// charges no KV; the router-mode callers price the same models through
+// routerModelPlan, which bounds an untuned context first, so nothing that
+// reaches this function is actually unbounded.
 func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 	mm, ok := readGGUFModelMetrics(m.Path)
 	tm := buildTuneModel(mm, ok, tuneWeightsBytes(m))
 	total := tm.WeightsBytes
 	if cfg.CtxSize > 0 {
 		kv := tm.KVBytesPerTokPerLayerF16 * float64(tm.Layers) * float64(cfg.CtxSize)
-		if pinnedQ8KV(cfg) {
-			kv *= tuneQ8KVSizeRatio
-		}
-		total += int64(kv)
+		total += int64(kv * kvCacheSizeFactor(cfg))
 	}
 	return total + runtimeOverheadBytes(cfg.UBatchSize)
 }

@@ -38,12 +38,19 @@ describe('kvCacheTypeFactor', () => {
     expect(kvCacheTypeFactor('bf16')).toBe(1)
   })
 
-  it('f32 doubles, quant types scale down', () => {
+  it('f32 doubles, quant types take their measured footprint', () => {
+    // Every quantized row is the RSS step llama.cpp actually allocated for that
+    // type (core/autotune.go's kvCacheTypeSizeRatio carries the same table with
+    // its measurements). The clean 0.5 this test used to assert for q8_0
+    // understated the real cache by 6%, and the 0.3125 / 0.25 guesses by up to
+    // 20% - a saving the page claimed and the guard did not.
     expect(kvCacheTypeFactor('f32')).toBe(2)
-    expect(kvCacheTypeFactor('q8_0')).toBe(0.5)
-    expect(kvCacheTypeFactor('q5_0')).toBe(0.3125)
-    expect(kvCacheTypeFactor('q4_0')).toBe(0.25)
-    expect(kvCacheTypeFactor('iq4_nl')).toBe(0.25)
+    expect(kvCacheTypeFactor('q8_0')).toBe(0.53125)
+    expect(kvCacheTypeFactor('q5_0')).toBe(0.3441)
+    expect(kvCacheTypeFactor('q5_1')).toBe(0.3754)
+    expect(kvCacheTypeFactor('q4_0')).toBe(0.2816)
+    expect(kvCacheTypeFactor('q4_1')).toBe(0.3129)
+    expect(kvCacheTypeFactor('iq4_nl')).toBe(0.2816)
   })
 
   it('unknown strings degrade to the f16 ratio (never understate)', () => {
@@ -63,19 +70,26 @@ describe('estimateMemory', () => {
     expect(est.headroom).toBe('ok')
   })
 
-  it('quantized KV types halve the KV term and report the saving', () => {
+  it('a q8_0 pair charges the cache llama.cpp actually allocated', () => {
+    // 0.53125 (17/32), the measured q8_0 footprint — the clean half this case
+    // used to assert understated a 4096-token cache by 6%: 271 MiB on the
+    // fallback geometry, enough for the page to call a plan healthy that the
+    // start guard refuses.
     const est = estimateMemory({ ...BASE, cacheTypeK: 'q8_0', cacheTypeV: 'q8_0' })
-    expect(est.kvBytes).toBe(4096 * KV_BYTES_PER_TOKEN_F16 * 0.5)
-    expect(est.kvSavedBytes).toBe(4096 * KV_BYTES_PER_TOKEN_F16 * 0.5)
+    expect(est.kvBytes).toBe(4096 * KV_BYTES_PER_TOKEN_F16 * 0.53125)
+    expect(est.kvSavedBytes).toBe(4096 * KV_BYTES_PER_TOKEN_F16 * (1 - 0.53125))
     // Savings keep the headroom verdict healthier but never invent data
     expect(est.headroom).toBe('ok')
   })
 
   it('mixed K/V types average the two factors', () => {
-    const f16Both = estimateMemory(BASE)
-    const mixed = estimateMemory({ ...BASE, cacheTypeK: 'q8_0', cacheTypeV: '' })
-    expect(mixed.kvBytes).toBeCloseTo(f16Both.kvBytes * 0.75, 6)
-    expect(mixed.kvSavedBytes).toBeCloseTo(f16Both.kvBytes * 0.25, 6)
+    // Mean of the halves is the measurement, not an assumption: on the M2 a
+    // q8_0/f16 pair stepped 0.7656 of the f16 cache in both K/V orders, exactly
+    // 49/64 — the q8_0 half reading as 0.53125/2 against a plain 0.5.
+    const f16Kv = 4096 * KV_BYTES_PER_TOKEN_F16
+    expect(estimateMemory({ ...BASE, cacheTypeK: 'q8_0', cacheTypeV: '' }).kvBytes).toBe(f16Kv * (49 / 64))
+    expect(estimateMemory({ ...BASE, cacheTypeK: '', cacheTypeV: 'q8_0' }).kvBytes).toBe(f16Kv * (49 / 64))
+    expect(estimateMemory({ ...BASE, cacheTypeK: 'q8_0', cacheTypeV: '' }).kvSavedBytes).toBe(f16Kv * (15 / 64))
   })
 
   it('invalid ctx drops the KV term but the weights still carry their overhead', () => {
@@ -171,12 +185,13 @@ describe('estimateMemory', () => {
   })
 
   it('the geometry drives the quantized-cache savings row too', () => {
-    // q8_0 halves whatever the real geometry is; pricing the saving off the
-    // fallback constant while the cost came from the model would invent slack.
+    // The measured factor scales whatever the real geometry is; pricing the
+    // saving off the fallback constant while the cost came from the model would
+    // invent slack.
     const hybrid = 28 * 1024 // a model caching on every 4th of its 28 layers
     const est = estimateMemory({ ...BASE, kvBytesPerTokenF16: hybrid, cacheTypeK: 'q8_0', cacheTypeV: 'q8_0' })
-    expect(est.kvBytes).toBe(4096 * hybrid * 0.5)
-    expect(est.kvSavedBytes).toBe(4096 * hybrid * 0.5)
+    expect(est.kvBytes).toBe(4096 * hybrid * 0.53125)
+    expect(est.kvSavedBytes).toBe(4096 * hybrid * (1 - 0.53125))
     expect(est.kvBytes + est.kvSavedBytes).toBe(4096 * hybrid)
   })
 

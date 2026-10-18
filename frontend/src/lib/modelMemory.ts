@@ -100,6 +100,17 @@ export interface MemoryEstimate {
  * Bytes-per-element ratio of a KV cache type relative to f16 (2 bytes):
  * empty string is the backend default f16; unknown strings degrade to the
  * f16 ratio (1) so a typo can never understate the estimate.
+ *
+ * These are measurements, not format arithmetic, and they are the frontend
+ * mirror of core/autotune.go's kvCacheTypeSizeRatio — measured as the steady
+ * state RSS step from ctx 2048 to ctx 16384 on the M2 with llama.cpp b10537
+ * (Qwen3-0.6B Q4_K_M, -ngl 0, twice per type, readings agreeing within 0.02%):
+ * q8_0 0.5314, q5_0 0.3440, q5_1 0.3753, q4_0 0.2816, q4_1 0.3128, iq4_nl
+ * 0.2815, bf16 1.0000, f32 2.0000 of the model's 114,746 B/token f16 geometry.
+ * Before this table the page charged q8_0 a clean half (understating it by 6%)
+ * and every other quantized type below its real size, while the backend guard
+ * charged all of them the full f16 cache — two wrong numbers that disagreed.
+ * Keep the two tables in sync.
  */
 export function kvCacheTypeFactor(cacheType: string): number {
   switch (cacheType) {
@@ -110,14 +121,16 @@ export function kvCacheTypeFactor(cacheType: string): number {
     case 'f32':
       return 2
     case 'q8_0':
-      return 0.5
+      return 0.53125
     case 'q5_0':
+      return 0.3441
     case 'q5_1':
-      return 0.3125
+      return 0.3754
     case 'q4_0':
-    case 'q4_1':
     case 'iq4_nl':
-      return 0.25
+      return 0.2816
+    case 'q4_1':
+      return 0.3129
     default:
       return 1
   }

@@ -683,6 +683,51 @@ func TestTuneKVBytesPerTokenF16MatchesTuner(t *testing.T) {
 	}
 }
 
+// TestKVCacheSizeFactor checks the pricing table against the RSS measurements
+// it was written from (see kvCacheTypeSizeRatio): each type alone, and the
+// mixed pairs whose mean the sweep verified rather than assumed. A type off
+// llama.cpp's list has to cost the full f16 cache — understating a load is the
+// one direction this table must never go.
+func TestKVCacheSizeFactor(t *testing.T) {
+	cases := []struct {
+		name string
+		k, v string
+		want float64
+	}{
+		{"default f16", "", "", 1},
+		{"explicit f16", "f16", "f16", 1},
+		{"bf16 is the f16 size", "bf16", "bf16", 1},
+		{"f32 doubles", "f32", "f32", 2},
+		{"q8_0 pair keeps the plan's fraction", "q8_0", "q8_0", tuneQ8KVSizeRatio},
+		{"q5_0 pair", "q5_0", "q5_0", 0.3441},
+		{"q5_1 pair", "q5_1", "q5_1", 0.3754},
+		{"q4_0 pair", "q4_0", "q4_0", 0.2816},
+		{"q4_1 pair", "q4_1", "q4_1", 0.3129},
+		{"iq4_nl pair costs what q4_0 costs", "iq4_nl", "iq4_nl", 0.2816},
+		// Measured 0.7656 both ways round.
+		{"one-sided q8_0 is the mean of its halves", "q8_0", "", 49.0 / 64},
+		{"the other one-sided q8_0", "", "q8_0", 49.0 / 64},
+		// Measured 0.6406.
+		{"one-sided q4_0", "q4_0", "f16", (0.2816 + 1) / 2},
+		// Measured 0.4065.
+		{"q8_0 over q4_0", "q8_0", "q4_0", (tuneQ8KVSizeRatio + 0.2816) / 2},
+		{"unknown type stays at the f16 bound", "made_up", "made_up", 1},
+		{"one unknown half cannot undercut", "made_up", "q4_0", (1 + 0.2816) / 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// The mixed expectations above are constant expressions, which Go
+			// folds in exact arithmetic; the function adds float64 values. A
+			// tolerance of 1e-12 separates a real pricing change from that
+			// last-bit difference and nothing else.
+			got := kvCacheSizeFactor(ModelConfig{CacheTypeK: c.k, CacheTypeV: c.v})
+			if math.Abs(got-c.want) > 1e-12 {
+				t.Errorf("kvCacheSizeFactor(%q, %q) = %g, want %g", c.k, c.v, got, c.want)
+			}
+		})
+	}
+}
+
 // ─── tuneModelConfig ─────────────────────────────────────────────
 
 // TestTuneModelConfig is a table-driven check of the tuning rules with

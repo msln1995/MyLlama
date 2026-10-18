@@ -599,7 +599,9 @@ type tuneModel struct {
 	// cache reset to f16 and ladder priced in f16. Only q8_0 is honored because
 	// it is the one quantized pair with a measured decode cost on this tuner's
 	// hardware (see the Metal plan note) and the only one the NVIDIA A/B merge
-	// ever selects.
+	// ever selects — choosing a cache type needs a speed measurement, which
+	// kvCacheTypeSizeRatio does not provide (it prices sizes for the guard, for
+	// a type the user already picked).
 	PinnedQ8KV bool
 	// UBatchSize carries the model's existing --ubatch-size into the plan so the
 	// RAM-bounded budget is priced at the ubatch the plan actually emits
@@ -710,7 +712,10 @@ const (
 	tuneNvidiaVRAMReserveMB = 512
 	tuneOtherVRAMReserveMB  = 700
 	// q8_0 KV cache occupies 8.5 bits per weight vs f16's 16 bits:
-	// 8.5/16 = 0.53125.
+	// 8.5/16 = 0.53125. Measured on the M2 as 0.5314 of an all-f16 cache
+	// (see kvCacheTypeSizeRatio) - the gap is allocation padding, and this
+	// exact fraction is what the RAM-bounded plans have always priced with,
+	// so it stays.
 	tuneQ8KVSizeRatio = 0.53125
 	// Compute buffer (logits + activation workspace): a base 384 MB, plus
 	// 256 MB for contexts >= 16384 and another 512 MB for contexts >= 65536
@@ -874,6 +879,62 @@ func estimateCPUMoeTPS(ramBandwidthGBs, expertBytesPerToken float64) float64 {
 // re-price (see tuneModel.PinnedQ8KV).
 func pinnedQ8KV(c ModelConfig) bool {
 	return c.CacheTypeK == "q8_0" && c.CacheTypeV == "q8_0"
+}
+
+// kvCacheTypeSizeRatio is the f16-relative footprint of one token's KV cache for
+// each --cache-type value the settings page offers (core/preset.go validates the
+// same list). Measured on the M2 with llama.cpp b10537, Qwen3-0.6B Q4_K_M at
+// -ngl 0 -ub 128, as the steady-state RSS step from ctx 2048 to ctx 16384
+// (14,336 tokens), twice per type, the two readings agreeing within 0.02%:
+//
+//	f16 114,746 B/token (112.0 KiB - the model's own geometry)
+//	bf16 114,741  1.0000    f32 229,433  2.0000
+//	q8_0  60,979  0.5314    q5_0  39,477  0.3440    q5_1  43,067  0.3753
+//	q4_0  32,307  0.2816    q4_1  35,893  0.3128    iq4_nl 32,306  0.2815
+//
+// Every one of them is the GGML block format's own ratio to within a block of
+// allocation padding (q8_0 34/64 B, q5_0 22/64, q4_0 18/64, q4_1 20/64), which is
+// the check that the server really allocated the quantized buffer instead of
+// quietly falling back to f16 - it also means no quantized V cache needed flash
+// attention to take effect on this backend. The values below are the measurements
+// rounded up, except q8_0, which keeps the exact block fraction the plans have
+// always been priced with (0.53125, 0.03% under its measurement) so an already
+// accepted load does not become a refusal over a rounding difference.
+func kvCacheTypeSizeRatio(cacheType string) float64 {
+	switch cacheType {
+	case "", "f16", "bf16":
+		return 1
+	case "f32":
+		return 2
+	case "q8_0":
+		return tuneQ8KVSizeRatio
+	case "q5_0":
+		return 0.3441
+	case "q5_1":
+		return 0.3754
+	case "q4_0", "iq4_nl":
+		return 0.2816
+	case "q4_1":
+		return 0.3129
+	default:
+		// An unknown type charges the full f16 cache: a typo in a hand-edited
+		// config must never make a load look smaller than it is.
+		return 1
+	}
+}
+
+// kvCacheSizeFactor prices a config's KV cache relative to f16. llama.cpp
+// allocates the K and V buffers separately at their own types, so the factor is
+// the mean of the two halves - the same averaging the settings page does, which
+// is what keeps the page and the start guard (core/memfit.go's modelLoadBytes)
+// charging one mixed selection with one number.
+//
+// The mean is measured, not assumed: q8_0/f16 and f16/q8_0 both came out at
+// 0.7656 of an all-f16 cache (the mean of 17/32 and 1 is 49/64 = 0.765625),
+// q4_0/f16 at 0.6406 (predicted 0.6408) and q8_0/q4_0 at 0.4065 (predicted
+// 0.4064) on the same model and backend, two readings each.
+func kvCacheSizeFactor(c ModelConfig) float64 {
+	return (kvCacheTypeSizeRatio(c.CacheTypeK) + kvCacheTypeSizeRatio(c.CacheTypeV)) / 2
 }
 
 // tuneModelConfig computes hardware-aware llama-server parameters for one

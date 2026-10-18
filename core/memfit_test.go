@@ -173,11 +173,31 @@ func TestModelLoadBytes(t *testing.T) {
 			want: fourGib + hybridKV4096*17/32 + overhd,
 		},
 		{
-			// Half a pair is not a pair: the tuner resets it to f16, so the
-			// guard keeps charging the f16 upper bound.
-			name: "one-sided cache pin stays at f16",
+			// Half a pair is two different buffers, and the guard prices each
+			// one: K at q8_0 plus V at f16 measured 0.7656 of an all-f16
+			// cache on this backend, which is exactly the mean of 17/32 and
+			// 1 (49/64). The mirrored selection (V quantized, K f16) measured
+			// the same 0.7656, so the halves are interchangeable here.
+			name: "one-sided cache pin charges the mean of its halves",
 			m:    ModelInfo{Name: "m", Path: readable, SizeBytes: fourGib},
 			cfg:  ModelConfig{CtxSize: 4096, CacheTypeK: "q8_0"},
+			want: fourGib + hybridKV4096*49/64 + overhd,
+		},
+		{
+			// q4_0 measured 0.2816 of f16 (32,307 B/token against the model's
+			// 114,746 B f16 geometry) on the same backend.
+			name: "q4_0 pair charges its measured ratio",
+			m:    ModelInfo{Name: "m", Path: readable, SizeBytes: fourGib},
+			cfg:  ModelConfig{CtxSize: 4096, CacheTypeK: "q4_0", CacheTypeV: "q4_0"},
+			want: fourGib + hybridKV4096*2816/10000 + overhd,
+		},
+		{
+			// A type outside llama.cpp's list (preset.go would refuse to write
+			// it, but a hand-edited config can carry anything) charges the
+			// f16 upper bound rather than a guessed ratio.
+			name: "unknown cache type stays at f16",
+			m:    ModelInfo{Name: "m", Path: readable, SizeBytes: fourGib},
+			cfg:  ModelConfig{CtxSize: 4096, CacheTypeK: "made_up", CacheTypeV: "made_up"},
 			want: fourGib + hybridKV4096 + overhd,
 		},
 		{
