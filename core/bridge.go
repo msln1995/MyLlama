@@ -159,7 +159,18 @@ func startServerInternalWithModel(requested string) error {
 		running := serverRunning
 		prev := directServingModel
 		serverMu.Unlock()
-		switch directStartDecision(running, prev, m.Name) {
+		action := directStartDecision(running, prev, m.Name)
+		if action != directStartNoop {
+			// Checked before the restart decision is acted on: a model whose
+			// weights exceed the available memory gets the process killed by
+			// the low-memory killer instead of failing as an error, and an
+			// already-running server must not be lost to the attempt.
+			if err := modelLoadFitError(m); err != nil {
+				addServerLog("[WARN] " + err.Error())
+				return err
+			}
+		}
+		switch action {
 		case directStartNoop:
 			addServerLog(fmt.Sprintf("[INFO] direct mode: model %q already resident, start is a no-op", m.Name))
 			return nil
