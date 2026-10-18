@@ -228,18 +228,45 @@ func modelPresetKV(m ModelInfo, cfg ModelConfig) ([]presetKV, error) {
 			kvs = append(kvs, presetKV{key: "spec-draft-n-max", value: strconv.Itoa(cfg.SpecDraftNMax)})
 		}
 	}
-	if m.HasMMProj && !explicitMMProj {
-		// Look for mmproj file in same directory
-		dir := filepath.Dir(m.Path)
-		entries, _ := os.ReadDir(dir)
-		for _, e := range entries {
-			if strings.HasPrefix(strings.ToLower(e.Name()), "mmproj") && strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
-				kvs = append(kvs, presetKV{key: "mmproj", value: filepath.ToSlash(filepath.Join(dir, e.Name()))})
-				break
-			}
-		}
+	if p := autoMMProjPath(m); p != "" && !explicitMMProj {
+		kvs = append(kvs, presetKV{key: "mmproj", value: filepath.ToSlash(p)})
 	}
 	return kvs, nil
+}
+
+// autoMMProjPath is the same-directory projector llama-server loads for a
+// multimodal model: the first mmproj*.gguf in ReadDir (name-sorted) order, or
+// "" when the model is not multimodal or the directory holds no match.
+//
+// It is the single source of truth for that choice, shared by the preset writer
+// and the memory terms (tuneWeightsBytes, the scan's published mmprojBytes),
+// because the file charged has to be the file launched. The previous weight term
+// summed every mmproj-*.gguf in the directory instead, so the common case of a
+// model kept next to two projector quants (an F16 and a Q8_0 download) charged
+// both for a load that reads one.
+func autoMMProjPath(m ModelInfo) string {
+	if !m.HasMMProj {
+		return ""
+	}
+	dir := filepath.Dir(m.Path)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(strings.ToLower(e.Name()), "mmproj") && strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
+			return filepath.Join(dir, e.Name())
+		}
+	}
+	return ""
+}
+
+// loadedMMProj is the projector path this config passes to llama-server: the
+// explicit override when one is set (an invalid value is still returned here —
+// modelPresetKV reports it as a configuration error, so no load happens),
+// otherwise the same-directory auto-detection.
+func loadedMMProj(m ModelInfo, cfg ModelConfig) string {
+	if cfg.MMProj != "" {
+		return cfg.MMProj
+	}
+	return autoMMProjPath(m)
 }
 
 // lastPresetPath records the temp INI file written by the most recent

@@ -25,7 +25,8 @@ func availableMemoryBytes() int64 {
 }
 
 // modelLoadBytes estimates what loading m with cfg keeps resident: the weight
-// files (tuneWeightsBytes adds a same-directory mmproj projector), the KV cache
+// files (tuneWeightsBytes adds the one mmproj projector cfg actually loads, the
+// same file the preset passes to llama-server), the KV cache
 // cfg.CtxSize needs, and the runtime overhead the auto-tuner plans with
 // (batch compute buffers, graph scratch, sampler arenas) priced at cfg's own
 // ubatch — the term is linear in ubatch, so a user who raises --ubatch-size for
@@ -47,7 +48,7 @@ func availableMemoryBytes() int64 {
 // reaches this function is actually unbounded.
 func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 	mm, ok := readGGUFModelMetrics(m.Path)
-	tm := buildTuneModel(mm, ok, tuneWeightsBytes(m))
+	tm := buildTuneModel(mm, ok, tuneWeightsBytes(m, cfg))
 	total := tm.WeightsBytes
 	if cfg.CtxSize > 0 {
 		kv := tm.KVBytesPerTokPerLayerF16 * float64(tm.Layers) * float64(cfg.CtxSize)

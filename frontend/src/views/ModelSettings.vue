@@ -535,6 +535,7 @@ const showPortraitSummary = computed(() => platformState.value.isTablet)
 // drop their rows instead of guessing).
 const GIB = 1024 * 1024 * 1024
 const modelSizeBytes = ref(0)
+const modelMMProjBytes = ref(0)
 const modelKVBytesPerToken = ref(0)
 const sysTotalBytes = ref(0)
 const sysFreeBytes = ref(0)
@@ -542,6 +543,7 @@ const sysFreeBytes = ref(0)
 const memoryEstimate = computed(() =>
   estimateMemory({
     modelSizeBytes: modelSizeBytes.value,
+    mmprojBytes: modelMMProjBytes.value,
     kvBytesPerTokenF16: modelKVBytesPerToken.value,
     ctxSize: Number(cfg.ctxSize) || 0,
     cacheTypeK: cfg.cacheTypeK,
@@ -580,18 +582,20 @@ const summaryRows = computed(() =>
   )
 )
 
-/** Look up the model's scanned GGUF size and per-token KV geometry (the
-    estimate's weights and KV terms). Both stay 0 when the scan has no entry for
-    this model, which is what the estimate reads as "unknown". */
+/** Look up the model's scanned GGUF size, projector size and per-token KV
+    geometry (the estimate's weights and KV terms). All stay 0 when the scan has
+    no entry for this model, which is what the estimate reads as unknown. */
 async function lookupModelTerms() {
   const name = decodedModelName.value
   if (!name) return
   try {
     const found = (await getModels()).find(
-      (m: { name?: string; sizeBytes?: number; kvBytesPerTokenF16?: number }) => m?.name === name
+      (m: { name?: string; sizeBytes?: number; mmprojBytes?: number; kvBytesPerTokenF16?: number }) => m?.name === name
     )
     const size = Number(found?.sizeBytes)
     modelSizeBytes.value = size > 0 ? size : 0
+    const mmproj = Number(found?.mmprojBytes)
+    modelMMProjBytes.value = mmproj > 0 ? mmproj : 0
     // 0 is "not scanned" here, never "free": modelMemory's estimate falls back
     // to the documented typical-model constant for it.
     const perToken = Number(found?.kvBytesPerTokenF16)

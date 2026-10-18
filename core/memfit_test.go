@@ -275,7 +275,7 @@ func TestTunedQ8PlanPassesTheMemoryGuard(t *testing.T) {
 	if !ok {
 		t.Fatal("fixture GGUF is not readable")
 	}
-	tm := buildTuneModel(metrics, ok, tuneWeightsBytes(m))
+	tm := buildTuneModel(metrics, ok, tuneWeightsBytes(m, ModelConfig{}))
 	tm.PinnedQ8KV = true
 	hw := tuneHardware{
 		GPUVendor:       vendorNone,
@@ -320,7 +320,7 @@ func TestTunedUbatchPlanPassesTheMemoryGuard(t *testing.T) {
 	if !ok {
 		t.Fatal("fixture GGUF is not readable")
 	}
-	tm := buildTuneModel(metrics, ok, tuneWeightsBytes(m))
+	tm := buildTuneModel(metrics, ok, tuneWeightsBytes(m, ModelConfig{}))
 	tm.PinnedQ8KV = true
 	tm.UBatchSize = 2048
 	cfg := tuneModelConfig(tuneHardware{

@@ -786,7 +786,7 @@ func (a *App) TuneModelConfig(modelID string) (ModelConfig, error) {
 		log.Println(tuneFallbackLogLine(modelID))
 	}
 	existing := a.GetModelConfig(modelID)
-	tm := buildTuneModel(metrics, ok, tuneWeightsBytes(*model))
+	tm := buildTuneModel(metrics, ok, tuneWeightsBytes(*model, existing))
 	tm.PinnedQ8KV = pinnedQ8KV(existing)
 	tm.UBatchSize = existing.UBatchSize
 	cfg := mergeTunedConfig(existing, tuneModelConfig(a.tuneHardware(), tm))

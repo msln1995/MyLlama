@@ -761,6 +761,16 @@ export class ModelInfo {
     "hasMmproj": boolean;
 
     /**
+     * MMProjBytes is the size of the projector this model loads by default: the
+     * same file autoMMProjPath picks and the preset emits (the first
+     * mmproj*.gguf in the directory), and the bytes tuneWeightsBytes adds to the
+     * weight term. 0 means no projector, or an explicit mmproj override in the
+     * advanced settings pointing at a file the scan cannot see — that load is
+     * still priced by the guard, just not by the settings page.
+     */
+    "mmprojBytes": number;
+
+    /**
      * SourceDir is the root directory the model was scanned from (the model
      * download directory or the user-imported model directory). Lets the
      * frontend show which of the two sources a model belongs to when both are
@@ -816,6 +826,9 @@ export class ModelInfo {
         }
         if (!("hasMmproj" in $$source)) {
             this["hasMmproj"] = false;
+        }
+        if (!("mmprojBytes" in $$source)) {
+            this["mmprojBytes"] = 0;
         }
         if (!("sourceDir" in $$source)) {
             this["sourceDir"] = "";

@@ -135,6 +135,62 @@ func TestGenerateModelsPresetFromMMProj(t *testing.T) {
 	}
 }
 
+// TestTuneWeightsChargesTheProjectorThePresetLaunches pins the rule the memory
+// terms depend on: the file added to the weight budget is the one the preset
+// passes to llama-server, not every projector sitting in the directory. A model
+// kept next to both an F16 and a Q8_0 projector used to be charged both for a
+// load that reads one (an entire context tier on a phone), and an override
+// pointing elsewhere was charged a file that never loads.
+func TestTuneWeightsChargesTheProjectorThePresetLaunches(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := writeTempGGUF(t, dir, "llava.gguf", []byte("model"))
+	f16 := writeTempGGUF(t, dir, "mmproj-f16.gguf", make([]byte, 4<<20))
+	writeTempGGUF(t, dir, "mmproj-q8_0.gguf", make([]byte, 1<<20))
+	elsewhere := t.TempDir()
+	override := writeTempGGUF(t, elsewhere, "mmproj-selected.gguf", make([]byte, 2<<20))
+
+	vision := ModelInfo{Name: "llava", Path: mainPath, SizeBytes: int64(len("model")), HasMMProj: true}
+
+	emitted := func(m ModelInfo, cfg ModelConfig) string {
+		t.Helper()
+		kvs, err := modelPresetKV(m, cfg)
+		if err != nil {
+			t.Fatalf("modelPresetKV: %v", err)
+		}
+		for _, kv := range kvs {
+			if kv.key == "mmproj" {
+				return kv.value
+			}
+		}
+		return ""
+	}
+	f16Slash := filepath.ToSlash(f16)
+	overrideSlash := filepath.ToSlash(override)
+
+	if got := emitted(vision, ModelConfig{}); got != f16Slash {
+		t.Errorf("preset emitted %q, want the first projector %q", got, f16Slash)
+	}
+	if got := tuneWeightsBytes(vision, ModelConfig{}); got != vision.SizeBytes+(4<<20) {
+		t.Errorf("weights with two projectors = %d, want the main file plus the 4 MiB one preset launches", got)
+	}
+
+	pinned := ModelConfig{MMProj: override}
+	if got := emitted(vision, pinned); got != overrideSlash {
+		t.Errorf("override: preset emitted %q, want %q", got, overrideSlash)
+	}
+	if got := tuneWeightsBytes(vision, pinned); got != vision.SizeBytes+(2<<20) {
+		t.Errorf("weights with an override = %d, want the main file plus the override size", got)
+	}
+
+	// A loose-file model is never marked multimodal (the scan cannot tie a
+	// projector to it), so nothing is charged even though projector files may
+	// sit in the same directory.
+	plain := ModelInfo{Name: "plain", Path: mainPath, SizeBytes: int64(len("model"))}
+	if got := tuneWeightsBytes(plain, ModelConfig{}); got != plain.SizeBytes {
+		t.Errorf("weights without a projector = %d, want %d", got, plain.SizeBytes)
+	}
+}
+
 // TestGenerateModelsPresetFromRejectsInjection verifies generateModelsPresetFrom
 // returns errors for GPULayers / CacheType values containing newlines or leading/trailing
 // whitespace (#9 second defense layer).

@@ -27,6 +27,13 @@ type ModelInfo struct {
 	Architecture string `json:"architecture"`
 	Quantization string `json:"quantization"`
 	HasMMProj    bool   `json:"hasMmproj"`
+	// MMProjBytes is the size of the projector this model loads by default: the
+	// same file autoMMProjPath picks and the preset emits (the first
+	// mmproj*.gguf in the directory), and the bytes tuneWeightsBytes adds to the
+	// weight term. 0 means no projector, or an explicit mmproj override in the
+	// advanced settings pointing at a file the scan cannot see — that load is
+	// still priced by the guard, just not by the settings page.
+	MMProjBytes int64 `json:"mmprojBytes"`
 	// SourceDir is the root directory the model was scanned from (the model
 	// download directory or the user-imported model directory). Lets the
 	// frontend show which of the two sources a model belongs to when both are
@@ -215,6 +222,10 @@ func scanModelsDir(dir string) []ModelInfo {
 
 				var mainGGUF string
 				var hasMMProj bool
+				// The projector the preset will emit and the guard charges: the
+				// first mmproj*.gguf file in this name-sorted walk, the choice
+				// autoMMProjPath makes from the model's directory.
+				var mmprojBytes int64
 
 				for _, f := range files {
 					if f.IsDir() {
@@ -226,6 +237,11 @@ func scanModelsDir(dir string) []ModelInfo {
 					}
 					lower := strings.ToLower(name)
 					if strings.HasPrefix(lower, "mmproj") {
+						if !hasMMProj {
+							if fi, err := f.Info(); err == nil {
+								mmprojBytes = fi.Size()
+							}
+						}
 						hasMMProj = true
 						continue
 					}
@@ -241,6 +257,7 @@ func scanModelsDir(dir string) []ModelInfo {
 
 				model := buildModelInfo(mainGGUF, author, variantName)
 				model.HasMMProj = hasMMProj
+				model.MMProjBytes = mmprojBytes
 				models = append(models, model)
 				continue
 			}

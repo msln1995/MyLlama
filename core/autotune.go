@@ -14,7 +14,6 @@ import (
 	"log"
 	"math"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1496,21 +1495,18 @@ func tuneNeedsRAMBandwidth(gpuVendor, goos string) bool {
 }
 
 // tuneWeightsBytes returns the tuner's weight budget: the main GGUF size plus
-// the same-directory mmproj-*.gguf projector when the model is multimodal.
-// Projector stat failures are ignored (best-effort extra weight).
-func tuneWeightsBytes(m ModelInfo) int64 {
+// the projector this config actually loads (loadedMMProj — the explicit
+// override, else the first same-directory mmproj*.gguf, the same file the preset
+// writes). Stat failures are ignored (best-effort extra weight): a projector
+// that is gone makes the load fail at startup, not here.
+func tuneWeightsBytes(m ModelInfo, cfg ModelConfig) int64 {
 	weights := m.SizeBytes
-	if !m.HasMMProj {
+	p := loadedMMProj(m, cfg)
+	if p == "" {
 		return weights
 	}
-	matches, err := filepath.Glob(filepath.Join(filepath.Dir(m.Path), "mmproj-*.gguf"))
-	if err != nil {
-		return weights
-	}
-	for _, p := range matches {
-		if fi, err := os.Stat(p); err == nil {
-			weights += fi.Size()
-		}
+	if fi, err := os.Stat(p); err == nil {
+		weights += fi.Size()
 	}
 	return weights
 }

@@ -138,6 +138,10 @@ const models: any[] = [
     // One vision-capable entry so `npm run dev:mock` exercises the chat page's
     // mmproj gating (attach enabled) and My Models' badge instead of a flat all-false list
     hasMmproj: true,
+    // The projector the scan publishes (core/gguf.go's mmprojBytes): the memory
+    // estimate adds it to the weights term, so this entry prices as a
+    // main-model-plus-projector load like the start guard does.
+    mmprojBytes: 638_000_000,
     sourceDir: config.modelDownloadDir,
     alias: 'Qwen3-4B-Instruct-Q4_K_M',
   },

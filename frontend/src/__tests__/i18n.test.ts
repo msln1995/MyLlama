@@ -273,6 +273,9 @@ describe('lib/i18n', () => {
     // speed.
     expect(t('modelSettings.flashAttnSub')).not.toContain('推荐')
     expect(t('modelSettings.q8Recommended')).not.toContain('推荐')
+    // The projector hint has to state that only one projector loads and that its
+    // size is priced — the weight term charges exactly the file the preset emits.
+    expect(t('modelSettings.mmprojHint')).toContain('内存预估')
     setLocale('en')
     expect(t('modelSettings.threadsHint')).toContain('performance-cluster')
     expect(t('modelSettings.threadsHint')).toContain('t/s')
@@ -283,6 +286,7 @@ describe('lib/i18n', () => {
     expect(t('modelSettings.specTypeHint')).toContain('t/s')
     expect(t('modelSettings.flashAttnSub')).not.toContain('recommended')
     expect(t('modelSettings.q8Recommended')).not.toContain('recommended')
+    expect(t('modelSettings.mmprojHint')).toContain('memory estimate')
   })
 
   it('KV cache hints state that a pinned q8_0 pair converts into context', () => {

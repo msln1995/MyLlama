@@ -19,6 +19,7 @@ const GIB = 1024 * 1024 * 1024
 // prices KV with KV_BYTES_PER_TOKEN_F16 is also the fallback test.
 const BASE = {
   modelSizeBytes: 2_476_000_000,
+  mmprojBytes: 0,
   kvBytesPerTokenF16: 0,
   ctxSize: 4096,
   cacheTypeK: '',
@@ -68,6 +69,21 @@ describe('estimateMemory', () => {
     expect(est.kvSavedBytes).toBe(0)
     expect(est.availableBytes).toBe(BASE.freeMemBytes)
     expect(est.headroom).toBe('ok')
+  })
+
+  it('a vision model carries its projector in the weights term', () => {
+    // The scan publishes the projector the preset loads (core/gguf.go's
+    // mmprojBytes) and the guard adds the same file to the weights
+    // (core/autotune.go's tuneWeightsBytes). Leaving it out priced a multimodal
+    // load as text-only — by more than the whole runtime reserve.
+    const MMPROJ = 638_000_000
+    const est = estimateMemory({ ...BASE, mmprojBytes: MMPROJ })
+    expect(est.weightsBytes).toBe(BASE.modelSizeBytes + MMPROJ)
+    expect(est.totalBytes).toBe(BASE_TOTAL + MMPROJ)
+    // Absent (not scanned / no projector) and impossible values add nothing.
+    for (const mmproj of [0, -MMPROJ, Number.NaN]) {
+      expect(estimateMemory({ ...BASE, mmprojBytes: mmproj }).weightsBytes).toBe(BASE.modelSizeBytes)
+    }
   })
 
   it('a q8_0 pair charges the cache llama.cpp actually allocated', () => {

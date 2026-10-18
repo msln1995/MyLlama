@@ -6,10 +6,11 @@
  * sticky rail (same data, two placements).
  *
  * Honesty rules (mirroring the other tablet phases): every term is real data.
- * The weights term is the scanned GGUF file size and the KV term is priced with
- * the model's own per-token cache geometry, both from GetModels; only a model
- * whose header could not be read falls back to the documented typical-model
- * constant below, and every affected row is labeled as an estimate (预估/≈).
+ * The weights term is the scanned GGUF file size plus the vision projector the
+ * model loads by default, and the KV term is priced with the model's own
+ * per-token cache geometry, both from GetModels; only a model whose header could
+ * not be read falls back to the documented typical-model constant below, and
+ * every affected row is labeled as an estimate (预估/≈).
  * Rows whose inputs are unknown are dropped entirely instead of guessed.
  *
  * The three terms are the same three the backend's start guard prices
@@ -61,6 +62,13 @@ export interface MemoryEstimateInput {
   /** Scanned GGUF file size in bytes (0 = model not found in the scan). */
   modelSizeBytes: number
   /**
+   * Size of the vision projector this model loads by default, from the scan
+   * (0 = none, or the model was not scanned). The backend's weight term adds the
+   * same file (core/autotune.go's tuneWeightsBytes), so leaving it out made the
+   * page price a multimodal load as text-only.
+   */
+  mmprojBytes: number
+  /**
    * Model's real f16 KV bytes per token from the scan (0 = unknown, which
    * falls back to {@link KV_BYTES_PER_TOKEN_F16}).
    */
@@ -80,7 +88,7 @@ export interface MemoryEstimateInput {
 }
 
 export interface MemoryEstimate {
-  /** Weights term: the GGUF file size (0 when the model size is unknown). */
+  /** Weights term: the GGUF file size plus its projector (0 when unknown). */
   weightsBytes: number
   /** KV-cache term, ctx-scaled and quantization-scaled (0 when ctx invalid). */
   kvBytes: number
@@ -165,7 +173,10 @@ export function kvBytesPerToken(kvBytesPerTokenF16: number): number {
  */
 export function estimateMemory(input: MemoryEstimateInput): MemoryEstimate {
   const ctx = Number.isFinite(input.ctxSize) && input.ctxSize > 0 ? Math.floor(input.ctxSize) : 0
-  const weightsBytes = input.modelSizeBytes > 0 ? input.modelSizeBytes : 0
+  // Weights are the main GGUF plus the projector the model loads by default:
+  // llama-server gets both, the memory guard charges both.
+  const mmprojBytes = input.mmprojBytes > 0 ? input.mmprojBytes : 0
+  const weightsBytes = (input.modelSizeBytes > 0 ? input.modelSizeBytes : 0) + mmprojBytes
   // The per-token figure covers K+V at f16; mixed types scale each half.
   const perToken = kvBytesPerToken(input.kvBytesPerTokenF16)
   const kvAvgFactor = (kvCacheTypeFactor(input.cacheTypeK) + kvCacheTypeFactor(input.cacheTypeV)) / 2

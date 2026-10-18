@@ -112,6 +112,12 @@ func TestScanModelsDirMMProj(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "mmproj-f16.gguf"), []byte("proj"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// A second, larger projector sits next to it on purpose: the published size
+	// has to be the file the preset actually loads (the first by name), not the
+	// sum, or the settings page and the start guard charge different loads.
+	if err := os.WriteFile(filepath.Join(dir, "mmproj-q8_0.gguf"), make([]byte, 4096), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	models := scanModelsDir(base)
 	if len(models) != 1 {
@@ -119,6 +125,12 @@ func TestScanModelsDirMMProj(t *testing.T) {
 	}
 	if !models[0].HasMMProj {
 		t.Error("model with mmproj file should be marked HasMMProj")
+	}
+	if got := models[0].MMProjBytes; got != int64(len("proj")) {
+		t.Errorf("MMProjBytes = %d, want %d (the projector the preset emits)", got, len("proj"))
+	}
+	if got := tuneWeightsBytes(models[0], ModelConfig{}); got != models[0].SizeBytes+int64(len("proj")) {
+		t.Errorf("guard weights = %d, want the scan's size plus MMProjBytes (%d)", got, models[0].SizeBytes+int64(len("proj")))
 	}
 }
 
