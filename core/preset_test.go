@@ -665,7 +665,9 @@ func TestModelPresetKVGoldenINI(t *testing.T) {
 // modelPresetKV row against upstream b10698 long options: same-name options
 // with values verbatim, -m for the model path, --alias from the sanitized
 // display name, bare --embeddings/--cpu-moe flags, --flash-attn on as a
-// valued flag, and no --reasoning (upstream has no such option).
+// valued flag, and --reasoning off as a valued flag (upstream has the option
+// at b10698 and b11720 alike, so the thinking-output toggle reaches the
+// command line on every platform).
 func TestModelDirectArgs(t *testing.T) {
 	cfg := ModelConfig{
 		Threads: 8, GPULayers: "99", CtxSize: 8192, BatchSize: 512,
@@ -704,6 +706,7 @@ func TestModelDirectArgs(t *testing.T) {
 		"--rope-scaling", "yarn",
 		"--rope-scale", "2",
 		"--mmproj", "/models/proj.gguf",
+		"--reasoning", "off",
 		"--spec-type", "draft-mtp",
 		"--spec-draft-n-max", "4",
 	}
@@ -781,17 +784,19 @@ func TestModelDirectArgsRejectsInjection(t *testing.T) {
 }
 
 // TestModelDirectArgsAndroidSkipsGPUOnlyFlags verifies the CPU-only defense:
-// with the platformGOOS seam pinned to android, GPU-only flags from persisted
-// desktop-era configs (flash-attn / cpu-moe / n-cpu-moe) are dropped from the
-// direct-mode command line — the android build ships no GPU backend — while
-// neutral options (--ctx-size) and the CPU-safe checkpoint pin
-// (--ctx-checkpoints 0) survive untouched.
+// the flags the phone UI cannot set (flash-attn / cpu-moe / n-cpu-moe) are
+// dropped from the direct-mode command line even when a persisted desktop
+// config carries them, while neutral options (--ctx-size), the CPU-safe
+// checkpoint pin (--ctx-checkpoints 0) and the platform-neutral thinking pin
+// (--reasoning off — upstream registers it unconditionally, so the toggle the
+// page shows on Android reaches the command line) survive untouched.
 func TestModelDirectArgsAndroidSkipsGPUOnlyFlags(t *testing.T) {
 	withPlatformGOOS(t, "android")
 	cfg := ModelConfig{
 		CtxSize: 8192, FlashAttn: true,
 		CPUMoe: true, NCpuMoe: 3,
 		CtxCheckpointsOff: true,
+		Reasoning:         true,
 	}
 	args, err := modelDirectArgs("m", ModelInfo{Name: "m", Path: "/m.gguf"}, cfg)
 	if err != nil {
@@ -808,6 +813,9 @@ func TestModelDirectArgsAndroidSkipsGPUOnlyFlags(t *testing.T) {
 	}
 	if !strings.Contains(joined, "--ctx-checkpoints 0") {
 		t.Errorf("android args must keep the CPU-safe --ctx-checkpoints 0: %v", args)
+	}
+	if !strings.Contains(joined, "--reasoning off") {
+		t.Errorf("android args must keep --reasoning off (the page offers the toggle on Android): %v", args)
 	}
 }
 

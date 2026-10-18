@@ -39,7 +39,7 @@
 | 切分方式 | 单卡选 `none`；多卡默认 `layer` 稳定 |
 | 投机解码 | 「高级」标签。`ngram-simple` / `ngram-mod` 为 n-gram 自投机：无需草稿模型、零额外显存；`draft-mtp` 为 MTP 投机预测，需模型支持；留空关闭。实测 M2 Metal 4B Q4_K_M：输出高度重复时 `ngram-mod` 约 2.8 倍（86-88 vs 基线 31 t/s），自然语言无收益，`ngram-simple` 两种场景都慢约 5% —— 建议只在写代码 / 模板化输出时开启 |
 
-> 注：Android 为纯 CPU 构建，页面不显示 GPU 层数、Flash Attention、cpu-moe 等 GPU 专属参数；「加载方式」中的 `dio` 仅 Windows / Linux 提供。Android 会自动识别 SoC 型号（如骁龙 / 天玑，来自系统属性）；「一键调优」在安卓与 Apple Silicon 上线程数上限为性能核数量（big.LITTLE 小核、M 系列能效核不参与推理线程），且纯 CPU 方案的调优结果提示不再显示 GPU 层字段。安卓上即使不调参，未设置的线程数也会按性能核数量下发：实测 vivo X60（Exynos 1080，4×A55 + 4×A78）+ Qwen3-4B Q5_K_M，4 线程解码 3.5–3.9 t/s、同一次请求 97–103 秒完成，而 llama.cpp 默认的满 8 核只有 0.35 t/s、443 秒——小核被推理线程占满后，系统界面和内存回收一起挨饿。实际下发的数值会记在 API 页的服务日志里（`direct mode: threads -1 -> 4`）；只有一个性能核的机型不做此限制，保持 llama.cpp 自己的选择。
+> 注：Android 为纯 CPU 构建，页面不显示 GPU 层数、Flash Attention、cpu-moe 等 GPU 专属参数；「加载方式」中的 `dio` 仅 Windows / Linux 提供。Android 会自动识别 SoC 型号（如骁龙 / 天玑，来自系统属性）；「一键调优」在安卓与 Apple Silicon 上线程数上限为性能核数量（big.LITTLE 小核、M 系列能效核不参与推理线程），且纯 CPU 方案的调优结果提示不再显示 GPU 层字段。安卓上即使不调参，未设置的线程数也会按性能核数量下发：实测 vivo X60（Exynos 1080，4×A55 + 4×A78）+ Qwen3-4B Q5_K_M，4 线程解码 3.5–3.9 t/s、同一次请求 97–103 秒完成，而 llama.cpp 默认的满 8 核只有 0.35 t/s、443 秒——小核被推理线程占满后，系统界面和内存回收一起挨饿。实际下发的数值会记在 API 页的服务日志里（`direct mode: threads -1 -> 4`）；只有一个性能核的机型不做此限制，保持 llama.cpp 自己的选择。「高级」页的「Reasoning 推理输出」开关在安卓同样生效，会下发 `--reasoning off`：思考内容和正文一样都要逐字解码，推理类模型把它关掉省下的就是那段时间。
 
 ## 服务运行中修改参数
 

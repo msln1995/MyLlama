@@ -456,8 +456,8 @@ func modelDirectArgs(alias string, m ModelInfo, cfg ModelConfig) ([]string, erro
 		return nil, err
 	}
 	// Android official builds are CPU-only (arm64, no GPU backend in the
-	// package): GPU-only flags from persisted desktop-era configs must never
-	// reach the direct-mode command line. The INI writer (desktop-only) stays
+	// package): flags that only mean something with a GPU must never reach the
+	// direct-mode command line. The INI writer (desktop-only) stays
 	// byte-identical — the filter applies to this serializer only.
 	androidCPUOnly := platformGOOS == "android"
 	args := []string{"--alias", alias}
@@ -465,8 +465,12 @@ func modelDirectArgs(alias string, m ModelInfo, cfg ModelConfig) ([]string, erro
 		if androidCPUOnly {
 			switch kv.key {
 			case "flash-attn", "cpu-moe", "n-cpu-moe":
-				// GPU-only flags: the android build rejects them outright
-				// (llama-server: no GPU backend compiled in).
+				// Dropped, not rejected upstream — llama.cpp registers all
+				// three with no GGML_USE guard (read in b10698 and b11720
+				// common/arg.cpp), so they would take effect here. The page
+				// hides them on Android, which means such a value can only be
+				// a desktop-era config written while a GPU existed; honouring
+				// it would move the phone off the measured CPU-only plan.
 				continue
 			}
 		}
@@ -476,12 +480,6 @@ func modelDirectArgs(alias string, m ModelInfo, cfg ModelConfig) ([]string, erro
 		case "embeddings", "cpu-moe":
 			// Bare valueless flags upstream: --embeddings / --cpu-moe.
 			args = append(args, "--"+kv.key)
-		case "reasoning":
-			// Upstream has no reasoning option at b10698; its INI parser
-			// silently ignores unknown keys, so this entry is a no-op on
-			// every platform today. Direct mode skips it entirely (desktop
-			// INI output is unchanged).
-			continue
 		default:
 			// Same-name long option with the INI value verbatim.
 			args = append(args, "--"+kv.key, kv.value)
