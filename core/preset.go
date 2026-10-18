@@ -298,8 +298,9 @@ func generateModelsPreset() (string, error) {
 }
 
 // generateModelsPresetFrom writes a llama-server INI preset for the given models
-// and per-model configs to a temp file and returns its path. Models without a
-// matching config entry only emit the model path (plus auto-detected options).
+// and per-model configs to a temp file and returns its path. A model with no
+// usable context gets one resolved and written (routerUntunedCtx) rather than an
+// entry that leaves the decision to the server.
 func generateModelsPresetFrom(models []ModelInfo, cfgs map[string]ModelConfig) (string, error) {
 	if len(models) == 0 {
 		return "", errors.New(tr("LLM-Models 目录中没有模型", "no models found in the LLM-Models directory"))

@@ -121,32 +121,42 @@ func routerModelPlan(cfgs map[string]ModelConfig, m ModelInfo) ModelConfig {
 
 // routerUntunedCtx picks the context an unconfigured model gets in router mode,
 // and the preset writer now writes that number into the entry instead of leaving
-// it out. Omitting it is not a saving: llama-server's default is "0 = the context
-// the model was trained with" and it really does build that cache. Measured on a
-// 24 GiB M2 with Qwen3-0.6B Q4_K_M (378 MiB of weights, 112 KiB of f16 KV per
-// token), an entry with no ctx-size came up as "n_ctx_slot = 40960" — the context
-// its GGUF metadata records — with a 4.86 GiB worker RSS, indistinguishable from
-// the same model whose entry states ctx-size = 40960 (4.84 GiB), while the
-// ctx-size = 32768 entry cost 3.98 GiB. The 0.88 GiB between those two runs is
-// the 8,192 tokens of context they differ by, at the f16 geometry, so the
-// allocation tracks the trained context rung for rung.
+// it out. Leaving it out does not save anything: the server sizes the cache
+// itself, from the model's metadata and its own notion of what the machine may
+// spend, and the app gets neither the number nor the bill. Measured with
+// llama.cpp b10537 on a 24 GiB M2:
 //
-// The unbounded allocation is the smaller half of the harm. The library's
+//	                             n_ctx_slot    RSS (router + worker)
+//	Qwen3-0.6B Q4_K_M, no ctx-size        40,960       4.86 GiB
+//	same model, ctx-size = 40960          40,960       4.84 GiB
+//	same model, ctx-size = 32768          32,768       3.98 GiB
+//	Qwen3-4B-Instruct-2507 Q4_K_M, no ctx-size 103,936  17.0 GiB (twice: 17,013 / 17,062 MiB)
+//	same model, ctx-size = 16384          16,384        4.83 GiB (twice: 4,832 / 4,832 MiB)
+//
+// The 0.6B pair shows the omitted number costs what it states (its metadata
+// context, 40,960 tokens, rung for rung: the 8,192 tokens between 32,768 and
+// 40,960 are 0.88 GiB of RSS, the model's 112 KiB/token f16 geometry), and the
+// 4B pair shows what an unbounded pick really means — the server took 103,936
+// tokens, 17 GiB of RSS and swap 3.86 -> 6.30 GiB, for a model the app had
+// already priced past the machine.
+//
+// That over-allocation is the smaller half of the harm. The library's
 // prompt-cache budget is sized against the heaviest planned load
-// (maxModelLoadBytes), which already priced an unconfigured model at its trained
-// context — so one model whose context exceeds the machine is by itself enough to
-// push the headroom negative and turn prompt caching off for every model in the
-// app, in every session. On an 8,218 MiB host an entry priced at the 262,144
-// tokens a Qwen3-4B-Instruct-2507 records in its own metadata costs 30,330 MiB
-// and bounds --cache-ram to 0; the same machine keeps 1,021 MiB once the entry
-// states a context it can pay for.
+// (heaviestRouterLoad), and until this bound existed that load was priced at the
+// model's trained context, so one unconfigured model was by itself enough to push
+// the headroom negative and turn prompt caching off for every model in the app,
+// in every session: on this M2 (7,925 MiB available at the time of the runs
+// above) the 4B at its metadata 262,144 tokens prices at 40,525 MiB and bounds
+// --cache-ram to 0, while the bounded 16,384 entry prices at 5,965 MiB and keeps
+// 980 MiB.
 //
 // The rule keeps the model's own context whenever the app's load price fits the
-// memory available now (so an untuned model on a roomy machine behaves as it does
-// today, just stated explicitly and priced at what the server will build), and
-// otherwise takes the largest rung of the tuner's ladder that fits, down to the
-// ladder's floor. Unreadable metadata or a failed memory probe land on the
-// settings page default, the same fallback the rest of this file uses.
+// memory available now - never above tuneCtxMax, the ceiling every tuned plan is
+// sized against, so an untuned 256k model cannot end up holding a bigger window
+// than the tuned one would - and otherwise takes the largest rung of the tuner's
+// ladder that fits, down to the ladder's floor. Unreadable metadata or a failed
+// memory probe land on the settings page default, the same fallback the rest of
+// this file uses.
 func routerUntunedCtx(m ModelInfo) int {
 	fallback := defaultModelConfig()
 	mm, ok := readGGUFModelMetrics(m.Path)
@@ -162,8 +172,15 @@ func routerUntunedCtx(m ModelInfo) int {
 		c.CtxSize = ctx
 		return c
 	}
-	if modelLoadBytes(m, withCtx(mm.ContextLength)) <= avail {
-		return mm.ContextLength
+	// The tuner's ceiling applies to untuned models too: a model trained at
+	// 262,144 must not get a bigger window than the same model's tuned plan
+	// would, on any machine.
+	keep := mm.ContextLength
+	if keep > tuneCtxMax {
+		keep = tuneCtxMax
+	}
+	if modelLoadBytes(m, withCtx(keep)) <= avail {
+		return keep
 	}
 	for _, ctx := range ctxLadderFor(mm.ContextLength, tuneCtxLadder) {
 		if modelLoadBytes(m, withCtx(ctx)) <= avail {

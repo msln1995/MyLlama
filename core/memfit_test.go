@@ -540,6 +540,17 @@ func TestRouterUntunedCtx(t *testing.T) {
 		})
 	}
 
+	// A model trained past the tuner's ceiling still stops at it: an untuned
+	// entry must not carry a bigger window than the tuned plan for the same
+	// model would. writeMemfitGGUF trains at 262,144 and costs 48 KiB of f16 KV
+	// per token, so the ceiling prices at 8,448 MiB (1,024 + 6,144 + 1,280) and
+	// the full metadata window at 14,592 MiB.
+	pinProbeFreeMemoryGB(t, gibFromMiB(8700))
+	wide := ModelInfo{Name: "wide", Path: writeMemfitGGUF(t, dir), SizeBytes: 1 << 30}
+	if got := routerUntunedCtx(wide); got != tuneCtxMax {
+		t.Errorf("262144-trained model with 8700 MiB available = %d, want the %d ceiling", got, tuneCtxMax)
+	}
+
 	// Unreadable metadata cannot be priced against a trained context, so the
 	// app default is written instead of leaving the entry without one.
 	pinProbeFreeMemoryGB(t, 64)
