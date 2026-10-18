@@ -684,13 +684,22 @@ const (
 	tuneComputeBufLargeFrom = 16384
 	tuneComputeBufHugeMB    = 512
 	tuneComputeBufHugeFrom  = 65536
-	// A CPU-only load also keeps resident what never touches VRAM: the batch
-	// compute buffers, graph scratch and sampler arenas. Measured on an
-	// Exynos 1080 phone running a 4.17 GB Qwen3.5-4B at n_batch 2048:
-	// steady-state RSS minus weights minus f16 KV was 1.19 GB at ctx 4096 and
-	// 1.10 GB at ctx 32768, i.e. the term is context-independent and the
-	// ctx-keyed VRAM curve above (384 MB base) does not cover it. Rounded up.
-	tuneCPURuntimeOverheadMB = 1280
+	// A load also keeps resident what is neither weights nor KV: the batch
+	// compute buffers, graph scratch and sampler arenas. Two independent
+	// measurements of the same term:
+	//   - Exynos 1080 running a 4.17 GB Qwen3.5-4B at the app's default ubatch
+	//     512: steady-state RSS minus weights minus f16 KV was 1.19 GB at ctx
+	//     4096 and 1.10 GB at ctx 32768 — context-independent, rounded up here.
+	//   - M2 running a 313 MiB 24-layer model, RSS step from an idle load to the
+	//     first processed batch, ubatch 128/256/512/1024/2048 = +114/248/518/
+	//     1051/2130 MiB (a repeat run matched within 0.2%), and the same sweep
+	//     with -ngl 0 gave +116/252/525/1062/2141 MiB — so the term is linear in
+	//     ubatch through the origin and does not care which backend runs it.
+	// runtimeOverheadBytes scales this 512-ubatch figure by ubatch/512; the
+	// ctx-keyed VRAM curve above prices a different thing (the discrete-GPU
+	// buffers at huge contexts) and stays what it was.
+	tuneRuntimeOverheadMB     = 1280
+	tuneRuntimeOverheadUBatch = 512
 	// Flash-attention headroom guard: if the chosen f16 full-offload plan
 	// leaves less than 15% of usable VRAM free and a q8_0 plan buys a larger
 	// context, prefer the q8_0 plan.
@@ -715,6 +724,18 @@ const (
 	tuneFullOffloadCrampedCtx = 8192
 	tuneCPUMoeMinTPS          = 3.0
 )
+
+// runtimeOverheadBytes is the non-weight, non-KV reserve a load needs at the
+// given ubatch size, in bytes: the measured tuneRuntimeOverheadMB is what the
+// app's default ubatch (512) costs, and the term is linear in ubatch (see the
+// constant's measurements). ubatch <= 0 charges the default, which is also what
+// llama-server uses when the preset omits --ubatch-size.
+func runtimeOverheadBytes(ubatch int) int64 {
+	if ubatch <= 0 {
+		ubatch = tuneRuntimeOverheadUBatch
+	}
+	return int64(tuneRuntimeOverheadMB) * int64(ubatch) / tuneRuntimeOverheadUBatch * (1 << 20)
+}
 
 // ctxLadderFor filters ladder (descending) to entries not exceeding trainCtx
 // (trainCtx <= 0 is treated as 32768), always keeping at least the smallest
@@ -833,8 +854,10 @@ func tuneModelConfig(hw tuneHardware, m tuneModel) ModelConfig {
 //
 // Strategy:
 //  1. No usable GPU → CPU-only plan: GPULayers=0, FlashAttn off, f16 cache
-//     (no cache-type written), largest ladder context whose weights + KV + CPU
-//     runtime overhead fit in usable RAM (smallest entry when none fits).
+//     (no cache-type written), largest ladder context whose weights + KV +
+//     runtime overhead (ramReserve, priced at the plan's ubatch) fit in usable
+//     RAM (smallest entry when none fits). The Apple Silicon plan takes the
+//     same budget and the same reserve with GPULayers="all".
 //  2. GPU present → try full offload first:
 //     A) f16 KV everywhere, or B) q8_0 KV (NVIDIA only, 0.53125 the size).
 //     Prefer A unless B enables a strictly larger context, or A leaves less
@@ -934,21 +957,10 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	cfg := defaultModelConfig()
 	cfg.Threads = threads
 
-	// ramCtxSize picks the largest ladder context whose weights + KV plus the
-	// reserve charged for that context fit in usable RAM, falling back to the
-	// smallest ladder entry. The reserve is the memory a load needs that is
-	// neither weights nor KV: the CPU-only plan passes the flat
-	// tuneCPURuntimeOverheadMB (see its measurement note), the Metal plan
-	// passes computeBuf — the curve the discrete-GPU full-offload plans already
-	// charge for the same batch buffers and graph scratch. Measured on an M2:
-	// a Metal load of a 24-layer model reports 10.76 MiB of MTL0 plus 4.01 MiB
-	// of CPU compute buffers in llama.cpp's own memory breakdown, and the
-	// device pool it allocates them from (recommendedMaxWorkingSetSize, 18186
-	// MiB on this 24 GB machine) is the same physical RAM the RAM budget
-	// already counts — so the term exists on this path too and passing 0 was
-	// not "no overhead", it was an uncharged load. The curve's context growth
-	// is what pays for the superlinear logits/graph at the huge rungs this
-	// ladder can pick.
+	// ramReserve: what a load keeps resident beyond weights + KV, priced at the
+	// ubatch the plan emits (the default 512 unless a caller changed it).
+	ramReserve := float64(runtimeOverheadBytes(cfg.UBatchSize))
+
 	// ramKVPerTok prices the ladder at the pinned q8_0 pair so the cache saving
 	// converts into context instead of only into headroom; ramKVCache writes the
 	// matching pair, and the two are always used together.
@@ -956,16 +968,19 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	if m.PinnedQ8KV {
 		ramKVPerTok *= tuneQ8KVSizeRatio
 	}
-	ramCtxSize := func(reserve func(ctx int) float64) int {
+	// ramCtxSize picks the largest ladder context whose weights + KV plus the
+	// given reserve fit in usable RAM, falling back to the smallest ladder
+	// entry. The reserve is the memory a load needs that is neither weights nor
+	// KV: runtimeOverheadBytes priced at the plan's own ubatch — the same term
+	// both RAM-bounded plans and the start-time memory guard charge, measured
+	// linear in ubatch and equal on CPU and Metal (see tuneRuntimeOverheadMB).
+	ramCtxSize := func(reserve float64) int {
 		for _, ctx := range ladder {
-			if w+ramKVPerTok*float64(ctx)+reserve(ctx) <= usableRAM {
+			if w+ramKVPerTok*float64(ctx)+reserve <= usableRAM {
 				return ctx
 			}
 		}
 		return ladder[len(ladder)-1]
-	}
-	flatReserve := func(bytes float64) func(int) float64 {
-		return func(int) float64 { return bytes }
 	}
 
 	// ramKVCache returns the KV cache pair matching the ladder pricing above:
@@ -979,44 +994,46 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	}
 
 	// cpuOnlyPlan: no GPU offload; largest ladder context whose weights + KV +
-	// CPU runtime overhead fit in usable RAM, falling back to the smallest
-	// ladder entry.
+	// runtime overhead fit in usable RAM, falling back to the smallest ladder
+	// entry.
 	cpuOnlyPlan := func() {
 		cfg.GPULayers = "0"
 		cfg.FlashAttn = false
 		cfg.CacheTypeK, cfg.CacheTypeV = ramKVCache()
-		cfg.CtxSize = ramCtxSize(flatReserve(tuneCPURuntimeOverheadMB * MB))
+		cfg.CtxSize = ramCtxSize(ramReserve)
 	}
 
 	// Metal plan (Apple Silicon): unified memory puts every weight one
 	// GPU-visible allocation away, so all layers offload (GPULayers="all")
 	// while the context is bounded by the same usable-RAM budget as the
 	// CPU-only plan — GPU and CPU share one physical pool, there is no VRAM
-	// budget to merge against. FlashAttn deliberately stays false, which means
-	// "emit nothing" (see core/preset.go) and leaves the choice to llama-server's
-	// own -fa auto. Measured on an M2 with a 4B Q4_K_M model at -ngl 99, tg128:
-	// auto is never slower than explicit on (31.91 vs 28.69 t/s on b10537, 30.02
-	// vs 29.70 within noise on a current build) and explicit off is the loser of
-	// the three (27.16 t/s, -9%), so forcing the flag can only cost speed while
-	// leaving it unset captures whatever the engine decides is best. The q8_0
-	// cache pair is the same story in reverse — it only saves memory and measured
-	// ~6% slower decode (28.38 vs 30.09 t/s) — so both belong to a user who opts
-	// in on the model settings page, not to the default plan. Once the user has
-	// opted in, ramKVCache/ramCtxSize keep the pair through a re-tune and price
-	// the ladder at 0.53125 the KV footprint, which is what turns that saving
-	// into context: on a 24 GB M2 with a 4B Q4_K_M model (36 layers, 144 KiB of
-	// f16 KV per token) the 65536 rung needs ~13.4 GB free in f16 but only
-	// ~8.4 GB with the q8_0 pair.
-	// cpu-moe is a
-	// CUDA-centric VRAM/RAM split (meaningless on unified memory), so
-	// CPUMoe/NCpuMoe stay off and the bench chain that calibrates the cpu-moe
-	// flip never runs for apple
-	// (UsedCPUMoe=false without a bench attempt).
+	// budget to merge against, and the same ramReserve is charged here (measured
+	// on an M2: the idle-to-first-batch RSS step is +518 MiB on Metal and +525
+	// MiB with -ngl 0 at the app's default ubatch 512, so the term does not
+	// shrink because the batch ran on the GPU). FlashAttn deliberately stays
+	// false, which means "emit nothing" (see core/preset.go) and leaves the
+	// choice to llama-server's own -fa auto. Measured on an M2 with a 4B Q4_K_M
+	// model at -ngl 99, tg128: auto is never slower than explicit on (31.91 vs
+	// 28.69 t/s on b10537, 30.02 vs 29.70 within noise on a current build) and
+	// explicit off is the loser of the three (27.16 t/s, -9%), so forcing the flag
+	// can only cost speed while leaving it unset captures whatever the engine
+	// decides is best. The q8_0 cache pair is the same story in reverse — it only
+	// saves memory and measured ~6% slower decode (28.38 vs 30.09 t/s) — so both
+	// belong to a user who opts in on the model settings page, not to the default
+	// plan. Once the user has opted in, ramKVCache/ramCtxSize keep the pair
+	// through a re-tune and price the ladder at 0.53125 the KV footprint, which is
+	// what turns that saving into context: on a 24 GB M2 with a 4B Q4_K_M model
+	// (36 layers, 144 KiB of f16 KV per token) the 65536 rung costs 12.6 GiB of
+	// the RAM budget in f16 (weights + KV + reserve) but only 8.4 GiB with the
+	// q8_0 pair. cpu-moe is a CUDA-centric VRAM/RAM split (meaningless on unified
+	// memory), so CPUMoe/NCpuMoe stay off and the bench chain that calibrates the
+	// cpu-moe flip never runs for apple (UsedCPUMoe=false without a bench
+	// attempt).
 	if hw.GPUVendor == vendorApple {
 		cfg.GPULayers = "all"
 		cfg.FlashAttn = false
 		cfg.CacheTypeK, cfg.CacheTypeV = ramKVCache()
-		cfg.CtxSize = ramCtxSize(computeBuf)
+		cfg.CtxSize = ramCtxSize(ramReserve)
 		return cfg
 	}
 

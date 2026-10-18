@@ -1134,11 +1134,11 @@ func TestTuneModelConfigMetal(t *testing.T) {
 		WeightsBytes: 13435 << 20, Layers: 47, KVBytesPerTokPerLayerF16: 1152,
 		TrainCtx: 202752, ExpertBytes: 11995 << 20, DenseBytes: 1440 << 20,
 	}
-	// ctx 131072 costs 13435 + 6768 + 1152 (computeBuf at the huge rung) =
-	// 21355 MiB > 20889.6, so the Metal plan now caps at 65536 (13435 + 3384 +
-	// 640 = 17459 MiB) — the reserve the discrete-GPU full-offload plans charge
-	// is charged here too, because the Metal load allocates the same buffers
-	// out of the same physical RAM.
+	// ctx 131072 costs 13435 + 6768 + 1280 (the runtime reserve at the plan's
+	// ubatch 512) = 21483 MiB > 20889.6, so the Metal plan caps at 65536
+	// (13435 + 3384 + 1280 = 18099 MiB) — the same reserve the CPU-only plan
+	// charges, because on unified memory the batch buffers come out of the same
+	// physical RAM whichever backend runs them.
 	cfg = tuneModelConfig(hwApple, tmGLM)
 	if cfg.GPULayers != "all" || cfg.CtxSize != 65536 {
 		t.Errorf("MoE on apple = gpuLayers %q ctx %d, want all / 65536", cfg.GPULayers, cfg.CtxSize)
@@ -1162,14 +1162,42 @@ func TestTuneModelConfigMetal(t *testing.T) {
 	}
 }
 
+// TestRuntimeOverheadBytesPricedByUBatch pins the measured law behind the
+// RAM-bounded plans' reserve: tuneRuntimeOverheadMB is what the app's default
+// ubatch 512 costs, and the term grows linearly with ubatch (M2, 313 MiB model,
+// idle-to-first-batch RSS step: +518 MiB at 512, +1051 at 1024, +2130 at 2048;
+// the same sweep with -ngl 0 gave +525/+1062/+2141). ubatch <= 0 charges the
+// default, which is what llama-server uses when the preset omits the flag.
+func TestRuntimeOverheadBytesPricedByUBatch(t *testing.T) {
+	const mib = int64(1 << 20)
+	tests := []struct {
+		ubatch int
+		wantMB int64
+	}{
+		{0, 1280},
+		{-1, 1280},
+		{512, 1280},
+		{256, 640},
+		{128, 320},
+		{1024, 2560},
+		{2048, 5120},
+	}
+	for _, tt := range tests {
+		if got := runtimeOverheadBytes(tt.ubatch); got != tt.wantMB*mib {
+			t.Errorf("runtimeOverheadBytes(%d) = %d MiB, want %d MiB", tt.ubatch, got/mib, tt.wantMB)
+		}
+	}
+}
+
 // A pinned q8_0 K/V pair survives a re-tune on the RAM-bounded plans and prices
 // the context ladder at tuneQ8KVSizeRatio the KV footprint, so the cache saving
 // converts into context instead of only into headroom.
 //
 // The fixture is the measured M2 case: a 4B Q4_K_M model (2.33 GiB, 36 layers,
 // 144 KiB of f16 KV per token) on 24 GB. At 10 GB free (8.5 GiB usable) the
-// 65536 rung costs 11.3 GiB in f16 and 7.1 GiB with the q8_0 pair — so the pair
-// is worth 32768 → 65536 on this budget.
+// 65536 rung costs 12.5 GiB in f16 (weights + KV + the 1.25 GiB reserve) and
+// 8.4 GiB with the q8_0 pair — so the pair is worth 32768 → 65536 on this
+// budget.
 func TestTuneModelConfigPinnedQ8KVConvertsToContext(t *testing.T) {
 	tm := tuneModel{WeightsBytes: 2497281120, Layers: 36, KVBytesPerTokPerLayerF16: 4096, TrainCtx: 262144}
 	hw := tuneHardware{GPUVendor: vendorApple, RAMTotalGB: 24, RAMFreeGB: 10, PhysicalCores: 8, LogicalCPUs: 8, PerfCores: 4}

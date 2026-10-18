@@ -95,7 +95,7 @@ func TestModelLoadBytes(t *testing.T) {
 	const (
 		mib     = int64(1 << 20)
 		gib     = int64(1 << 30)
-		overhd  = int64(tuneCPURuntimeOverheadMB) * mib
+		overhd  = int64(tuneRuntimeOverheadMB) * mib // priced at the default ubatch
 		fourGib = 4 * gib
 		// Unreadable metadata falls back to the tuner's conservative geometry:
 		// 32 layers x 1024 B/token = 32 KiB per token.
@@ -147,6 +147,15 @@ func TestModelLoadBytes(t *testing.T) {
 			cfg:  ModelConfig{},
 			want: fourGib + mmprojSize + overhd,
 		},
+		{
+			// Raising --ubatch-size to 2048 costs 4x the activation buffers
+			// (measured: the idle-to-first-batch step is linear in ubatch), so
+			// the guard charges 4x the default-ubatch reserve.
+			name: "runtime overhead priced at the configured ubatch",
+			m:    ModelInfo{Name: "m", Path: unreadable, SizeBytes: fourGib},
+			cfg:  ModelConfig{CtxSize: 4096, UBatchSize: 2048},
+			want: fourGib + fallbackKV4096 + 4*overhd,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -163,8 +172,8 @@ func TestModelLoadBytes(t *testing.T) {
 func TestModelLoadFitError(t *testing.T) {
 	const (
 		gib        = int64(1 << 30)
-		overheadGB = float64(tuneCPURuntimeOverheadMB) / 1024.0 // 1.25 GiB
-		fallbackGB = float64(32*1024*4096) / float64(1<<30)     // 0.125 GiB at ctx 4096
+		overheadGB = float64(tuneRuntimeOverheadMB) / 1024.0 // 1.25 GiB
+		fallbackGB = float64(32*1024*4096) / float64(1<<30)  // 0.125 GiB at ctx 4096
 	)
 	m := ModelInfo{Name: "huge-model", Path: "/nonexistent.gguf", SizeBytes: 8 * gib}
 
@@ -251,8 +260,8 @@ func TestAndroidDirectStartRefusesOversizedModel(t *testing.T) {
 	}
 	// The figure in the message is the whole planned footprint, not the weight
 	// file: 2 KiB + the fallback KV at the app's default 4096-token context +
-	// the CPU runtime overhead.
-	want := int64(2048) + 32*1024*4096 + int64(tuneCPURuntimeOverheadMB)*(1<<20)
+	// the runtime overhead at the plan's ubatch.
+	want := int64(2048) + 32*1024*4096 + int64(tuneRuntimeOverheadMB)*(1<<20)
 	if !strings.Contains(err.Error(), formatBytes(want)) {
 		t.Errorf("error %q must carry the planned load size %s", err, formatBytes(want))
 	}

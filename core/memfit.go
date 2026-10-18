@@ -26,8 +26,10 @@ func availableMemoryBytes() int64 {
 
 // modelLoadBytes estimates what loading m with cfg keeps resident: the weight
 // files (tuneWeightsBytes adds a same-directory mmproj projector), the f16 KV
-// cache cfg.CtxSize needs, and the CPU-only runtime overhead the auto-tuner
-// plans with (batch compute buffers, graph scratch, sampler arenas).
+// cache cfg.CtxSize needs, and the runtime overhead the auto-tuner plans with
+// (batch compute buffers, graph scratch, sampler arenas) priced at cfg's own
+// ubatch — the term is linear in ubatch, so a user who raises --ubatch-size for
+// faster prefill is charged for the memory it actually costs.
 //
 // The KV figure reuses the same tuneModel geometry the auto-tuner sizes its
 // context against, so the guard refuses exactly the plans that budget cannot
@@ -41,7 +43,7 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 	if cfg.CtxSize > 0 {
 		total += int64(tm.KVBytesPerTokPerLayerF16 * float64(tm.Layers) * float64(cfg.CtxSize))
 	}
-	return total + int64(tuneCPURuntimeOverheadMB)*(1<<20)
+	return total + runtimeOverheadBytes(cfg.UBatchSize)
 }
 
 // memoryFitError returns nil when needBytes fits in availBytes and a bilingual
