@@ -57,6 +57,40 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 	return total + runtimeOverheadBytes(cfg.UBatchSize)
 }
 
+// fittingCtxRung is the advice half of the memory check: the largest tier of the
+// auto-tuner's own context ladder that this model, priced with cfg's other
+// settings (KV cache types, ubatch), would fit in availBytes - and that is
+// smaller than the context the user has configured now. 0 means nothing on the
+// ladder helps: the weights and the runtime overhead alone already exceed the
+// memory available, or the current context is at or below the ladder's floor.
+//
+// The refusal message carries this number because the two figures alone are not
+// actionable on a phone: "needs 8.5 GB, 7.0 GB free" tells the user nothing they
+// can type, while the tier the same pricing approves is. It never suggests
+// raising the context - a rung above the configured one prices higher than the
+// refused load (the price only grows with the context), so if one fitted, the
+// refusal itself would be impossible.
+//
+// Each rung is priced by modelLoadBytes, which re-reads the GGUF header; this
+// runs on a load that is about to be refused, not on a successful start.
+func fittingCtxRung(m ModelInfo, cfg ModelConfig, availBytes int64) int {
+	if availBytes <= 0 {
+		return 0
+	}
+	mm, _ := readGGUFModelMetrics(m.Path)
+	for _, ctx := range ctxLadderFor(mm.ContextLength, tuneCtxLadder) {
+		if ctx >= cfg.CtxSize {
+			continue
+		}
+		c := cfg
+		c.CtxSize = ctx
+		if modelLoadBytes(m, c) <= availBytes {
+			return ctx
+		}
+	}
+	return 0
+}
+
 // ─── Prompt-cache budget (both serving modes) ─────────────────────
 
 // promptCacheShare is how much of the memory the planned load leaves over the
@@ -94,21 +128,25 @@ func routerLibrary() ([]ModelInfo, map[string]ModelConfig) {
 // direction for a bound that only ever shrinks a budget - it is not safe for a
 // warning, which is why overcommitWarning asks first.
 //
-// ("", 0) for an empty or unreadable library.
-func heaviestPlannedLoad(models []ModelInfo, cfgs map[string]ModelConfig) (string, int64) {
-	var name string
+// (zero values, 0) for an empty or unreadable library. The model and its plan
+// come back with the figure because the over-commit warning advises that one
+// model, and advising it needs the plan the price was computed from.
+func heaviestPlannedLoad(models []ModelInfo, cfgs map[string]ModelConfig) (ModelInfo, ModelConfig, int64) {
+	var heavy ModelInfo
+	var plan ModelConfig
 	var heaviest int64
 	for _, m := range models {
-		if n := modelLoadBytes(m, routerModelPlan(cfgs, m)); n > heaviest {
-			heaviest, name = n, m.Name
+		c := routerModelPlan(cfgs, m)
+		if n := modelLoadBytes(m, c); n > heaviest {
+			heaviest, heavy, plan = n, m, c
 		}
 	}
-	return name, heaviest
+	return heavy, plan, heaviest
 }
 
 // maxModelLoadBytes is heaviestPlannedLoad's byte figure alone.
 func maxModelLoadBytes(models []ModelInfo, cfgs map[string]ModelConfig) int64 {
-	_, n := heaviestPlannedLoad(models, cfgs)
+	_, _, n := heaviestPlannedLoad(models, cfgs)
 	return n
 }
 
@@ -155,14 +193,22 @@ func loadsStayInHostRAM(serving tuneTarget) bool {
 // state is discoverable from the app.
 //
 // "" when the library is empty or unreadable, the probe failed (availBytes <= 0
-// proves nothing), or the heaviest load fits.
-func overcommitWarning(name string, needBytes, availBytes int64) string {
+// proves nothing), or the heaviest load fits. suggestCtx is fittingCtxRung's
+// answer for that model (>0 = the tier to move to, 0 = no tier on the ladder
+// helps), computed by the caller so this stays a pure formatter.
+func overcommitWarning(name string, needBytes, availBytes int64, suggestCtx int) string {
 	if name == "" || availBytes <= 0 || needBytes <= availBytes {
 		return ""
 	}
-	return fmt.Sprintf(tr("模型 %s 这次要占约 %s（权重 + 上下文缓存 + 运行开销），而本机当前只有 %s 空闲内存。服务仍会启动、其他模型照常可用，但真正加载它时内存放不下会开始交换：请求可能长时间没有响应、整台机器变卡。请在模型设置里调小它的上下文大小，或用一键调优重新规划。",
-		"model %s needs about %s for this load (weights + context cache + runtime overhead) but only %s of memory is free right now. The service still starts and every other model stays usable, but loading it will overflow into swap: requests may hang for a long time and the whole machine slows down. Lower that model's context size in its settings, or run one-click tuning to re-plan it."),
-		name, formatBytes(needBytes), formatBytes(availBytes))
+	advice := tr("请在模型设置里调小它的上下文大小，或用一键调优重新规划。",
+		"Lower that model's context size in its settings, or run one-click tuning to re-plan it.")
+	if suggestCtx > 0 {
+		advice = fmt.Sprintf(tr("把它的上下文大小调到 %d 就放得下，或者用一键调优重新规划。",
+			"Set its context size to %d and it fits, or run one-click tuning to re-plan it."), suggestCtx)
+	}
+	return fmt.Sprintf(tr("模型 %s 这次要占约 %s（权重 + 上下文缓存 + 运行开销），而本机当前只有 %s 空闲内存。服务仍会启动、其他模型照常可用，但真正加载它时内存放不下会开始交换：请求可能长时间没有响应、整台机器变卡。%s",
+		"model %s needs about %s for this load (weights + context cache + runtime overhead) but only %s of memory is free right now. The service still starts and every other model stays usable, but loading it will overflow into swap: requests may hang for a long time and the whole machine slows down. %s"),
+		name, formatBytes(needBytes), formatBytes(availBytes), advice)
 }
 
 // routerModelPlan resolves the config a router-mode load runs m with: the stored
@@ -301,18 +347,27 @@ func promptCacheRAMMiB(requestedMiB int, plannedNeedBytes, availBytes int64) int
 // memoryFitError returns nil when needBytes fits in availBytes and a bilingual
 // error carrying both measured figures when it cannot. An unknown availBytes
 // (failed probe) never blocks a start. Pure, so tests can walk the boundary
-// without a device.
-func memoryFitError(name string, needBytes, availBytes int64) error {
+// without a device; suggestCtx (fittingCtxRung's answer, 0 = nothing on the
+// ladder helps) is passed in for the same reason.
+func memoryFitError(name string, needBytes, availBytes int64, suggestCtx int) error {
 	if availBytes <= 0 || needBytes <= availBytes {
 		return nil
 	}
-	return fmt.Errorf(tr("模型 %s 这次要占约 %s（权重 + 上下文缓存 + 运行开销），而本机当前只剩 %s 可用内存，放不下（加载时会被系统查杀、应用闪退）。请调小上下文大小，或换更小的量化（如 Q4_K_M）。",
-		"model %s needs about %s for this load (weights + context cache + runtime overhead) but only %s of memory is available right now, so it cannot fit (the load gets killed by the system and the app disappears). Lower the context size, or pick a smaller quantization (e.g. Q4_K_M)."),
-		name, formatBytes(needBytes), formatBytes(availBytes))
+	advice := tr("最小的上下文档也放不下：这台机器需要一个更小的量化或更小的模型（或者把上下文调到 2048 以下）。",
+		"even the smallest context tier does not fit: this device needs a smaller quantization or a smaller model (or a context below 2048 tokens).")
+	if suggestCtx > 0 {
+		advice = fmt.Sprintf(tr("把它的上下文大小调到 %d 就放得下，或者用一键调优重新规划。",
+			"Set its context size to %d and it fits, or run one-click tuning to re-plan it."), suggestCtx)
+	}
+	return fmt.Errorf(tr("模型 %s 这次要占约 %s（权重 + 上下文缓存 + 运行开销），而本机当前只剩 %s 可用内存，放不下（加载时会被系统查杀、应用闪退）。%s",
+		"model %s needs about %s for this load (weights + context cache + runtime overhead) but only %s of memory is available right now, so it cannot fit (the load gets killed by the system and the app disappears). %s"),
+		name, formatBytes(needBytes), formatBytes(availBytes), advice)
 }
 
 // modelLoadFitError checks one scanned model against the memory available
-// right now, with the same budget the auto-tuner sizes its context against.
+// right now, with the same budget the auto-tuner sizes its context against, and
+// names the context tier that would fit when one does.
 func modelLoadFitError(m ModelInfo, cfg ModelConfig) error {
-	return memoryFitError(m.Name, modelLoadBytes(m, cfg), availableMemoryBytes())
+	avail := availableMemoryBytes()
+	return memoryFitError(m.Name, modelLoadBytes(m, cfg), avail, fittingCtxRung(m, cfg, avail))
 }

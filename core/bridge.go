@@ -470,10 +470,11 @@ func buildServerCommand(cfg ServerConfig, presetPath string, d *directModel) (st
 	}
 	// One pricing pass over the library feeds both launch-time memory
 	// decisions: the over-commit warning and the prompt-cache budget.
-	heaviestName, heaviestNeed := heaviestPlannedLoad(routerLibrary())
+	heavyModel, heavyPlan, heaviestNeed := heaviestPlannedLoad(routerLibrary())
 	freeMem := availableMemoryBytes()
-	if heaviestName != "" && freeMem > 0 && heaviestNeed > freeMem && loadsStayInHostRAM(probeServingGPU()) {
-		addServerLog("[WARN] " + overcommitWarning(heaviestName, heaviestNeed, freeMem))
+	if heavyModel.Name != "" && freeMem > 0 && heaviestNeed > freeMem && loadsStayInHostRAM(probeServingGPU()) {
+		suggest := fittingCtxRung(heavyModel, heavyPlan, freeMem)
+		addServerLog("[WARN] " + overcommitWarning(heavyModel.Name, heaviestNeed, freeMem, suggest))
 	}
 	if cfg.CacheRAM > 0 {
 		// Router mode loads models lazily, so the memory the prompt cache may

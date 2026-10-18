@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -45,24 +46,28 @@ func TestAvailableMemoryBytes(t *testing.T) {
 
 // TestMemoryFitError walks the fit boundary: a load that fits (and one exactly
 // at the limit) is accepted, a probe failure never blocks, and a load that
-// cannot fit produces an error carrying both measured figures.
+// cannot fit produces an error carrying both measured figures plus, when the
+// caller has one, the context tier that would fit.
 func TestMemoryFitError(t *testing.T) {
 	gib := int64(1 << 30)
 	tests := []struct {
-		name    string
-		need    int64
-		avail   int64
-		wantErr bool
+		name     string
+		need     int64
+		avail    int64
+		suggest  int
+		wantErr  bool
+		wantTier bool // the message must quote the suggested tier
 	}{
-		{"fits", 3 * gib, 5 * gib, false},
-		{"exactly at the limit fits", 4 * gib, 4 * gib, false},
-		{"one byte over is refused", 4*gib + 1, 4 * gib, true},
-		{"unknown availability never blocks", 20 * gib, 0, false},
-		{"failed probe (negative) never blocks", 20 * gib, -1, false},
+		{"fits", 3 * gib, 5 * gib, 0, false, false},
+		{"exactly at the limit fits", 4 * gib, 4 * gib, 0, false, false},
+		{"one byte over is refused", 4*gib + 1, 4 * gib, 0, true, false},
+		{"the fitting tier is quoted", 4*gib + 1, 4 * gib, 16384, true, true},
+		{"unknown availability never blocks", 20 * gib, 0, 16384, false, false},
+		{"failed probe (negative) never blocks", 20 * gib, -1, 16384, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := memoryFitError("qwen-4b", tt.need, tt.avail)
+			err := memoryFitError("qwen-4b", tt.need, tt.avail, tt.suggest)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("memoryFitError(%d, %d) err = %v, wantErr %v", tt.need, tt.avail, err, tt.wantErr)
 			}
@@ -76,6 +81,14 @@ func TestMemoryFitError(t *testing.T) {
 				if !strings.Contains(msg, want) {
 					t.Errorf("error %q missing %q", msg, want)
 				}
+			}
+			// The tier is the actionable half. Asserted by its digits because
+			// the surrounding sentence is tr()-resolved and may be English.
+			if tt.wantTier && !strings.Contains(msg, strconv.Itoa(tt.suggest)) {
+				t.Errorf("error %q does not quote the fitting tier %d", msg, tt.suggest)
+			}
+			if !tt.wantTier && tt.suggest > 0 && strings.Contains(msg, strconv.Itoa(tt.suggest)) {
+				t.Errorf("error %q quotes a tier the caller did not resolve", msg)
 			}
 		})
 	}
@@ -352,6 +365,28 @@ func TestModelLoadFitError(t *testing.T) {
 	if err := modelLoadFitError(m, ModelConfig{CtxSize: 4096}); err != nil {
 		t.Errorf("failed probe must not block a start, got %v", err)
 	}
+
+	// The advice half through the real entry point, not just the formatter: the
+	// availability above pays for the 2048 tier exactly (8 GiB weights + 1280 MiB
+	// overhead + 2048 tokens x the 32 KiB/token fallback geometry = the same
+	// 9.3125 GiB), so the refusal of the 4096 load has to name that rung rather
+	// than leave the user with two numbers.
+	pinProbeFreeMemoryGB(t, avail)
+	err := modelLoadFitError(m, ModelConfig{CtxSize: 4096})
+	if err == nil {
+		t.Fatal("ctx 4096 must still be refused at this availability")
+	}
+	if want := strconv.Itoa(tuneCtxMin); !strings.Contains(err.Error(), want) {
+		t.Errorf("refusal = %v, want it to name the %s tier the same pricing accepts", err, want)
+	}
+	// And the same for a far bigger plan: this machine pays for exactly one rung
+	// (2048 costs 9,536 MiB, 4,096 costs 9,600 MiB), so the ceiling refusal names
+	// that one rung too - never anything above the configured context's price.
+	if err := modelLoadFitError(m, ModelConfig{CtxSize: tuneCtxMax}); err == nil {
+		t.Fatal("the ladder ceiling must be refused at this availability")
+	} else if want := strconv.Itoa(tuneCtxMin); !strings.Contains(err.Error(), want) {
+		t.Errorf("ctx %d refusal = %v, want it to name the only affordable rung %s", tuneCtxMax, err, want)
+	}
 }
 
 // TestDirectModelConfigFallsBackToAppDefaults pins the direct-mode config
@@ -553,19 +588,23 @@ func TestMaxModelLoadBytes(t *testing.T) {
 		t.Errorf("untuned model = %d MiB, want %d (trained ctx 32768)", got/(1<<20), (weights+mib(64)+overhead)/(1<<20))
 	}
 	// Heaviest of the three shapes wins, and a stored config can be heavier than
-	// the trained-context fallback. The same call names the model it belongs to,
-	// which is what the over-commit warning has to quote.
+	// the trained-context fallback. The same call names the model it belongs to
+	// and the plan it was priced with, which is what the over-commit warning has
+	// to quote and re-price a fitting tier against.
 	big := ModelInfo{Name: "big", Path: path, SizeBytes: weights}
 	cfgs["big"] = ModelConfig{CtxSize: 131072, UBatchSize: 512}
-	name, got := heaviestPlannedLoad([]ModelInfo{tuned, untuned, big}, cfgs)
+	heavy, heavyPlan, got := heaviestPlannedLoad([]ModelInfo{tuned, untuned, big}, cfgs)
 	if got != weights+mib(256)+overhead {
 		t.Errorf("heaviest = %d MiB, want %d (stored ctx 131072)", got/(1<<20), (weights+mib(256)+overhead)/(1<<20))
 	}
-	if name != "big" {
-		t.Errorf("heaviest model = %q, want the stored 131072-token entry", name)
+	if heavy.Name != "big" {
+		t.Errorf("heaviest model = %q, want the stored 131072-token entry", heavy.Name)
 	}
-	if name, got := heaviestPlannedLoad(nil, nil); got != 0 || name != "" {
-		t.Errorf("empty library = %q/%d, want no name and 0", name, got)
+	if heavyPlan.CtxSize != 131072 || heavyPlan.UBatchSize != 512 {
+		t.Errorf("heaviest plan = %+v, want the stored ctx 131072 at ubatch 512", heavyPlan)
+	}
+	if h, p, got := heaviestPlannedLoad(nil, nil); got != 0 || h.Name != "" || p.CtxSize != 0 {
+		t.Errorf("empty library = %q/%+v/%d, want no model, no plan and 0", h.Name, p, got)
 	}
 }
 
@@ -677,25 +716,29 @@ func TestLoadsStayInHostRAM(t *testing.T) {
 // TestOvercommitWarning walks the warning's boundary: it stays quiet for a
 // library that fits (including exactly at the limit), for a failed probe and for
 // an unreadable library, and otherwise quotes the model plus both figures - the
-// state it describes otherwise leaves no diagnostic anywhere.
+// state it describes otherwise leaves no diagnostic anywhere - plus the context
+// tier the caller resolved, when one exists.
 func TestOvercommitWarning(t *testing.T) {
 	const gib = int64(1 << 30)
 	tests := []struct {
-		name  string
-		model string
-		need  int64
-		avail int64
-		want  bool
+		name     string
+		model    string
+		need     int64
+		avail    int64
+		suggest  int
+		want     bool
+		wantTier bool
 	}{
-		{"fits", "m", 3 * gib, 5 * gib, false},
-		{"exactly at the limit fits", "m", 4 * gib, 4 * gib, false},
-		{"failed probe says nothing", "m", 20 * gib, 0, false},
-		{"empty library says nothing", "", 20 * gib, gib, false},
-		{"over-committed warns", "qwen-4b", 4*gib + 1, 4 * gib, true},
+		{"fits", "m", 3 * gib, 5 * gib, 0, false, false},
+		{"exactly at the limit fits", "m", 4 * gib, 4 * gib, 0, false, false},
+		{"failed probe says nothing", "m", 20 * gib, 0, 16384, false, false},
+		{"empty library says nothing", "", 20 * gib, gib, 16384, false, false},
+		{"over-committed warns", "qwen-4b", 4*gib + 1, 4 * gib, 0, true, false},
+		{"over-committed warns with the tier", "qwen-4b", 4*gib + 1, 4 * gib, 32768, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := overcommitWarning(tt.model, tt.need, tt.avail)
+			got := overcommitWarning(tt.model, tt.need, tt.avail, tt.suggest)
 			if tt.want && got == "" {
 				t.Error("overcommitWarning = \"\", want a warning")
 			}
@@ -709,6 +752,142 @@ func TestOvercommitWarning(t *testing.T) {
 				if !strings.Contains(got, frag) {
 					t.Errorf("warning %q does not carry %q", got, frag)
 				}
+			}
+			// Asserted by digits: the advice sentence is tr()-resolved.
+			if tt.wantTier && !strings.Contains(got, strconv.Itoa(tt.suggest)) {
+				t.Errorf("warning %q does not quote the fitting tier %d", got, tt.suggest)
+			}
+			if !tt.wantTier && tt.suggest > 0 && strings.Contains(got, strconv.Itoa(tt.suggest)) {
+				t.Errorf("warning %q quotes a tier the caller did not resolve", got)
+			}
+		})
+	}
+}
+
+// TestFittingCtxRung pins the advice half of the memory check: the largest tier
+// of the tuner's own ladder that this model would fit with its own settings -
+// and never a tier at or above the context it already has.
+//
+// The writeMemfitGGUF fixture trains at 262,144 tokens and costs 48 KiB of f16 KV
+// per token, so a 1 GiB model at the default ubatch prices at (weights + ctx x 48
+// KiB + the 1280 MiB runtime reserve):
+//
+//	131072 → 8448 MiB   65536 → 5376 MiB   32768 → 3840 MiB   16384 → 3072 MiB
+//	 8192  → 2688 MiB    4096 → 2496 MiB    2048 → 2400 MiB
+//
+// and the same fixture with a pinned q8_0 K+V pair at 17/32 of each KV term
+// (131072 → 5568, 65536 → 3936, 32768 → 3120, 16384 → 2712, 8192 → 2508,
+// 4096 → 2406, 2048 → 2355).
+func TestFittingCtxRung(t *testing.T) {
+	dir := t.TempDir()
+	readable := writeMemfitGGUF(t, dir)
+	unreadable := writeTempGGUF(t, dir, "junk.gguf", make([]byte, 64))
+	const weights = int64(1 << 30) // 1024 MiB
+	m := ModelInfo{Name: "memfit", Path: readable, SizeBytes: weights}
+	blind := ModelInfo{Name: "blind", Path: unreadable, SizeBytes: weights}
+	const fullCtx = tuneCtxMax // 131072, the ladder's top rung
+
+	tests := []struct {
+		name  string
+		model ModelInfo
+		cfg   ModelConfig
+		avail int64
+		want  int
+	}{
+		{
+			name:  "the tier that fits is named",
+			model: m,
+			cfg:   ModelConfig{CtxSize: fullCtx, UBatchSize: 512},
+			avail: mib(5376),
+			want:  65536,
+		},
+		{
+			// The suggestion is priced by the same modelLoadBytes as the
+			// refusal, so it must respect that boundary too.
+			name:  "one MiB short of a tier walks down another rung",
+			model: m,
+			cfg:   ModelConfig{CtxSize: fullCtx, UBatchSize: 512},
+			avail: mib(5375),
+			want:  32768,
+		},
+		{
+			// The refused load keeps its cache types: 65536 costs 5376 MiB of
+			// f16 KV but 3936 MiB with the pair the guard prices at 17/32, so
+			// the same memory affords a tier higher than the f16 ladder would.
+			name:  "the pinned q8_0 pair is priced into the tier",
+			model: m,
+			cfg:   ModelConfig{CtxSize: fullCtx, UBatchSize: 512, CacheTypeK: "q8_0", CacheTypeV: "q8_0"},
+			avail: mib(4000),
+			want:  65536,
+		},
+		{
+			// Ample memory changes nothing about the direction: the helper only
+			// ever suggests below the configured context, because the caller
+			// reaches it with a load that price already refused.
+			name:  "a tier above the configured context is never suggested",
+			model: m,
+			cfg:   ModelConfig{CtxSize: 16384, UBatchSize: 512},
+			avail: mib(64 * 1024),
+			want:  8192,
+		},
+		{
+			// A hand-typed context sits between rungs; the largest tier below
+			// it is still a reduction.
+			name:  "an off-ladder context suggests the tier under it",
+			model: m,
+			cfg:   ModelConfig{CtxSize: 20000, UBatchSize: 512},
+			avail: mib(3072),
+			want:  16384,
+		},
+		{
+			name:  "a context at the ladder floor has nothing left to suggest",
+			model: m,
+			cfg:   ModelConfig{CtxSize: tuneCtxMin, UBatchSize: 512},
+			avail: mib(8704),
+			want:  0,
+		},
+		{
+			// The floor prices at 2400 MiB for this fixture; a machine that
+			// cannot pay it is not helped by any tier.
+			name:  "less than the floor price leaves no tier",
+			model: m,
+			cfg:   ModelConfig{CtxSize: 4096, UBatchSize: 512},
+			avail: mib(2399),
+			want:  0,
+		},
+		{
+			// Weights and the runtime reserve alone already exceed the memory:
+			// the advice has to be "a smaller model", not a number.
+			name:  "weights alone over memory leaves no tier",
+			model: m,
+			cfg:   ModelConfig{CtxSize: fullCtx, UBatchSize: 512},
+			avail: mib(2000),
+			want:  0,
+		},
+		{
+			name:  "unknown availability suggests nothing",
+			model: m,
+			cfg:   ModelConfig{CtxSize: fullCtx, UBatchSize: 512},
+			avail: 0,
+			want:  0,
+		},
+		{
+			// Unreadable metadata is priced with the tuner's fallback geometry
+			// (32 KiB/token, so 131072 → 6400 MiB and 65536 → 4352 MiB) - the
+			// same figure the refusal quoted, so the advice stays consistent
+			// with the bill.
+			name:  "unreadable metadata keeps the fallback geometry",
+			model: blind,
+			cfg:   ModelConfig{CtxSize: fullCtx, UBatchSize: 512},
+			avail: mib(5000),
+			want:  65536,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fittingCtxRung(tt.model, tt.cfg, tt.avail); got != tt.want {
+				t.Errorf("fittingCtxRung(ctx %d, cacheK %q, avail %d MiB) = %d, want %d",
+					tt.cfg.CtxSize, tt.cfg.CacheTypeK, tt.avail/(1<<20), got, tt.want)
 			}
 		})
 	}
