@@ -1221,6 +1221,9 @@ func cudaVerOf(name string) (float64, bool) {
 //   - Linux with any GPU (NVIDIA, AMD or Intel — the ubuntu-vulkan tarball is
 //     the only GPU-accelerated Linux build, no ubuntu cuda variant exists):
 //     vulkan wins decisively.
+//   - Android: the generic arm64 tarball wins over the vendor-specific
+//     "-snapdragon" build, whose bin/+lib/ layout the app's LD_LIBRARY_PATH
+//     (the executable's own directory) cannot resolve.
 //
 // On Windows, cudart runtime assets are skipped (the main program and runtime
 // are downloaded separately; the runtime is matched by pickCudartAssetFor).
@@ -1239,8 +1242,9 @@ func pickBestAssetFor(assets []GitHubAsset, platform, arch string, hasGPU bool, 
 	case "linux":
 		platformKey = "ubuntu"
 	case "android":
-		// Upstream Android builds are arm64 CPU-only tarballs:
-		// llama-b*-bin-android-arm64.tar.gz (no cuda/rocm/vulkan variants).
+		// Upstream ships an arm64 CPU-only tarball (llama-b*-bin-android-arm64
+		// .tar.gz, flat layout with runtime ISA-dispatch libs) plus a
+		// vendor-specific -snapdragon variant; the generic one is the pick.
 		platformKey = "android"
 	}
 	archKey := archKeyOf(arch)
@@ -1359,8 +1363,10 @@ func pickBestAssetFor(assets []GitHubAsset, platform, arch string, hasGPU bool, 
 		// Generic non-win scoring: plain distro build outranks specialized
 		// variants (vulkan/sycl/openvino); kleidiai builds stay excluded; an
 		// explicit arch tag outranks untagged oddities (ubuntu-s390x carries
-		// no x64/arm64 tag).
-		if platformKey != "win" && !strings.Contains(name, "kleidiai") {
+		// no x64/arm64 tag). The android snapdragon tarball is excluded the
+		// same way: its bin/+lib/ layout does not resolve under the app's
+		// LD_LIBRARY_PATH (the executable's own directory).
+		if platformKey != "win" && !strings.Contains(name, "kleidiai") && !strings.Contains(name, "snapdragon") {
 			score += 10
 			if !strings.Contains(name, "vulkan") && !strings.Contains(name, "sycl") && !strings.Contains(name, "openvino") {
 				score += 10

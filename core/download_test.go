@@ -115,6 +115,30 @@ func TestPickBestAssetForAndroid(t *testing.T) {
 	}
 }
 
+// TestPickBestAssetForAndroidPrefersGeneric covers the Android variant
+// tie-break: the vendor-SoC snapdragon tarball (a bin/+lib/ layout the app's
+// LD_LIBRARY_PATH cannot resolve) must lose to the generic flat-layout arm64
+// tarball even though it orders first in the release assets, and stays
+// selectable as the last resort when a release ships nothing else, the way
+// kleidiai assets are treated.
+func TestPickBestAssetForAndroidPrefersGeneric(t *testing.T) {
+	assets := []GitHubAsset{
+		{Name: "llama-b11716-bin-android-arm64-snapdragon.tar.gz"},
+		{Name: "llama-b11716-bin-android-arm64.tar.gz"},
+	}
+	for _, hasGPU := range []bool{false, true} {
+		got := pickBestAssetFor(assets, "android", "arm64", hasGPU, "", 0)
+		if got == nil || got.Name != "llama-b11716-bin-android-arm64.tar.gz" {
+			t.Errorf("android (hasGPU=%v) should pick the generic arm64 tarball, got %v", hasGPU, got)
+		}
+	}
+
+	got := pickBestAssetFor(assets[:1], "android", "arm64", false, "", 0)
+	if got == nil || got.Name != "llama-b11716-bin-android-arm64-snapdragon.tar.gz" {
+		t.Errorf("snapdragon-only release should still be selectable, got %v", got)
+	}
+}
+
 // TestPickBestAssetForWindowsCUDAExcludesCudart verifies that when selecting the main
 // program asset in a Windows+CUDA environment, cudart runtime assets are excluded:
 // since llama.cpp b10342, Windows CUDA builds are split into cudart runtime zip
