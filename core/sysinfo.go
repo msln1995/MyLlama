@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,6 +153,12 @@ func getCPUInfo() CPUInfo {
 			// Best-effort big.LITTLE detection via cpufreq max frequencies;
 			// any read failure leaves PerfCores 0 (= unknown, no capping).
 			info.PerfCores = countPerformanceCPUs(readCPUMaxFreqs())
+			// /proc/cpuinfo lists the CPUs the *reading process* sees, so an
+			// app confined to a little-core cpuset (or with cores offline)
+			// reports fewer processors than the SoC has — and the auto-tuner's
+			// performance-cluster cap then sees no split at all. The presence
+			// list is hardware truth, so it wins whenever it is larger.
+			info.Cores = presentCoreCount(info.Cores)
 		}
 	case "darwin":
 		info.Model = runCmd("sysctl", "-n", "machdep.cpu.brand_string")
@@ -645,17 +652,15 @@ func countPerformanceCPUs(maxFreqs []int) int {
 }
 
 // readCPUMaxFreqs reads the per-CPU maximum frequencies (kHz) from
-// /sys/devices/system/cpu/cpuN/cpufreq/cpuinfo_max_freq for N in 0..NumCPU-1,
-// ordered by CPU index. Offline/unreadable entries are skipped; a totally
-// unavailable sysfs yields nil (countPerformanceCPUs then reports 0).
+// /sys/devices/system/cpu/cpuN/cpufreq/cpuinfo_max_freq over the CPUs the
+// hardware presents, ordered by CPU index. Offline/unreadable entries are
+// skipped; a totally unavailable sysfs yields nil (countPerformanceCPUs then
+// reports 0).
 func readCPUMaxFreqs() []int {
-	n := runtime.NumCPU()
-	if n <= 0 {
-		return nil
-	}
-	freqs := make([]int, 0, n)
-	for i := 0; i < n; i++ {
-		data, err := os.ReadFile(fmt.Sprintf("/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i))
+	ids := cpuPresentIDs()
+	freqs := make([]int, 0, len(ids))
+	for _, id := range ids {
+		data, err := os.ReadFile(fmt.Sprintf("/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", id))
 		if err != nil {
 			continue
 		}
@@ -664,6 +669,87 @@ func readCPUMaxFreqs() []int {
 		}
 	}
 	return freqs
+}
+
+// probeCPUPresent reads the CPU presence list file; a seam so tests can drive
+// both the parsed and the unreadable-sysfs paths (same style as the
+// updateExePath / renameFile injection points).
+var probeCPUPresent = func() string {
+	return readProcFile("/sys/devices/system/cpu/present")
+}
+
+// maxPresentCPULimit bounds how wide a single range is accepted, so a corrupt
+// "0-2147483647" list cannot allocate unbounded memory (real SoCs and server
+// boards stay far below this).
+const maxPresentCPULimit = 1024
+
+// cpuPresentIDs returns the CPU indices the hardware provides. It must not use
+// runtime.NumCPU(): Android confines a backgrounded app to a little-core cpuset
+// and NumCPU then reports that affinity mask instead of the SoC topology, which
+// would skew every big.LITTLE decision built on the sample (the auto-tuner caps
+// threads to the performance cluster). When the presence list is unreadable, the
+// historical 0..NumCPU-1 range is returned.
+func cpuPresentIDs() []int {
+	if ids := parseCPUPresentList(probeCPUPresent()); len(ids) > 0 {
+		return ids
+	}
+	n := runtime.NumCPU()
+	if n <= 0 {
+		return nil
+	}
+	ids := make([]int, n)
+	for i := range ids {
+		ids[i] = i
+	}
+	return ids
+}
+
+// presentCoreCount returns sampled or the number of CPUs the hardware presents,
+// whichever is larger: the process-visible sample can understate the topology
+// when the app is confined to a cpuset or when cores are offline.
+func presentCoreCount(sampled int) int {
+	if n := len(cpuPresentIDs()); n > sampled {
+		return n
+	}
+	return sampled
+}
+
+// parseCPUPresentList parses a kernel CPU list file (the format of
+// /sys/devices/system/cpu/present and /possible): comma-separated singles or
+// ranges, e.g. "0-7" or "0-3,8-11", returned as ascending indices. Malformed
+// tokens and implausibly wide ranges are skipped; nothing usable yields nil.
+func parseCPUPresentList(out string) []int {
+	seen := make(map[int]bool)
+	for _, part := range strings.Split(out, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		loStr, hiStr, isRange := strings.Cut(part, "-")
+		lo, err := strconv.Atoi(strings.TrimSpace(loStr))
+		if err != nil || lo < 0 {
+			continue
+		}
+		hi := lo
+		if isRange {
+			hi, err = strconv.Atoi(strings.TrimSpace(hiStr))
+			if err != nil || hi < lo || hi-lo >= maxPresentCPULimit {
+				continue
+			}
+		}
+		for id := lo; id <= hi; id++ {
+			seen[id] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	ids := make([]int, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	return ids
 }
 
 func parseCoresDarwin(out string) int {
