@@ -357,6 +357,49 @@ func isEmbeddingModel(m ModelInfo) bool {
 		strings.Contains(lower, "gte-") || strings.Contains(lower, "e5-")
 }
 
+// probeCPUCoreCounts is the CPU topology seam behind the direct-mode thread
+// default: physical cores and performance-cluster cores, read through the same
+// cached snapshot the Home page uses. A var (like probeFreeMemoryGB) so tests
+// pin a topology instead of inheriting the build host's.
+var probeCPUCoreCounts = func() (cores int, perfCores int) {
+	c := systemInfo().CPU
+	return c.Cores, c.PerfCores
+}
+
+// cpuThreadDefault sizes the llama.cpp worker pool for a CPU-only launch: an
+// explicit user setting always wins, and an unset one (-1 auto, or the zero
+// value of a model with no stored config) is capped to the performance
+// cluster when the probe knows the CPU is asymmetric.
+//
+// llama.cpp's own sizing is "one worker per core", which on a big.LITTLE
+// phone schedules GEMM workers onto the efficiency cluster too. Measured on a
+// vivo X60 (Exynos 1080, 4x A55 + 4x A78) with the app's own server and a
+// Qwen3-4B Q5_K_M model, 600-token prompt + 128 tokens generated, A/B/A with a
+// fresh process per pass: 4 threads decode at 3.82 / 3.46 / 3.89 t/s and
+// prefill at 14.2 / 14.4 / 14.7 t/s, all four workers landing on the A78
+// cluster by themselves; llama.cpp's all-core default decodes at 0.35 t/s and
+// prefills at 11.98 t/s (442s wall vs 97-103s), with every core pinned at
+// 98-100% busy so the UI, the system daemons and page reclaim starve. The
+// same direction holds in llama-bench on the same SoC (tg32 7.23 / 7.36 at -t
+// 4 vs 4.38 / 4.95 at -t 8).
+//
+// Returns 0 (= leave the flag off and let llama.cpp decide) for uniform
+// topologies and for unknown splits (perfCores 0), so x86 desktops and devices
+// whose cpufreq is unreadable keep the historical command line byte-for-byte.
+// A single-core performance cluster is treated as unknown too: 1+7 SoCs exist
+// (one prime above the 80% threshold), and capping a phone to one worker would
+// cost far more prefill throughput than the efficiency-cluster workers it
+// removes, so that reading is not trusted enough to change the command line.
+func cpuThreadDefault(threads, cores, perfCores int) int {
+	if threads > 0 {
+		return threads
+	}
+	if perfCores >= 2 && perfCores < cores {
+		return perfCores
+	}
+	return 0
+}
+
 // modelDirectArgs serializes the same per-model entries the INI preset writer
 // emits (modelPresetKV) into llama-server direct-mode command-line arguments:
 // single-model serving with no INI file, one process, one model. The alias is

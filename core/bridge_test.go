@@ -613,6 +613,17 @@ func withPlatformGOOS(t *testing.T, goos string) {
 	t.Cleanup(func() { platformGOOS = orig })
 }
 
+// pinCPUCoreCounts pins the direct-mode thread default's topology seam (see
+// cpuThreadDefault) so a test's command line never depends on the CPU of the
+// machine running it. perfCores 0 is a uniform/unknown topology, which is the
+// historical "emit no --threads" behavior.
+func pinCPUCoreCounts(t *testing.T, cores, perfCores int) {
+	t.Helper()
+	orig := probeCPUCoreCounts
+	probeCPUCoreCounts = func() (int, int) { return cores, perfCores }
+	t.Cleanup(func() { probeCPUCoreCounts = orig })
+}
+
 // TestCudaDeviceEnvEmpty verifies an empty serving-GPU selection (auto) yields
 // nil so exec.Command inherits the parent environment unchanged (historical
 // behavior). Runs on the Windows branch: CUDA device pinning is Windows-only.
@@ -997,6 +1008,7 @@ func argValue(args []string, flag string) (string, bool) {
 // key never lands on argv — it rides the LLAMA_API_KEY env at spawn time.
 func TestBuildServerCommandAndroidDirect(t *testing.T) {
 	withPlatformGOOS(t, "android")
+	pinCPUCoreCounts(t, 8, 0) // uniform: this fixture covers the other flags
 	// The direct-mode prompt-cache budget is bounded by the free memory the
 	// start guard leaves over the load, so pin a device with room for this
 	// fixture's 512 MiB.
@@ -1046,6 +1058,72 @@ func TestBuildServerCommandAndroidDirect(t *testing.T) {
 	}
 }
 
+// TestBuildServerCommandAndroidThreadCap covers the untuned-phone launch
+// default: on a big.LITTLE device a model whose config leaves threads unset
+// must not get llama.cpp's all-core worker pool (measured on a 4xA55+4xA78
+// phone: 0.35 t/s decode all-core vs 3.8 t/s capped to the 4-core performance
+// cluster), so the direct-mode branch emits the performance-cluster count and
+// records it in the server log. An explicit user value always wins, and
+// uniform or unreadable topologies keep the historical flag-free line.
+func TestBuildServerCommandAndroidThreadCap(t *testing.T) {
+	tests := []struct {
+		name        string
+		cores       int
+		perf        int
+		threads     int
+		want        string // expected --threads value, "" = flag absent
+		wantLogPart string // substring the server log must carry, "" = unchecked
+	}{
+		{"auto on big.LITTLE caps to the performance cluster", 8, 4, -1, "4", "threads -1 -> 4"},
+		{"explicit threads win over the cap", 8, 4, 2, "2", ""},
+		{"uniform topology emits no threads flag", 8, 0, -1, "", ""},
+		{"single-cluster topology emits no threads flag", 8, 8, -1, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withPlatformGOOS(t, "android")
+			pinCPUCoreCounts(t, tt.cores, tt.perf)
+			pinProbeFreeMemoryGB(t, 8)
+			cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 512}
+			d := &directModel{
+				info: ModelInfo{Name: "phone-model", Path: "/models/q.gguf"},
+				cfg:  ModelConfig{CtxSize: 4096, Threads: tt.threads},
+			}
+			_, args, err := buildServerCommand(cfg, "", d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, present := argValue(args, "--threads")
+			if tt.want == "" {
+				if present {
+					t.Errorf("--threads %q leaked on a topology with no known split: %v", got, args)
+				}
+				return
+			}
+			if !present || got != tt.want {
+				t.Errorf("--threads = %q (present %v), want %q: %v", got, present, tt.want, args)
+			}
+			// The cap is a launch decision, not a config rewrite: the stored
+			// per-model value the Settings page shows stays untouched.
+			if d.cfg.Threads != tt.threads {
+				t.Errorf("stored cfg.Threads = %d, want the untouched %d", d.cfg.Threads, tt.threads)
+			}
+			if tt.wantLogPart == "" {
+				return
+			}
+			var noted bool
+			for _, line := range serverLogsCopy() {
+				if strings.Contains(line, tt.wantLogPart) {
+					noted = true
+				}
+			}
+			if !noted {
+				t.Errorf("the thread cap was not reported in the server log (want %q)", tt.wantLogPart)
+			}
+		})
+	}
+}
+
 // TestBuildServerCommandAndroidCacheRAMBounded verifies the phone-side prompt
 // cache bound reaches the command line and is reported in the server log: with
 // the probe pinned so the planned load leaves 640 MiB free, the requested
@@ -1053,6 +1131,7 @@ func TestBuildServerCommandAndroidDirect(t *testing.T) {
 // budget the cache would grow into during the session.
 func TestBuildServerCommandAndroidCacheRAMBounded(t *testing.T) {
 	withPlatformGOOS(t, "android")
+	pinCPUCoreCounts(t, 8, 0)
 	pinProbeFreeMemoryGB(t, 6) // 6144 MiB free
 	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 8192}
 	d := &directModel{
@@ -1222,6 +1301,7 @@ func TestBuildServerCommandRouterCacheRAMZeroDisables(t *testing.T) {
 // --cache-ram 0 instead of being dropped.
 func TestBuildServerCommandAndroidCacheRAMZeroDisables(t *testing.T) {
 	withPlatformGOOS(t, "android")
+	pinCPUCoreCounts(t, 8, 0)
 	pinProbeFreeMemoryGB(t, 3) // below this load's 4096 + 128 + 1280 MiB
 	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 8192}
 	d := &directModel{

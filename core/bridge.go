@@ -404,7 +404,13 @@ func buildServerCommand(cfg ServerConfig, presetPath string, d *directModel) (st
 		// enabled on this build"). Serve the one resolved model directly
 		// instead: no --models-preset / --models-max, no lazy loading —
 		// switching models restarts the process (see directStartDecision).
-		modelArgs, err := modelDirectArgs(sanitizeAlias(d.info.Name), d.info, d.cfg)
+		mcfg := d.cfg
+		cores, perfCores := probeCPUCoreCounts()
+		if n := cpuThreadDefault(mcfg.Threads, cores, perfCores); n > 0 && n != mcfg.Threads {
+			addServerLog(fmt.Sprintf("[INFO] direct mode: threads %d -> %d, the performance cluster (the rest stays free for the system)", mcfg.Threads, n))
+			mcfg.Threads = n
+		}
+		modelArgs, err := modelDirectArgs(sanitizeAlias(d.info.Name), d.info, mcfg)
 		if err != nil {
 			return "", nil, err
 		}

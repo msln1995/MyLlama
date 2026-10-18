@@ -754,6 +754,38 @@ func TestModelDirectArgsAndroidSkipsGPUOnlyFlags(t *testing.T) {
 	}
 }
 
+// TestCPUThreadDefault covers the CPU-only worker-pool rule: a stored value
+// always wins, an unset one (-1 auto or the zero value) is capped to the
+// performance cluster only when the probe knows the CPU has a real split, and
+// 0 (keep llama.cpp's own sizing) is returned for uniform topologies, unknown
+// splits, and a lone prime core.
+func TestCPUThreadDefault(t *testing.T) {
+	tests := []struct {
+		name    string
+		threads int
+		cores   int
+		perf    int
+		want    int
+	}{
+		{"unset auto caps to the performance cluster", -1, 8, 4, 4},
+		{"zero-value config caps the same way", 0, 8, 4, 4},
+		{"a single performance core is not trusted", -1, 8, 1, 0},
+		{"user threads win over the cap", 2, 8, 4, 2},
+		{"user threads above the cluster stay as set", 8, 8, 4, 8},
+		{"uniform topology keeps llama.cpp sizing", -1, 8, 8, 0},
+		{"unknown split keeps llama.cpp sizing", -1, 8, 0, 0},
+		{"unknown core count keeps llama.cpp sizing", -1, 0, 4, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cpuThreadDefault(tt.threads, tt.cores, tt.perf); got != tt.want {
+				t.Errorf("cpuThreadDefault(%d, cores %d, perf %d) = %d, want %d",
+					tt.threads, tt.cores, tt.perf, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestGenerateModelsPresetFromCtxCheckpoints verifies the checkpoint pin is
 // written into the INI iff CtxCheckpointsOff is set: the zero value stays
 // silent so llama-server's own default (32 checkpoints) applies, and old
