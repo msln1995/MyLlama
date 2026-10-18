@@ -142,6 +142,23 @@ func TestModelLoadBytes(t *testing.T) {
 			want: fourGib + hybridKV4096 + overhd,
 		},
 		{
+			// The q8_0 pair the auto-tuner keeps is priced exactly as the tuner
+			// prices its context ladder (17/32 of f16), so the guard can never
+			// refuse the plan the tuner just selected.
+			name: "pinned q8_0 pair priced at the cache ratio",
+			m:    ModelInfo{Name: "m", Path: readable, SizeBytes: fourGib},
+			cfg:  ModelConfig{CtxSize: 4096, CacheTypeK: "q8_0", CacheTypeV: "q8_0"},
+			want: fourGib + hybridKV4096*17/32 + overhd,
+		},
+		{
+			// Half a pair is not a pair: the tuner resets it to f16, so the
+			// guard keeps charging the f16 upper bound.
+			name: "one-sided cache pin stays at f16",
+			m:    ModelInfo{Name: "m", Path: readable, SizeBytes: fourGib},
+			cfg:  ModelConfig{CtxSize: 4096, CacheTypeK: "q8_0"},
+			want: fourGib + hybridKV4096 + overhd,
+		},
+		{
 			name: "same-directory mmproj counts as weights",
 			m:    ModelInfo{Name: "m", Path: mmprojModel, SizeBytes: fourGib, HasMMProj: true},
 			cfg:  ModelConfig{},
@@ -163,6 +180,82 @@ func TestModelLoadBytes(t *testing.T) {
 				t.Errorf("modelLoadBytes = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestPromptCacheRAMMiB walks the prompt-cache bound: a budget the free memory
+// covers is left alone, an oversized one is cut to the share of the headroom, a
+// load with no headroom gets no cache, and neither an unknown probe nor an
+// already-off cache is touched.
+func TestPromptCacheRAMMiB(t *testing.T) {
+	const mib = int64(1 << 20)
+	tests := []struct {
+		name  string
+		req   int
+		need  int64
+		avail int64
+		want  int
+	}{
+		{"a budget the headroom covers stays as set", 512, 2048 * mib, 8192 * mib, 512},
+		{"an oversized budget is bounded to the headroom share", 8192, 5504 * mib, 6144 * mib, 320},
+		{"a load that uses all the memory gets no cache", 8192, 6144 * mib, 6144 * mib, 0},
+		{"an unknown probe invents no bound", 8192, 6144 * mib, 0, 8192},
+		{"an off cache stays off", 0, 1024 * mib, 8192 * mib, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := promptCacheRAMMiB(tt.req, tt.need, tt.avail); got != tt.want {
+				t.Errorf("promptCacheRAMMiB(%d, need %d, avail %d) = %d, want %d",
+					tt.req, tt.need, tt.avail, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTunedQ8PlanPassesTheMemoryGuard closes the loop between the two places
+// that price a load: a RAM-bounded plan that sized its context ladder at the
+// pinned q8_0 cache must survive the start-time guard, or the app would refuse
+// the configuration it just wrote (on a phone, that is a start that never
+// happens plus a message telling the user to do what they already did).
+//
+// Fixture: 4 GiB weights, 48 KiB of f16 KV per token, 1.25 GiB reserve at the
+// default ubatch, 10 GiB free of 12 GiB total (a phone-class memory picture).
+// The plan's budget is 8.5 GiB, so the q8_0 ladder reaches 131072 at
+// 4 + 3.1875 + 1.25 = 8.4375 GiB; that same window priced at f16 needs 11.25
+// GiB, which is more than the device has.
+func TestTunedQ8PlanPassesTheMemoryGuard(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMemfitGGUF(t, dir)
+	const fourGib = int64(4) * (1 << 30)
+	m := ModelInfo{Name: "phone-model", Path: path, SizeBytes: fourGib}
+
+	metrics, ok := readGGUFModelMetrics(path)
+	if !ok {
+		t.Fatal("fixture GGUF is not readable")
+	}
+	tm := buildTuneModel(metrics, ok, tuneWeightsBytes(m))
+	tm.PinnedQ8KV = true
+	hw := tuneHardware{
+		GPUVendor:       vendorNone,
+		RAMTotalGB:      12,
+		RAMFreeGB:       10,
+		PhysicalCores:   8,
+		AndroidPlatform: true,
+	}
+	cfg := tuneModelConfig(hw, tm)
+	if cfg.CtxSize != 131072 || cfg.CacheTypeK != "q8_0" || cfg.CacheTypeV != "q8_0" {
+		t.Fatalf("tuner plan = ctx %d cacheK=%q cacheV=%q, want 131072 with the q8_0 pair",
+			cfg.CtxSize, cfg.CacheTypeK, cfg.CacheTypeV)
+	}
+
+	pinProbeFreeMemoryGB(t, 10)
+	if err := modelLoadFitError(m, cfg); err != nil {
+		t.Errorf("modelLoadFitError(tuned q8_0 plan) = %v, want nil: the guard must not refuse the plan the tuner emitted", err)
+	}
+	// The same window without the cache pair really is unaffordable, so the
+	// accepted start above comes from the halved cache and not from slack.
+	if err := modelLoadFitError(m, ModelConfig{CtxSize: cfg.CtxSize}); err == nil {
+		t.Error("modelLoadFitError(f16-priced window) = nil, want a refusal: the fixture no longer straddles the boundary")
 	}
 }
 

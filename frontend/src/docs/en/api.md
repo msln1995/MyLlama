@@ -18,7 +18,7 @@ Click the gear icon at the top right to open the parameter panel:
 | --- | --- | --- |
 | Port | 8080 | Service listening port, range 1024–65535 |
 | Max Loaded Models | 1 | How many models stay loaded in VRAM/memory at once |
-| RAM Cache (MB) | 8192 | Prompt cache kept in system memory; 0 omits `--cache-ram` so the server applies its own default |
+| RAM Cache (MB) | 8192 | Prompt cache kept in system memory; 0 omits `--cache-ram` so the server applies its own default. In Android direct-load mode this value is only ever lowered: the cache grows turn by turn through a conversation (measured — each distinct prompt is retained at roughly its KV size per token, ~113 MiB for 1,035 tokens) while the pre-start memory check can only see the moment of launch, so the budget becomes half of what that load leaves free — a smaller cache beats a killed process |
 
 The panel is locked while the server is running (the fields read "… stop it to edit") so configuration cannot change underneath a live service.
 

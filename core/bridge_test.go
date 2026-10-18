@@ -997,6 +997,10 @@ func argValue(args []string, flag string) (string, bool) {
 // key never lands on argv — it rides the LLAMA_API_KEY env at spawn time.
 func TestBuildServerCommandAndroidDirect(t *testing.T) {
 	withPlatformGOOS(t, "android")
+	// The direct-mode prompt-cache budget is bounded by the free memory the
+	// start guard leaves over the load, so pin a device with room for this
+	// fixture's 512 MiB.
+	pinProbeFreeMemoryGB(t, 8)
 	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 512, APIKey: "test-key-fixture"}
 	d := &directModel{
 		info: ModelInfo{Name: "Qwen2.5 7B", Path: "/models/q.gguf"},
@@ -1039,6 +1043,44 @@ func TestBuildServerCommandAndroidDirect(t *testing.T) {
 		if !found {
 			t.Errorf("direct args missing %q: %v", want, args)
 		}
+	}
+}
+
+// TestBuildServerCommandAndroidCacheRAMBounded verifies the phone-side prompt
+// cache bound reaches the command line and is reported in the server log: with
+// the probe pinned so the planned load leaves 640 MiB free, the requested
+// 8192 MiB is emitted as half that headroom (320), never as the desktop-sized
+// budget the cache would grow into during the session.
+func TestBuildServerCommandAndroidCacheRAMBounded(t *testing.T) {
+	withPlatformGOOS(t, "android")
+	pinProbeFreeMemoryGB(t, 6) // 6144 MiB free
+	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 8192}
+	d := &directModel{
+		// Unreadable metadata, so the plan is the fallback geometry:
+		// 4096 MiB weights + 128 MiB KV at ctx 4096 + 1280 MiB overhead.
+		info: ModelInfo{Name: "phone-model", Path: "/models/q.gguf", SizeBytes: 4 << 30},
+		cfg:  ModelConfig{CtxSize: 4096},
+	}
+	_, args, err := buildServerCommand(cfg, "", d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := argValue(args, "--cache-ram"); !ok || v != "320" {
+		t.Errorf("--cache-ram = %q (present %v), want 320: %v", v, ok, args)
+	}
+	for _, a := range args {
+		if a == "8192" {
+			t.Errorf("the unbounded desktop budget leaked into the direct args: %v", args)
+		}
+	}
+	var noted bool
+	for _, line := range serverLogsCopy() {
+		if strings.Contains(line, "prompt cache budget 8192 -> 320") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Error("the bounded prompt cache was not reported to the server log")
 	}
 }
 
