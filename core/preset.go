@@ -252,7 +252,13 @@ func autoMMProjPath(m ModelInfo) string {
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if strings.HasPrefix(strings.ToLower(e.Name()), "mmproj") && strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
-			return filepath.Join(dir, e.Name())
+			p := filepath.Join(dir, e.Name())
+			// The same content test the scan applied when it set HasMMProj and
+			// measured mmprojBytes: a projector that is not a GGUF file would be
+			// refused by llama-server, so it is not the file to launch or charge.
+			if hasGGUFMagic(p) {
+				return p
+			}
 		}
 	}
 	return ""

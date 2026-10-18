@@ -87,7 +87,7 @@ type ggufHeaderData struct {
 // record, so callers may continue straight into the tensor table.
 func readGGUFHeader(f *os.File) (ggufHeaderData, error) {
 	var magic uint32
-	if err := binary.Read(f, binary.LittleEndian, &magic); err != nil || magic != 0x46554747 {
+	if err := binary.Read(f, binary.LittleEndian, &magic); err != nil || magic != ggufMagic {
 		return ggufHeaderData{}, fmt.Errorf("invalid GGUF magic")
 	}
 	var version uint32

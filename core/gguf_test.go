@@ -65,6 +65,20 @@ func buildGGUF(version uint32, kvs ...ggufKV) []byte {
 	return buf.Bytes()
 }
 
+// ggufFileBytes returns exactly size bytes whose first bytes are a real GGUF v3
+// header. The scan lists a *.gguf file only when it opens with the GGUF magic
+// (the same test llama.cpp applies), so fixtures that must look like a loadable
+// model while carrying an exact size build their body here.
+func ggufFileBytes(size int) []byte {
+	header := buildGGUF(3)
+	if size < len(header) {
+		size = len(header)
+	}
+	out := make([]byte, size)
+	copy(out, header)
+	return out
+}
+
 // writeTempGGUF writes GGUF bytes to the specified filename under dir, returning the full path.
 func writeTempGGUF(t *testing.T, dir, name string, data []byte) string {
 	t.Helper()

@@ -130,7 +130,7 @@ func TestModelLoadBytes(t *testing.T) {
 	mmprojDir := t.TempDir()
 	mmprojModel := writeTempGGUF(t, mmprojDir, "vision.gguf", make([]byte, 64))
 	const mmprojSize = int64(4096)
-	if err := os.WriteFile(filepath.Join(mmprojDir, "mmproj-vision.gguf"), make([]byte, mmprojSize), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(mmprojDir, "mmproj-vision.gguf"), ggufFileBytes(int(mmprojSize)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

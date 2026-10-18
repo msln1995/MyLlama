@@ -237,16 +237,19 @@ func scanModelsDir(dir string) []ModelInfo {
 					}
 					lower := strings.ToLower(name)
 					if strings.HasPrefix(lower, "mmproj") {
-						if !hasMMProj {
+						// Only a real GGUF projector counts: the flag and the
+						// charged size have to describe the file the preset can
+						// actually launch.
+						if !hasMMProj && hasGGUFMagic(filepath.Join(variantDir, name)) {
+							hasMMProj = true
 							if fi, err := f.Info(); err == nil {
 								mmprojBytes = fi.Size()
 							}
 						}
-						hasMMProj = true
 						continue
 					}
 					// Found main model file (non-mmproj .gguf)
-					if mainGGUF == "" {
+					if mainGGUF == "" && hasGGUFMagic(filepath.Join(variantDir, name)) {
 						mainGGUF = filepath.Join(variantDir, name)
 					}
 				}
@@ -276,7 +279,11 @@ func scanModelsDir(dir string) []ModelInfo {
 				continue
 			}
 
-			model := buildModelInfo(filepath.Join(authorDir, name), author,
+			loosePath := filepath.Join(authorDir, name)
+			if !hasGGUFMagic(loosePath) {
+				continue
+			}
+			model := buildModelInfo(loosePath, author,
 				strings.TrimSuffix(name, filepath.Ext(name)))
 			models = append(models, model)
 		}
@@ -462,6 +469,30 @@ func guessArchFromName(name string) string {
 
 // ─── GGUF header reader ──────────────────────────────────────────
 
+// ggufMagic is the GGUF file magic: the bytes "GGUF" read as a little-endian
+// uint32. llama.cpp tests exactly these four bytes before it will open a model
+// file, which is what makes the same test worth applying when the library is
+// built (see hasGGUFMagic).
+const ggufMagic = 0x46554747
+
+// hasGGUFMagic reports whether path starts with the GGUF magic. A file named
+// *.gguf that does not is not a model and can never be loaded: an LFS pointer
+// served in place of the object, an HTML error page, a placeholder left by an
+// interrupted copy. The scan, the projector pick and the preset use this one
+// test so a file that is listed is a file llama-server can open.
+func hasGGUFMagic(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var magic uint32
+	if err := binary.Read(f, binary.LittleEndian, &magic); err != nil {
+		return false
+	}
+	return magic == ggufMagic
+}
+
 // readGGUFMeta reads the GGUF header and extracts key metadata fields.
 // Returns nil if the file is not a valid GGUF file.
 func readGGUFMeta(path string) map[string]string {
@@ -476,7 +507,7 @@ func readGGUFMeta(path string) map[string]string {
 	if err := binary.Read(f, binary.LittleEndian, &magic); err != nil {
 		return nil
 	}
-	if magic != 0x46554747 { // "GGUF" in little-endian
+	if magic != ggufMagic {
 		return nil
 	}
 

@@ -112,10 +112,7 @@ func TestGenerateModelsPresetFromEmpty(t *testing.T) {
 // TestGenerateModelsPresetFromMMProj verifies a multimodal model outputs an mmproj line.
 func TestGenerateModelsPresetFromMMProj(t *testing.T) {
 	dir := t.TempDir()
-	mmprojPath := filepath.Join(dir, "mmproj-f16.gguf")
-	if err := os.WriteFile(mmprojPath, []byte("proj"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	mmprojPath := writeTempGGUF(t, dir, "mmproj-f16.gguf", ggufFileBytes(4096))
 	modelPath := filepath.Join(dir, "llava.gguf")
 	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
 		t.Fatal(err)
@@ -144,10 +141,10 @@ func TestGenerateModelsPresetFromMMProj(t *testing.T) {
 func TestTuneWeightsChargesTheProjectorThePresetLaunches(t *testing.T) {
 	dir := t.TempDir()
 	mainPath := writeTempGGUF(t, dir, "llava.gguf", []byte("model"))
-	f16 := writeTempGGUF(t, dir, "mmproj-f16.gguf", make([]byte, 4<<20))
-	writeTempGGUF(t, dir, "mmproj-q8_0.gguf", make([]byte, 1<<20))
+	f16 := writeTempGGUF(t, dir, "mmproj-f16.gguf", ggufFileBytes(4<<20))
+	writeTempGGUF(t, dir, "mmproj-q8_0.gguf", ggufFileBytes(1<<20))
 	elsewhere := t.TempDir()
-	override := writeTempGGUF(t, elsewhere, "mmproj-selected.gguf", make([]byte, 2<<20))
+	override := writeTempGGUF(t, elsewhere, "mmproj-selected.gguf", ggufFileBytes(2<<20))
 
 	vision := ModelInfo{Name: "llava", Path: mainPath, SizeBytes: int64(len("model")), HasMMProj: true}
 
@@ -544,10 +541,7 @@ func TestGenerateModelsPresetFromMMProjReasoningSpec(t *testing.T) {
 // directory contains mmproj-*.gguf → mmproj line is output).
 func TestGenerateModelsPresetFromMMProjAutoDetection(t *testing.T) {
 	dir := t.TempDir()
-	mmprojPath := filepath.Join(dir, "mmproj-f16.gguf")
-	if err := os.WriteFile(mmprojPath, []byte("proj"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	mmprojPath := writeTempGGUF(t, dir, "mmproj-f16.gguf", ggufFileBytes(4096))
 	modelPath := filepath.Join(dir, "llava.gguf")
 
 	models := []ModelInfo{{Name: "llava", Path: modelPath, HasMMProj: true}}
@@ -762,10 +756,7 @@ func TestModelDirectArgsGPULayersAll(t *testing.T) {
 // config emits --mmproj with the detected file path.
 func TestModelDirectArgsMMProjAutoDetect(t *testing.T) {
 	dir := t.TempDir()
-	mmprojPath := filepath.Join(dir, "mmproj-f16.gguf")
-	if err := os.WriteFile(mmprojPath, []byte("proj"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	mmprojPath := writeTempGGUF(t, dir, "mmproj-f16.gguf", ggufFileBytes(4096))
 	m := ModelInfo{Name: "llava", Path: filepath.Join(dir, "llava.gguf"), HasMMProj: true}
 	args, err := modelDirectArgs("llava", m, ModelConfig{})
 	if err != nil {

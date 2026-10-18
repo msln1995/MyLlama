@@ -7,7 +7,7 @@ The list merges two sources, distinguished by a label:
 - **Download Path**: models downloaded through the Download tab;
 - **External Path**: directories imported via "Choose Folder".
 
-Each model card shows the name, architecture (e.g. `qwen2`), quantization (e.g. `Q4_K_M`), size and full path. Multimodal-capable models carry a "Multimodal" badge (an mmproj file was found next to them). When the directory holds several projectors, the one that loads — and the one counted against memory — is the first by name; the rest cost nothing. A projector's size is included both in the settings page's memory estimate and in the pre-start memory check. Click "Refresh" to rescan after files change.
+Each model card shows the name, architecture (e.g. `qwen2`), quantization (e.g. `Q4_K_M`), size and full path. Only real GGUF models make the list: a file that carries a `.gguf` name but is not a GGUF file (a Git LFS pointer, the HTML error page a failed download left behind) is skipped — llama-server could never open it, and letting it in would take the whole service down with it. Multimodal-capable models carry a "Multimodal" badge (an mmproj file was found next to them). When the directory holds several projectors, the one that loads — and the one counted against memory — is the first by name; the rest cost nothing. A projector's size is included both in the settings page's memory estimate and in the pre-start memory check. Click "Refresh" to rescan after files change.
 
 ## Opening model settings
 

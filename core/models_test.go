@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -65,7 +66,10 @@ func makeVariant(t *testing.T, base, author, variant string, ggufName string, si
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ggufName), make([]byte, size), 0644); err != nil {
+	// A listed model has to open with the GGUF magic, so the fixture writes a
+	// real header padded to size: the scan accepts it and SizeBytes stays the
+	// figure the size-sensitive assertions expect.
+	if err := os.WriteFile(filepath.Join(dir, ggufName), ggufFileBytes(size), 0644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -106,18 +110,13 @@ func TestScanModelsDirMMProj(t *testing.T) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "llava-v1.6.gguf"), []byte("model"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "mmproj-f16.gguf"), []byte("proj"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	const projSize = 4096
+	writeTempGGUF(t, dir, "llava-v1.6.gguf", ggufFileBytes(len("model")))
+	writeTempGGUF(t, dir, "mmproj-f16.gguf", ggufFileBytes(projSize))
 	// A second, larger projector sits next to it on purpose: the published size
 	// has to be the file the preset actually loads (the first by name), not the
 	// sum, or the settings page and the start guard charge different loads.
-	if err := os.WriteFile(filepath.Join(dir, "mmproj-q8_0.gguf"), make([]byte, 4096), 0644); err != nil {
-		t.Fatal(err)
-	}
+	writeTempGGUF(t, dir, "mmproj-q8_0.gguf", ggufFileBytes(2*projSize))
 
 	models := scanModelsDir(base)
 	if len(models) != 1 {
@@ -126,11 +125,78 @@ func TestScanModelsDirMMProj(t *testing.T) {
 	if !models[0].HasMMProj {
 		t.Error("model with mmproj file should be marked HasMMProj")
 	}
-	if got := models[0].MMProjBytes; got != int64(len("proj")) {
-		t.Errorf("MMProjBytes = %d, want %d (the projector the preset emits)", got, len("proj"))
+	if got := models[0].MMProjBytes; got != projSize {
+		t.Errorf("MMProjBytes = %d, want %d (the projector the preset emits)", got, projSize)
 	}
-	if got := tuneWeightsBytes(models[0], ModelConfig{}); got != models[0].SizeBytes+int64(len("proj")) {
-		t.Errorf("guard weights = %d, want the scan's size plus MMProjBytes (%d)", got, models[0].SizeBytes+int64(len("proj")))
+	if got := tuneWeightsBytes(models[0], ModelConfig{}); got != models[0].SizeBytes+projSize {
+		t.Errorf("guard weights = %d, want the scan's size plus MMProjBytes (%d)", got, models[0].SizeBytes+projSize)
+	}
+}
+
+// TestScanModelsDirSkipsFilesThatAreNotGGUF verifies a *.gguf whose bytes are not
+// a GGUF model is not listed. llama.cpp tests the same four magic bytes before it
+// will open a file, so listing junk means the whole service start fails over a
+// single file that can never load — a mirror's LFS pointer saved under the model
+// name, an HTML error page, a placeholder left by an interrupted copy.
+func TestScanModelsDirSkipsFilesThatAreNotGGUF(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "author", "model")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	pointer := "version https://git-lfs.github.com/spec/v1\noid sha256:" +
+		strings.Repeat("0", 64) + "\nsize 396705472\n"
+	if err := os.WriteFile(filepath.Join(dir, "model.gguf"), []byte(pointer), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mmproj-f16.gguf"), []byte("<!DOCTYPE html><html>gone</html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if models := scanModelsDir(base); len(models) != 0 {
+		t.Fatalf("scanned %d models from a directory of non-GGUF bytes, want 0", len(models))
+	}
+
+	// Real content in the same tree lists both roles again, so the gate keys on
+	// what the file holds rather than on how many files the directory has.
+	writeTempGGUF(t, dir, "model.gguf", buildGGUF(3, strKV("general.architecture", "qwen2")))
+	writeTempGGUF(t, dir, "mmproj-f16.gguf", buildGGUF(3))
+	models := scanModelsDir(base)
+	if len(models) != 1 {
+		t.Fatalf("scanned %d models, want 1", len(models))
+	}
+	if !models[0].HasMMProj {
+		t.Error("a GGUF projector should still mark the model multimodal")
+	}
+
+	// And junk that sorts ahead of the real file does not become the main file.
+	writeTempGGUF(t, dir, "a-leftover.gguf", []byte("not a model at all"))
+	models = scanModelsDir(base)
+	if len(models) != 1 {
+		t.Fatalf("scanned %d models, want the junk sibling to leave one model", len(models))
+	}
+	if got := filepath.Base(models[0].Path); got != "model.gguf" {
+		t.Errorf("main file = %q, want the only file holding a GGUF header", got)
+	}
+}
+
+// TestScanModelsDirLooseFilesThatAreNotGGUF verifies the two-level layout applies
+// the same content rule: a loose *.gguf without a GGUF header is not a model.
+func TestScanModelsDirLooseFilesThatAreNotGGUF(t *testing.T) {
+	base := t.TempDir()
+	authorDir := filepath.Join(base, "author")
+	if err := os.MkdirAll(authorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authorDir, "tiny.gguf"), []byte("#saved with git lfs, fetch the real file"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if models := scanModelsDir(base); len(models) != 0 {
+		t.Fatalf("scanned %d loose models, want 0", len(models))
+	}
+	writeTempGGUF(t, authorDir, "real.gguf", buildGGUF(3))
+	models := scanModelsDir(base)
+	if len(models) != 1 || filepath.Base(models[0].Path) != "real.gguf" {
+		t.Fatalf("scanned %+v, want the one loose file with a GGUF header", models)
 	}
 }
 
@@ -391,7 +457,7 @@ func makeLooseGGUF(t *testing.T, base, author, ggufName string, size int) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ggufName), make([]byte, size), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ggufName), ggufFileBytes(size), 0644); err != nil {
 		t.Fatal(err)
 	}
 }
