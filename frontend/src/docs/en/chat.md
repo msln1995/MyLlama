@@ -7,7 +7,7 @@ The "Local Chat" page is a ready-to-use chat interface talking straight to your 
 3. If the service is not running yet, sending **starts it automatically** and loads the selected model on demand before streaming begins — no trip to the "API Router" page needed (that page still offers manual start/stop and monitoring);
 4. Replies stream in token by token; while generating, the send button turns into a red stop button you can hit to interrupt; when a reply finishes, its generation speed (tok/s) is shown under the message.
 
-Before the auto-start, a guided check runs: with no usable models you are pointed to the Models page to download or import one; if the llama.cpp runtime is missing you are pointed to the "Runtime Environment" tab of the System Environment page. Fill the gap and you are ready to chat.
+Before the auto-start, a guided check runs: with no usable models you are pointed to the Models page to download or import one; if the llama.cpp runtime is missing you are pointed to the "Runtime" tab of the System Environment page. Fill the gap and you are ready to chat.
 
 Sending a message first unloads every OTHER loaded model so the selected one is the only one in memory; load / unload changes show up in the task dock in real time, and models can be unloaded from there at any moment. The dock hugs the bottom-right corner by default and can be dragged to snap to either the left or right edge.
 
@@ -21,7 +21,7 @@ A vision model needs **two files**: the main weights `.gguf` and the `mmproj` vi
 
 The "Chat target" switcher at the top of the toolbar toggles between **This PC** and **Remote PC**; it only appears once a remote PC is configured (Settings → LAN Pairing → Connect to another PC). On the remote tier, chat requests go straight to a llama-server already running on another computer in the same network: the model list, unloading other models and streaming all act on that machine — no models or runtime are needed on this device.
 
-**PC side (serving) — three steps** (see the "Preferences" section):
+**PC side (serving) — three steps** (see the "Settings" section):
 
 1. Under "Settings → Server Access Scope", switch the service to **LAN (0.0.0.0)** (applies the next time the service starts);
 2. Set a key under "Settings → API Key" (strongly recommended: any device on the network can find the service port);

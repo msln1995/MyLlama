@@ -2,7 +2,7 @@ The Models page uses a segmented control at the top to switch between its "Downl
 
 ## Three download sources
 
-The app supports three model sources, switched via the "Model Download Source" row on the Preferences page; the setting applies to both search and download:
+The app supports three model sources, switched via the "Model Download Source" row on the Settings page; the setting applies to both search and download:
 
 | Source | Notes |
 | --- | --- |

@@ -274,8 +274,8 @@ HF 镜像 + ModelScope 双源搜索，批量下载走可断点续传的任务队
 </td>
 <td width="33%" align="center">
 
-<img src="docs/design/android-settings.png" width="100%" alt="Android 偏好设置"/><br/>
-<i>偏好设置</i>
+<img src="docs/design/android-settings.png" width="100%" alt="Android 设置"/><br/>
+<i>设置</i>
 
 </td>
 <td width="33%" align="center">
@@ -309,7 +309,7 @@ HF 镜像 + ModelScope 双源搜索，批量下载走可断点续传的任务队
 
 ### Android
 
-本 fork 的安卓安装包见上文「📥 安卓安装」一节：从**本仓库**的 Releases 下载 `MyLlama-v0.5.3-fork.1-android-arm64.apk`，包名 `com.msln1995.myllama` 与上游不同，因此和官方应用可以共存、直接装而无需先卸载。原版（`com.codeneow.llamadesktop`）请从 [CodeNeow/MyLlama Releases](https://github.com/CodeNeow/MyLlama/releases/latest) 获取。注意：本 fork 里不要使用「偏好设置 → 检查更新」，那个接口只会去拿上游另一个包名的 APK；升级请回到本仓库 Releases 手动安装（fork CI 的 debug 签名之间可以正常覆盖安装）。
+本 fork 的安卓安装包见上文「📥 安卓安装」一节：从**本仓库**的 Releases 下载 `MyLlama-v0.5.3-fork.1-android-arm64.apk`，包名 `com.msln1995.myllama` 与上游不同，因此和官方应用可以共存、直接装而无需先卸载。原版（`com.codeneow.llamadesktop`）请从 [CodeNeow/MyLlama Releases](https://github.com/CodeNeow/MyLlama/releases/latest) 获取。注意：本 fork 里不要使用「设置 → 检查更新」，那个接口只会去拿上游另一个包名的 APK；升级请回到本仓库 Releases 手动安装（fork CI 的 debug 签名之间可以正常覆盖安装）。
 
 ### Linux
 
@@ -355,7 +355,7 @@ Releases 提供 Ubuntu 22.04 / 24.04 的 `.deb` 包：下载 `myllama_*_amd64.de
 
 ```bash
 OPENAI_BASE_URL="http://127.0.0.1:8080/v1"
-OPENAI_API_KEY="sk-任意占位值"   # 本地服务默认不鉴权；可在偏好设置中配置 API Key
+OPENAI_API_KEY="sk-任意占位值"   # 本地服务默认不鉴权；可在设置页中配置 API Key
 ```
 
 `model` 字段直接填页面上显示的模型名（从 API 页的模型标签或模型页「我的模型」复制即可），llama-server 会按需加载 / 卸载模型，内存中的模型也可以在任务卡片中手动卸载。快速自测：

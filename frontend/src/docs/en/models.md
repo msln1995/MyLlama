@@ -11,7 +11,7 @@ Each model card shows the name, architecture (e.g. `qwen2`), quantization (e.g. 
 
 ## Opening model settings
 
-Click the gear icon on a model card to open that model's dedicated settings page. Parameters are organized into six tabs — Basic / Inference / Memory-Loading / Multi-GPU / Long Context / Advanced — each with its own usage hint.
+Click the gear icon on a model card to open that model's dedicated settings page. Parameters are organized into six tabs — Basic params / Inference / Memory & loading / Multi-GPU / Long Context / Advanced — each with its own usage hint.
 
 ## One-click auto-tune
 
@@ -19,9 +19,9 @@ The "Auto-tune" button sits at the top right of the settings page; you do not ne
 
 1. Click it once — the app reads the model GGUF's real metrics (layer count, attention head structure, KV cache geometry, trained context, MoE expert sizes) plus a hardware snapshot (GPU VRAM, RAM, CPU cores, measured memory bandwidth) and computes an optimal parameter set;
 2. The result **fills the form in real time** — every field (GPU layers, context size, cache type, CPU threads, ...) updates immediately so you can review and hand-tweak anything before saving;
-3. Click "Save Settings" when satisfied.
+3. Click "Save" when satisfied.
 
-Tuning plans VRAM against the **inference GPU** chosen in Preferences: on multi-GPU machines, whichever card you picked is the one whose VRAM is budgeted. Possible plans include full GPU offload (fastest), cpu-moe for MoE models (experts stay in RAM, the rest goes to the GPU), partial offload (fallback when VRAM runs out) and CPU-only (no GPU), with the largest context that fits the budget. On Apple Silicon (macOS arm64) the Metal plan keeps every layer GPU-resident via unified memory and sizes the context from the RAM budget (Flash Attention stays off for now); on Linux, AMD / Intel GPUs are GPU-accelerated through the Vulkan build too.
+Tuning plans VRAM against the **inference GPU** chosen in Settings: on multi-GPU machines, whichever card you picked is the one whose VRAM is budgeted. Possible plans include full GPU offload (fastest), cpu-moe for MoE models (experts stay in RAM, the rest goes to the GPU), partial offload (fallback when VRAM runs out) and CPU-only (no GPU), with the largest context that fits the budget. On Apple Silicon (macOS arm64) the Metal plan keeps every layer GPU-resident via unified memory and sizes the context from the RAM budget (Flash Attention stays off for now); on Linux, AMD / Intel GPUs are GPU-accelerated through the Vulkan build too.
 
 ## Quick parameter reference
 
@@ -41,4 +41,4 @@ Tuning plans VRAM against the **inference GPU** chosen in Preferences: on multi-
 
 ## Changing parameters while the service is running
 
-Presets are generated **when the service starts**. If the service is running, saving shows a note that "parameters take effect the next time the service starts" — restart the service on the "API Router" page to apply them.
+Presets are generated **when the service starts**. If the service is running, saving shows a note that "saved parameters take effect after the service is restarted" — restart the service on the "API Router" page to apply them.

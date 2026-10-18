@@ -17,10 +17,10 @@ Click the gear icon at the top right to open the parameter panel:
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | Port | 8080 | Service listening port, range 1024–65535 |
-| Max Concurrent Models | 1 | How many models stay loaded in VRAM/memory at once |
-| Prompt Cache (MiB) | 8192 | Prompt cache kept in system memory |
+| Max Loaded Models | 1 | How many models stay loaded in VRAM/memory at once |
+| RAM Cache (MB) | 8192 | Prompt cache kept in system memory; 0 omits `--cache-ram` so the server applies its own default |
 
-The panel is locked while the server is running ("stop it to modify") so configuration cannot change underneath a live service.
+The panel is locked while the server is running (the fields read "… stop it to edit") so configuration cannot change underneath a live service.
 
 ## Monitoring metrics
 
@@ -46,7 +46,7 @@ In third-party clients (chat frontends, IDE plugins, ...) set the API base URL t
 
 ## LAN access and the API key
 
-Both live on the "Preferences" page and take effect the next time the service starts:
+Both live on the "Settings" page and take effect the next time the service starts:
 
 - **Server Access Scope**: `Local (127.0.0.1)` restricts access to this machine; `LAN (0.0.0.0)` lets other devices on the same network connect — use this machine's LAN IP as the service address then;
 - **API Key**: when set, every inference request must carry this Bearer token:

@@ -274,8 +274,8 @@ Dual prompt-processing / generation tok/s metrics with a 60-second speed chart, 
 </td>
 <td width="33%" align="center">
 
-<img src="docs/design/android-settings.png" width="100%" alt="Android preferences"/><br/>
-<i>Preferences</i>
+<img src="docs/design/android-settings.png" width="100%" alt="Android settings"/><br/>
+<i>Settings</i>
 
 </td>
 <td width="33%" align="center">
@@ -309,7 +309,7 @@ Requirements: Windows 10 or later (x64).
 
 ### Android
 
-For this fork, see the "📥 Installing on Android" section above: download `MyLlama-v0.5.3-fork.1-android-arm64.apk` from **this repository's** releases. The package id `com.msln1995.myllama` differs from upstream's `com.codeneow.llamadesktop`, so it coexists with the official app and installs without uninstalling anything. The original build (`com.codeneow.llamadesktop`) still comes from [CodeNeow/MyLlama Releases](https://github.com/CodeNeow/MyLlama/releases/latest). Note: do not use "Preferences → Check for Updates" in this fork — that API only ever fetches an APK built for the other package id; come back to this repository's releases and install manually (fork CI debug-signed builds do overwrite-install each other).
+For this fork, see the "📥 Installing on Android" section above: download `MyLlama-v0.5.3-fork.1-android-arm64.apk` from **this repository's** releases. The package id `com.msln1995.myllama` differs from upstream's `com.codeneow.llamadesktop`, so it coexists with the official app and installs without uninstalling anything. The original build (`com.codeneow.llamadesktop`) still comes from [CodeNeow/MyLlama Releases](https://github.com/CodeNeow/MyLlama/releases/latest). Note: do not use "Settings → Check for Updates" in this fork — that API only ever fetches an APK built for the other package id; come back to this repository's releases and install manually (fork CI debug-signed builds do overwrite-install each other).
 
 ### Linux
 
@@ -355,7 +355,7 @@ Once the service is running, any OpenAI-compatible client can connect:
 
 ```bash
 OPENAI_BASE_URL="http://127.0.0.1:8080/v1"
-OPENAI_API_KEY="sk-any-placeholder"   # no auth by default; an optional API key can be set in Preferences
+OPENAI_API_KEY="sk-any-placeholder"   # no auth by default; an optional API key can be set on the Settings page
 ```
 
 Set `model` to the name shown in the UI (copy it from the model tags on the API page or the "My Models" tab) — llama-server loads and unloads models on demand, and in-memory models can also be unloaded from the task dock. Quick smoke test:

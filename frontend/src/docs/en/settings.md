@@ -1,4 +1,4 @@
-The "Preferences" page centralizes the app's global configuration. Top to bottom it contains: a gradient "Help & Tutorial" entry card, a "Device" info card, and three rounded setting groups (Appearance & Preferences, Directories & Services, About). Most changes save instantly and take effect immediately.
+The "Settings" page centralizes the app's global configuration. Top to bottom it contains: a gradient "Help & Tutorial" entry card, a "Device" info card, and three rounded setting groups (Appearance & Preferences, Directories & Services, About). Most changes save instantly and take effect immediately.
 
 ## Help & Tutorial
 

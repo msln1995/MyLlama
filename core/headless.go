@@ -200,7 +200,9 @@ func RunHeadless(icon []byte) {
 
 	if switchRestartPending.Load() {
 		// Switching to the relaunched process: it adopts the service via the
-		// handover file; downloads resume from the persisted queue.
+		// handover file; the download queue is restored from the persisted
+		// config there, with an in-flight task coming back paused rather than
+		// auto-resuming (loadConfig normalizes downloading → paused).
 		log.Println("[INFO] headless exiting for mode switch; llama-server keeps running")
 		return
 	}

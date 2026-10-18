@@ -2,7 +2,7 @@
 
 ## Turning it on and off
 
-- **Enable**: flip the "API Route Mode" switch on the Preferences page. The app relaunches itself into headless mode and the window closes;
+- **Enable**: flip the "API Route Mode" switch on the Settings page. The app relaunches itself into headless mode and the window closes;
 - **Return to the GUI**: right-click the tray icon → "Show Main Window"; the app relaunches once more, this time back into the full interface.
 
 Prerequisites:
@@ -24,12 +24,12 @@ After adoption, the new process keeps tailing the service log, and monitor metri
 ## Behavior in headless mode
 
 - The tray icon stays resident; its menu offers "Show Main Window" and quit;
-- llama-server keeps serving in the background, and download tasks resume from the persisted queue;
+- llama-server keeps serving in the background; the download task queue is restored along with the config, but **nothing auto-resumes** — a task that was downloading comes back as "Paused" and waits for you to hit Resume;
 - There is no window to show errors in — if llama-server fails to start while headless, a **native system message box** appears while the app itself keeps running, preserving the tray as the way back;
 - Returning to the GUI from the tray adopts the service seamlessly again, exactly as before.
 
 ## When headless mode fits
 
 - The machine mostly acts as an inference server and the window is rarely looked at;
-- You want an always-on background service for other devices on the LAN (remember to switch the access scope to LAN and set an API key in Preferences);
+- You want an always-on background service for other devices on the LAN (remember to switch the access scope to LAN and set an API key in Settings);
 - You do not want the app occupying the taskbar.
