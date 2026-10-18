@@ -368,11 +368,23 @@ func spawnServerProcess(llamaServer string, args []string, cfg ServerConfig, res
 // llama-server's own default is "0 = the context the model was trained with" —
 // hundreds of thousands of tokens of KV on a phone, which the low-memory killer
 // then fights over. The remaining defaults match llama-server's own figures.
+//
+// A stored entry is kept as-is for every other field, but a stored entry whose
+// context is zero gets the same treatment as no entry at all: that shape is real
+// (a config file written before the context field existed, or hand-edited), and
+// passing it through leaves the two halves of the start describing different
+// loads - the guard prices no KV for it while the server runs the trained window,
+// so the memory check approves a load the device cannot pay for. Router mode
+// applies the same rule for the same reason (see routerModelPlan).
 func directModelConfig(cfgs map[string]ModelConfig, name string) ModelConfig {
-	if c, ok := cfgs[name]; ok {
-		return c
+	c, ok := cfgs[name]
+	if !ok {
+		c = defaultModelConfig()
 	}
-	return defaultModelConfig()
+	if c.CtxSize <= 0 {
+		c.CtxSize = defaultModelConfig().CtxSize
+	}
+	return c
 }
 
 // directModel carries the resolved Android direct-mode launch target to

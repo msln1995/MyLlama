@@ -360,13 +360,60 @@ func TestModelLoadFitError(t *testing.T) {
 // --ctx-size unset and hand llama-server the model's trained context).
 func TestDirectModelConfigFallsBackToAppDefaults(t *testing.T) {
 	stored := ModelConfig{CtxSize: 32768, Threads: 4}
-	cfgs := map[string]ModelConfig{"tuned": stored}
+	cfgs := map[string]ModelConfig{
+		"tuned":  stored,
+		"legacy": {Threads: 4, BatchSize: 2048},
+	}
 
 	if got := directModelConfig(cfgs, "tuned"); got != stored {
 		t.Errorf("stored config = %+v, want %+v", got, stored)
 	}
 	if got := directModelConfig(cfgs, "untouched"); got.CtxSize != defaultModelConfig().CtxSize {
 		t.Errorf("untouched model CtxSize = %d, want the app default %d", got.CtxSize, defaultModelConfig().CtxSize)
+	}
+	// A stored entry that carries no context is legacy or hand-edited data, not
+	// an instruction to leave --ctx-size unset: every other field of it still
+	// wins, only the context is filled.
+	want := ModelConfig{CtxSize: 4096, Threads: 4, BatchSize: 2048}
+	if got := directModelConfig(cfgs, "legacy"); got != want {
+		t.Errorf("contextless stored entry = %+v, want %+v", got, want)
+	}
+}
+
+// TestContextlessStoredConfigIsGuardHonest is the pairing the phone needs: the
+// config the start guard prices and the args the server actually gets must
+// describe the same load. Priced with no context this fixture is 2,304 MiB
+// (1,024 weights + 1,280 overhead) and gets accepted with 2,312 MiB free, while
+// the server it spawns runs the trained 32,768-token window - 2,368 MiB of KV and
+// weights - i.e. the load that gets killed is the one the check approved. Once
+// the resolver fills the default context, the same device prices the real
+// 2,312 MiB and refuses at one MiB less.
+func TestContextlessStoredConfigIsGuardHonest(t *testing.T) {
+	dir := t.TempDir()
+	path := geomGGUF(t, dir, "geom.gguf")
+	m := ModelInfo{Name: "legacy-model", Path: path, SizeBytes: 1 << 30}
+	cfgs := map[string]ModelConfig{"legacy-model": {Threads: 4}}
+
+	pinProbeFreeMemoryGB(t, gibFromMiB(2312)) // 1024 weights + 1280 overhead + 8 KV (4096 x 2 KiB)
+	resolved := directModelConfig(cfgs, m.Name)
+	if err := modelLoadFitError(m, resolved); err != nil {
+		t.Errorf("the price the resolver describes = %v, want it accepted at exactly the affordable figure", err)
+	}
+	// One MiB short and the same load is refused, because the resolver's context
+	// is what the guard charges for (a config passed through unresolved prices
+	// no KV at all and would be accepted here).
+	pinProbeFreeMemoryGB(t, gibFromMiB(2311))
+	if err := modelLoadFitError(m, resolved); err == nil {
+		t.Error("the guard must price the context the resolver fills, not zero KV")
+	}
+	// And the args say the same thing out loud instead of leaving the window to
+	// the server.
+	args, err := modelDirectArgs("legacy-model", m, resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := argValue(args, "--ctx-size"); !ok || v != "4096" {
+		t.Errorf("--ctx-size = %q (present %v), want the filled default: %v", v, ok, args)
 	}
 }
 
