@@ -70,11 +70,13 @@ const promptCacheShare = 0.5
 // launch (nothing) — it has to assume the heaviest entry in the library gets
 // loaded at some point in the session. 0 for an empty or unreadable library.
 //
-// The whole load is charged against host RAM, including the KV cache a desktop
-// plan would keep on the GPU. That over-charges a GPU-offloaded plan on purpose:
-// the bound only ever shrinks a budget, and guessing which layers a given preset
-// will actually offload would need the runtime's own allocation, not this
-// estimate.
+// The whole load is charged against host RAM, KV cache included. That is not a
+// conservative guess on the platforms this tuner plans for: on Apple unified
+// memory the offloaded KV is host memory, measured as a flat 112.0 KiB per token
+// (RSS 1,371 -> 4,060 MiB between ctx 8192 and ctx 32768 with -ngl 99 and the
+// cache disabled, for a model whose f16 KV geometry is 112 KiB/token). Only a
+// discrete-VRAM machine (CUDA) over-charges here, and over-charging is the safe
+// direction because the bound only ever shrinks a budget.
 func heaviestRouterLoad() int64 {
 	models := scanModels()
 	modelConfigsMu.Lock()
