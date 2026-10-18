@@ -1285,6 +1285,7 @@ func TestBuildServerCommandRouterCacheRAMZeroDisables(t *testing.T) {
 	cachedModelConfigs["router-model"] = ModelConfig{CtxSize: 131072, UBatchSize: 512}
 	modelConfigsMu.Unlock()
 	pinProbeFreeMemoryGB(t, 2) // below this plan's 1024 + 256 KV + 1280 overhead
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorNone})
 
 	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 8192}
 	_, args, err := buildServerCommand(cfg, "/tmp/preset.ini", nil)
@@ -1293,6 +1294,56 @@ func TestBuildServerCommandRouterCacheRAMZeroDisables(t *testing.T) {
 	}
 	if v, ok := argValue(args, "--cache-ram"); !ok || v != "0" {
 		t.Errorf("--cache-ram = %q (present %v), want the explicit 0: %v", v, ok, args)
+	}
+}
+
+// TestBuildServerCommandRouterWarnsOnOvercommit is the desktop counterpart of
+// direct mode's memory refusal: a router-mode server cannot refuse to start (the
+// library is lazy and multi-model), so the one entry the machine cannot pay for
+// is reported in the service log instead. Measured motivation: an unaffordable
+// explicit context on a 24 GiB M2 was accepted silently - RSS 15.85 GiB, swap
+// past 7 GiB, no error anywhere, the request just waited.
+//
+// The warning is gated to machines where the host-RAM estimate is honest (see
+// loadsStayInHostRAM); the same library on a discrete-GPU host stays quiet, and
+// either way the command still builds.
+func TestBuildServerCommandRouterWarnsOnOvercommit(t *testing.T) {
+	dir := pinDirectModelDir(t)
+	routerModelDir(t, dir, "warn-author", "warn-heavy-model")
+	modelConfigsMu.Lock()
+	cachedModelConfigs["warn-heavy-model"] = ModelConfig{CtxSize: 131072, UBatchSize: 512}
+	modelConfigsMu.Unlock()
+	pinProbeFreeMemoryGB(t, 2) // below this entry's 1024 + 256 KV + 1280 overhead
+
+	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 8192}
+
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorNone})
+	if _, _, err := buildServerCommand(cfg, "/tmp/preset.ini", nil); err != nil {
+		t.Fatal(err)
+	}
+	var warned []string
+	for _, line := range serverLogsCopy() {
+		if strings.HasPrefix(line, "[WARN]") && strings.Contains(line, "warn-heavy-model") {
+			warned = append(warned, line)
+		}
+	}
+	if len(warned) != 1 {
+		t.Fatalf("over-commit warnings = %q, want exactly one naming the entry", warned)
+	}
+
+	// The same over-committed library on a host with a real GPU to offload into
+	// is not a warning: the estimate there over-charges by design.
+	serverLogsMu.Lock()
+	serverLogs = serverLogs[:0]
+	serverLogsMu.Unlock()
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorNvidia, VRAMMB: 8192})
+	if _, _, err := buildServerCommand(cfg, "/tmp/preset.ini", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range serverLogsCopy() {
+		if strings.Contains(line, "warn-heavy-model") {
+			t.Errorf("a discrete-GPU host was warned from an over-charged estimate: %q", line)
+		}
 	}
 }
 

@@ -25,7 +25,7 @@ The panel is locked while the server is running (the fields read "… stop it to
 ## Monitoring metrics
 
 - **Generation speed**: the status card embeds a gradient area chart of the decode speed (how fast the model writes) over the last 60 seconds, refreshed every second; thinking and answering both count as decode. While running, the prompt processing speed (prefill — how fast your input is ingested) is shown alongside;
-- **Server Log**: the log panel at the bottom shows llama-server's raw output live — the first place to look when troubleshooting.
+- **Server Log**: the log panel at the bottom shows llama-server's raw output live — the first place to look when troubleshooting. The app writes two of its own lines in here: `[INFO] prompt cache budget …` reports how far the machine's free memory shrank the RAM cache budget, and `[WARN] model X needs about …` means the heaviest load in your model library costs more than the memory free right now. Desktop lazy-loads models and shares one service between them, so an unaffordable entry never blocks the start — it gets this line instead: the service comes up, but loading that model spills into swap and requests can stall. Lower its context size in Model Settings, or run one-click tuning.
 
 ## Calling the service from code
 

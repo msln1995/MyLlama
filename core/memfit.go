@@ -40,8 +40,9 @@ func availableMemoryBytes() int64 {
 // --cache-type-k/v through, so the halved cache is real here. Every other cache
 // type stays charged at f16, the upper bound, since a quantized cache only makes
 // the load smaller and only q8_0 has a measured footprint ratio on this tuner's
-// hardware. cfg.CtxSize <= 0 charges no KV, matching the preset writer, which
-// omits --ctx-size there.
+// hardware. cfg.CtxSize <= 0 charges no KV; the router-mode callers price the
+// same models through routerModelPlan, which bounds an untuned context first, so
+// nothing that reaches this function is actually unbounded.
 func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 	mm, ok := readGGUFModelMetrics(m.Path)
 	tm := buildTuneModel(mm, ok, tuneWeightsBytes(m))
@@ -64,20 +65,10 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 // a phone the low-memory killer is the fallback.
 const promptCacheShare = 0.5
 
-// heaviestRouterLoad estimates the largest load a router-mode server may bring
-// up during its lifetime. Models load lazily on their first request, so the
-// start-time prompt-cache budget cannot be priced against what is resident at
-// launch (nothing) — it has to assume the heaviest entry in the library gets
-// loaded at some point in the session. 0 for an empty or unreadable library.
-//
-// The whole load is charged against host RAM, KV cache included. That is not a
-// conservative guess on the platforms this tuner plans for: on Apple unified
-// memory the offloaded KV is host memory, measured as a flat 112.0 KiB per token
-// (RSS 1,371 -> 4,060 MiB between ctx 8192 and ctx 32768 with -ngl 99 and the
-// cache disabled, for a model whose f16 KV geometry is 112 KiB/token). Only a
-// discrete-VRAM machine (CUDA) over-charges here, and over-charging is the safe
-// direction because the bound only ever shrinks a budget.
-func heaviestRouterLoad() int64 {
+// routerLibrary snapshots the two inputs every launch-time memory decision needs
+// - the scanned model list and the stored per-model configs - so the prompt-cache
+// bound and the over-commit warning price the same library.
+func routerLibrary() ([]ModelInfo, map[string]ModelConfig) {
 	models := scanModels()
 	modelConfigsMu.Lock()
 	cfgs := make(map[string]ModelConfig, len(cachedModelConfigs))
@@ -85,21 +76,93 @@ func heaviestRouterLoad() int64 {
 		cfgs[k] = v
 	}
 	modelConfigsMu.Unlock()
-	return maxModelLoadBytes(models, cfgs)
+	return models, cfgs
 }
 
-// maxModelLoadBytes is heaviestRouterLoad's pure core: the largest modelLoadBytes
-// over the given models and per-model configs. Pure so tests drive the
-// library-shape cases (which config wins, the untuned fallback, an empty list)
-// without a device or a model directory.
-func maxModelLoadBytes(models []ModelInfo, cfgs map[string]ModelConfig) int64 {
+// heaviestPlannedLoad is the largest load a router-mode server may bring up
+// during its lifetime, together with the model it belongs to. Models load lazily
+// on their first request, so the start-time prompt-cache budget cannot be priced
+// against what is resident at launch (nothing) - it has to assume the heaviest
+// entry in the library gets loaded at some point in the session.
+//
+// The whole load is charged against host RAM, KV cache included. That is not a
+// conservative guess on the platforms this tuner plans for: on Apple unified
+// memory the offloaded KV is host memory, measured as a flat 112.0 KiB per token
+// (RSS 1,371 -> 4,060 MiB between ctx 8192 and ctx 32768 with -ngl 99 and the
+// cache disabled, for a model whose f16 KV geometry is 112 KiB/token). Only a
+// discrete-VRAM machine (CUDA) over-charges here, and over-charging is the safe
+// direction for a bound that only ever shrinks a budget - it is not safe for a
+// warning, which is why overcommitWarning asks first.
+//
+// ("", 0) for an empty or unreadable library.
+func heaviestPlannedLoad(models []ModelInfo, cfgs map[string]ModelConfig) (string, int64) {
+	var name string
 	var heaviest int64
 	for _, m := range models {
 		if n := modelLoadBytes(m, routerModelPlan(cfgs, m)); n > heaviest {
-			heaviest = n
+			heaviest, name = n, m.Name
 		}
 	}
-	return heaviest
+	return name, heaviest
+}
+
+// maxModelLoadBytes is heaviestPlannedLoad's byte figure alone.
+func maxModelLoadBytes(models []ModelInfo, cfgs map[string]ModelConfig) int64 {
+	_, n := heaviestPlannedLoad(models, cfgs)
+	return n
+}
+
+// probeServingGPU is the serving-GPU seam for the router-mode over-commit
+// warning (servingGPUPlan in production) so tests can drive the host-RAM gate
+// without a GPU.
+var probeServingGPU = servingGPUPlan
+
+// servingGPUPlan resolves the GPU llama-server will serve on: the same plan
+// target the auto-tuner sizes its contexts against, read from the cached probe
+// snapshot (one detection chain per process, no extra nvidia-smi at start).
+func servingGPUPlan() tuneTarget {
+	serverConfigMu.Lock()
+	deviceID := cachedServerConfig.DeviceID
+	serverConfigMu.Unlock()
+	return tunePlanTarget(gpuListSource(), systemInfo().CUDA.Available, deviceID)
+}
+
+// loadsStayInHostRAM reports whether modelLoadBytes' figure, which charges the
+// whole load (weights and KV alike) against host RAM, describes what the machine
+// really runs out of memory for. It does on Apple Silicon, where -ngl 99 puts
+// the cache in main memory (measured: RSS grows by exactly the f16 KV geometry,
+// 112.0 KiB per token), and on a CPU-only host. It does not on a machine with a
+// discrete GPU big enough to offload into, where the same figure over-charges -
+// acceptable for a bound that only ever shrinks a budget, not for a warning that
+// would be wrong. A GPU under tuneGPUActiveMinVRAMMB counts as host-bound for the
+// tuner's own reason: it cannot hold the load, so the load stays in RAM anyway.
+func loadsStayInHostRAM(serving tuneTarget) bool {
+	return serving.Vendor == vendorApple ||
+		serving.Vendor == vendorNone ||
+		serving.VRAMMB < tuneGPUActiveMinVRAMMB
+}
+
+// overcommitWarning is the router-mode counterpart of direct mode's
+// modelLoadFitError, for the platform that cannot refuse: router mode is lazy
+// and multi-model, so a library whose heaviest entry is unaffordable still has
+// every other model to serve and the start must not fail.
+//
+// It is not a hypothetical. Measured on a 24 GiB M2 with one model pinned at an
+// explicit ctx-size the machine cannot pay for: the load was accepted without an
+// error, RSS reached 15.85 GiB, swap passed 7 GiB, and the request simply waited
+// with no diagnostic anywhere - the whole machine ground while llama-server
+// printed nothing. Saying which model and both figures is the only way that
+// state is discoverable from the app.
+//
+// "" when the library is empty or unreadable, the probe failed (availBytes <= 0
+// proves nothing), or the heaviest load fits.
+func overcommitWarning(name string, needBytes, availBytes int64) string {
+	if name == "" || availBytes <= 0 || needBytes <= availBytes {
+		return ""
+	}
+	return fmt.Sprintf(tr("模型 %s 这次要占约 %s（权重 + 上下文缓存 + 运行开销），而本机当前只有 %s 空闲内存。服务仍会启动、其他模型照常可用，但真正加载它时内存放不下会开始交换：请求可能长时间没有响应、整台机器变卡。请在模型设置里调小它的上下文大小，或用一键调优重新规划。",
+		"model %s needs about %s for this load (weights + context cache + runtime overhead) but only %s of memory is free right now. The service still starts and every other model stays usable, but loading it will overflow into swap: requests may hang for a long time and the whole machine slows down. Lower that model's context size in its settings, or run one-click tuning to re-plan it."),
+		name, formatBytes(needBytes), formatBytes(availBytes))
 }
 
 // routerModelPlan resolves the config a router-mode load runs m with: the stored
@@ -142,7 +205,7 @@ func routerModelPlan(cfgs map[string]ModelConfig, m ModelInfo) ModelConfig {
 //
 // That over-allocation is the smaller half of the harm. The library's
 // prompt-cache budget is sized against the heaviest planned load
-// (heaviestRouterLoad), and until this bound existed that load was priced at the
+// (heaviestPlannedLoad), and until this bound existed that load was priced at the
 // model's trained context, so one unconfigured model was by itself enough to push
 // the headroom negative and turn prompt caching off for every model in the app,
 // in every session: on this M2 (7,925 MiB available at the time of the runs

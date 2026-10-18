@@ -456,13 +456,20 @@ func buildServerCommand(cfg ServerConfig, presetPath string, d *directModel) (st
 		"--cont-batching",
 		"--no-webui",
 	}
+	// One pricing pass over the library feeds both launch-time memory
+	// decisions: the over-commit warning and the prompt-cache budget.
+	heaviestName, heaviestNeed := heaviestPlannedLoad(routerLibrary())
+	freeMem := availableMemoryBytes()
+	if heaviestName != "" && freeMem > 0 && heaviestNeed > freeMem && loadsStayInHostRAM(probeServingGPU()) {
+		addServerLog("[WARN] " + overcommitWarning(heaviestName, heaviestNeed, freeMem))
+	}
 	if cfg.CacheRAM > 0 {
 		// Router mode loads models lazily, so the memory the prompt cache may
 		// grow into during the session is bounded against the heaviest entry in
 		// the library rather than against whatever is resident at launch (see
-		// heaviestRouterLoad and promptCacheRAMMiB). As in direct mode the
+		// heaviestPlannedLoad and promptCacheRAMMiB). As in direct mode the
 		// bounded figure always reaches argv, 0 included.
-		cacheRAM := promptCacheRAMMiB(cfg.CacheRAM, heaviestRouterLoad(), availableMemoryBytes())
+		cacheRAM := promptCacheRAMMiB(cfg.CacheRAM, heaviestNeed, freeMem)
 		if cacheRAM != cfg.CacheRAM {
 			addServerLog(fmt.Sprintf("[INFO] prompt cache budget %d -> %d MiB, the memory the heaviest configured model leaves free", cfg.CacheRAM, cacheRAM))
 		}

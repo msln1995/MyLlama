@@ -14,6 +14,15 @@ func pinProbeFreeMemoryGB(t *testing.T, gb float64) {
 	t.Cleanup(func() { probeFreeMemoryGB = orig })
 }
 
+// pinProbeServingGPU pins the serving-GPU seam so the over-commit warning's
+// host-RAM gate is driven without a GPU probe.
+func pinProbeServingGPU(t *testing.T, target tuneTarget) {
+	t.Helper()
+	orig := probeServingGPU
+	probeServingGPU = func() tuneTarget { return target }
+	t.Cleanup(func() { probeServingGPU = orig })
+}
+
 // TestAvailableMemoryBytes verifies the probe seam plumbing: the GiB value is
 // converted to bytes, and a probe reporting nothing (0) or a negative value
 // yields 0 so callers treat it as "unknown".
@@ -497,11 +506,19 @@ func TestMaxModelLoadBytes(t *testing.T) {
 		t.Errorf("untuned model = %d MiB, want %d (trained ctx 32768)", got/(1<<20), (weights+mib(64)+overhead)/(1<<20))
 	}
 	// Heaviest of the three shapes wins, and a stored config can be heavier than
-	// the trained-context fallback.
+	// the trained-context fallback. The same call names the model it belongs to,
+	// which is what the over-commit warning has to quote.
 	big := ModelInfo{Name: "big", Path: path, SizeBytes: weights}
 	cfgs["big"] = ModelConfig{CtxSize: 131072, UBatchSize: 512}
-	if got := maxModelLoadBytes([]ModelInfo{tuned, untuned, big}, cfgs); got != weights+mib(256)+overhead {
+	name, got := heaviestPlannedLoad([]ModelInfo{tuned, untuned, big}, cfgs)
+	if got != weights+mib(256)+overhead {
 		t.Errorf("heaviest = %d MiB, want %d (stored ctx 131072)", got/(1<<20), (weights+mib(256)+overhead)/(1<<20))
+	}
+	if name != "big" {
+		t.Errorf("heaviest model = %q, want the stored 131072-token entry", name)
+	}
+	if name, got := heaviestPlannedLoad(nil, nil); got != 0 || name != "" {
+		t.Errorf("empty library = %q/%d, want no name and 0", name, got)
 	}
 }
 
@@ -581,5 +598,71 @@ func TestUnconfiguredModelKeepsLibraryPromptCache(t *testing.T) {
 	// The figure this replaces: the same machine, priced at the trained context.
 	if got := promptCacheRAMMiB(8192, mib(2368), availableMemoryBytes()); got != 0 {
 		t.Errorf("trained-context price = %d MiB budget, want 0 (the collapse the bound removes)", got)
+	}
+}
+
+// TestLoadsStayInHostRAM pins where modelLoadBytes' host-RAM figure is honest
+// enough to warn from. It is on unified memory and on a CPU-only host; a
+// discrete GPU that can actually hold the load takes weights and KV out of host
+// memory, so the same figure over-charges there and a warning would be wrong.
+func TestLoadsStayInHostRAM(t *testing.T) {
+	tests := []struct {
+		name string
+		gpu  tuneTarget
+		stay bool
+	}{
+		{"no GPU", tuneTarget{Vendor: vendorNone}, true},
+		{"Apple Silicon with the unified pool listed", tuneTarget{Vendor: vendorApple, VRAMMB: 16384}, true},
+		{"Apple Silicon reported without VRAM", tuneTarget{Vendor: vendorApple}, true},
+		{"CUDA card too small to offload into", tuneTarget{Vendor: vendorNvidia, VRAMMB: tuneGPUActiveMinVRAMMB - 1}, true},
+		{"CUDA card that holds the load", tuneTarget{Vendor: vendorNvidia, VRAMMB: 8192}, false},
+		{"ROCm card that holds the load", tuneTarget{Vendor: vendorAMD, VRAMMB: 8192}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := loadsStayInHostRAM(tt.gpu); got != tt.stay {
+				t.Errorf("loadsStayInHostRAM(%+v) = %v, want %v", tt.gpu, got, tt.stay)
+			}
+		})
+	}
+}
+
+// TestOvercommitWarning walks the warning's boundary: it stays quiet for a
+// library that fits (including exactly at the limit), for a failed probe and for
+// an unreadable library, and otherwise quotes the model plus both figures - the
+// state it describes otherwise leaves no diagnostic anywhere.
+func TestOvercommitWarning(t *testing.T) {
+	const gib = int64(1 << 30)
+	tests := []struct {
+		name  string
+		model string
+		need  int64
+		avail int64
+		want  bool
+	}{
+		{"fits", "m", 3 * gib, 5 * gib, false},
+		{"exactly at the limit fits", "m", 4 * gib, 4 * gib, false},
+		{"failed probe says nothing", "m", 20 * gib, 0, false},
+		{"empty library says nothing", "", 20 * gib, gib, false},
+		{"over-committed warns", "qwen-4b", 4*gib + 1, 4 * gib, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := overcommitWarning(tt.model, tt.need, tt.avail)
+			if tt.want && got == "" {
+				t.Error("overcommitWarning = \"\", want a warning")
+			}
+			if !tt.want && got != "" {
+				t.Errorf("overcommitWarning = %q, want none", got)
+			}
+			if !tt.want {
+				return
+			}
+			for _, frag := range []string{"qwen-4b", formatBytes(tt.need), formatBytes(tt.avail)} {
+				if !strings.Contains(got, frag) {
+					t.Errorf("warning %q does not carry %q", got, frag)
+				}
+			}
+		})
 	}
 }
