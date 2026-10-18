@@ -524,8 +524,8 @@ type tuneHardware struct {
 	PhysicalCores int // CPUInfo.Cores
 	LogicalCPUs   int
 	// PerfCores is CPUInfo.PerfCores: the performance-cluster core count on
-	// big.LITTLE SoCs (0 = unknown). Feeds the Android thread cap in
-	// tuneModelConfig.
+	// asymmetric CPUs — big.LITTLE SoCs and Apple Silicon (0 = unknown).
+	// Feeds the thread cap in tuneModelConfig.
 	PerfCores int
 	// AndroidPlatform mirrors runtime.GOOS == "android". Kept as an explicit
 	// input (instead of reading the GOOS inside tuneModelConfig) so the
@@ -563,6 +563,16 @@ type tuneModel struct {
 	// already folded for hybrid attention (see buildTuneModel): multiplying it
 	// by Layers yields the true per-token KV total.
 	KVBytesPerTokPerLayerF16 float64
+	// PinnedQ8KV marks that the model's existing per-model config already pins
+	// the q8_0 K/V pair. The RAM-bounded plans (Apple Silicon and CPU-only) then
+	// keep that pair instead of erasing it, and price the context ladder at the
+	// q8_0 footprint (tuneQ8KVSizeRatio) — otherwise the halved cache only buys
+	// headroom and never a larger window. False is the historical behavior:
+	// cache reset to f16 and ladder priced in f16. Only q8_0 is honored because
+	// it is the one quantized pair with a measured decode cost on this tuner's
+	// hardware (see the Metal plan note) and the only one the NVIDIA A/B merge
+	// ever selects.
+	PinnedQ8KV bool
 	// TrainCtx is the trained context window; <=0 is treated as 32768.
 	TrainCtx int
 	// ExpertBytes / DenseBytes split WeightsBytes into MoE expert weights and
@@ -796,6 +806,13 @@ func estimateCPUMoeTPS(ramBandwidthGBs, expertBytesPerToken float64) float64 {
 	return ramBandwidthGBs * 1e9 / expertBytesPerToken
 }
 
+// pinnedQ8KV reports whether a model's current per-model config pins the q8_0
+// K/V pair — the one user cache selection the RAM-bounded plans preserve and
+// re-price (see tuneModel.PinnedQ8KV).
+func pinnedQ8KV(c ModelConfig) bool {
+	return c.CacheTypeK == "q8_0" && c.CacheTypeV == "q8_0"
+}
+
 // tuneModelConfig computes hardware-aware llama-server parameters for one
 // model. Pure and deterministic: same inputs, same ModelConfig. The plan body
 // (tuneModelConfigPlan) is post-processed with the platform-level pins that
@@ -877,13 +894,18 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	} else if hw.LogicalCPUs > 1 {
 		threads = hw.LogicalCPUs / 2
 	}
-	// Android big.LITTLE cap: phones report every online core as a physical
-	// core, but scheduling GEMM workers onto the LITTLE cluster degrades
+	// Cluster cap: scheduling GEMM workers onto the efficiency cluster degrades
 	// decode speed and drives SoC thermals, so pin the worker pool to the
-	// performance-cluster count when the cpufreq probe knows it and the SoC
-	// actually has a split (PerfCores < PhysicalCores). Every other platform
-	// — and uniform topologies — keep the rule above byte-for-byte.
-	if hw.AndroidPlatform && hw.PerfCores > 0 && hw.PerfCores < hw.PhysicalCores && threads > hw.PerfCores {
+	// performance-cluster count when the probe knows it and the CPU actually has
+	// a split (PerfCores < PhysicalCores). Measured on a 4P+4E M2 with a 4B
+	// Q4_K_M model (tg128, CPU-only): 20.76 t/s at 4 threads, 18.81 at 6 and
+	// 10.07 at 8 — using every core is *worse than half of them*, not linear
+	// (reproduced on a second build: 21.47 / 19.49 / 10.02, which is also why
+	// llama.cpp itself defaults to 4 threads on this host). The probe is
+	// Android/Linux cpufreq and Apple Silicon's hw.perflevel0.physicalcpu;
+	// uniform topologies and unknown splits (PerfCores 0) keep the rule above
+	// byte-for-byte.
+	if hw.PerfCores > 0 && hw.PerfCores < hw.PhysicalCores && threads > hw.PerfCores {
 		threads = hw.PerfCores
 	}
 
@@ -912,19 +934,36 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	cfg := defaultModelConfig()
 	cfg.Threads = threads
 
-	// ramCtxSize picks the largest ladder context whose f16 weights + KV plus
-	// the given reserve fit in usable RAM, falling back to the smallest ladder
+	// ramCtxSize picks the largest ladder context whose weights + KV plus the
+	// given reserve fit in usable RAM, falling back to the smallest ladder
 	// entry. The reserve is the memory a load needs that is neither weights nor
 	// KV; the CPU-only plan passes tuneCPURuntimeOverheadMB (see its
 	// measurement note), the Metal plan passes 0 to stay byte-identical — no
 	// Apple measurement isolates that term yet, so it is not guessed there.
+	// ramKVPerTok prices the ladder at the pinned q8_0 pair so the cache saving
+	// converts into context instead of only into headroom; ramKVCache writes the
+	// matching pair, and the two are always used together.
+	ramKVPerTok := kvPerTok
+	if m.PinnedQ8KV {
+		ramKVPerTok *= tuneQ8KVSizeRatio
+	}
 	ramCtxSize := func(reserve float64) int {
 		for _, ctx := range ladder {
-			if w+kvPerTok*float64(ctx)+reserve <= usableRAM {
+			if w+ramKVPerTok*float64(ctx)+reserve <= usableRAM {
 				return ctx
 			}
 		}
 		return ladder[len(ladder)-1]
+	}
+
+	// ramKVCache returns the KV cache pair matching the ladder pricing above:
+	// the pinned q8_0 pair stays written so the larger context is actually
+	// affordable, and anything else stays reset to f16.
+	ramKVCache := func() (string, string) {
+		if m.PinnedQ8KV {
+			return "q8_0", "q8_0"
+		}
+		return "", ""
 	}
 
 	// cpuOnlyPlan: no GPU offload; largest ladder context whose weights + KV +
@@ -933,7 +972,7 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	cpuOnlyPlan := func() {
 		cfg.GPULayers = "0"
 		cfg.FlashAttn = false
-		cfg.CacheTypeK, cfg.CacheTypeV = "", ""
+		cfg.CacheTypeK, cfg.CacheTypeV = ramKVCache()
 		cfg.CtxSize = ramCtxSize(tuneCPURuntimeOverheadMB * MB)
 	}
 
@@ -941,16 +980,30 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	// GPU-visible allocation away, so all layers offload (GPULayers="all")
 	// while the context is bounded by the same usable-RAM budget as the
 	// CPU-only plan — GPU and CPU share one physical pool, there is no VRAM
-	// budget to merge against. FlashAttn stays off in v1: llama.cpp supports
-	// flash attention on Metal upstream, but this tuner has no Metal benchmark
-	// path yet, so the plan conservatively stays on the default path. cpu-moe
-	// is a CUDA-centric VRAM/RAM split (meaningless on unified memory), so
+	// budget to merge against. FlashAttn deliberately stays false, which means
+	// "emit nothing" (see core/preset.go) and leaves the choice to llama-server's
+	// own -fa auto. Measured on an M2 with a 4B Q4_K_M model at -ngl 99, tg128:
+	// auto is never slower than explicit on (31.91 vs 28.69 t/s on b10537, 30.02
+	// vs 29.70 within noise on a current build) and explicit off is the loser of
+	// the three (27.16 t/s, -9%), so forcing the flag can only cost speed while
+	// leaving it unset captures whatever the engine decides is best. The q8_0
+	// cache pair is the same story in reverse — it only saves memory and measured
+	// ~6% slower decode (28.38 vs 30.09 t/s) — so both belong to a user who opts
+	// in on the model settings page, not to the default plan. Once the user has
+	// opted in, ramKVCache/ramCtxSize keep the pair through a re-tune and price
+	// the ladder at 0.53125 the KV footprint, which is what turns that saving
+	// into context: on a 24 GB M2 with a 4B Q4_K_M model (36 layers, 144 KiB of
+	// f16 KV per token) the 65536 rung needs ~13.4 GB free in f16 but only
+	// ~8.4 GB with the q8_0 pair.
+	// cpu-moe is a
+	// CUDA-centric VRAM/RAM split (meaningless on unified memory), so
 	// CPUMoe/NCpuMoe stay off and the bench chain that calibrates the cpu-moe
-	// flip never runs for apple (UsedCPUMoe=false without a bench attempt).
+	// flip never runs for apple
+	// (UsedCPUMoe=false without a bench attempt).
 	if hw.GPUVendor == vendorApple {
 		cfg.GPULayers = "all"
 		cfg.FlashAttn = false
-		cfg.CacheTypeK, cfg.CacheTypeV = "", ""
+		cfg.CacheTypeK, cfg.CacheTypeV = ramKVCache()
 		cfg.CtxSize = ramCtxSize(0)
 		return cfg
 	}

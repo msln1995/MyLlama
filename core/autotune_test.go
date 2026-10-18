@@ -1097,8 +1097,11 @@ func TestTunePlanTargetApple(t *testing.T) {
 
 // TestTuneModelConfigMetal pins the Apple Silicon plan: all layers offload
 // (GPULayers="all"), the context is sized by the usable-RAM budget (unified
-// memory), flash-attn stays off (no Metal benchmark path yet), the q8_0 cache
-// pair is never written, and a MoE model still gets the plain metal plan —
+// memory), flash-attn is left unset so llama-server keeps its own -fa auto
+// (measured on an M2 at tg128: auto/on/off = 30.02/29.70/27.16 t/s — auto is
+// never the loser, forcing it on can only cost speed), the q8_0 cache pair is
+// never written (it measured ~6% slower on decode), and a MoE model still
+// gets the plain metal plan —
 // cpu-moe is a CUDA-centric split and must not appear (UsedCPUMoe=false, no
 // bench chain). A darwin-amd64 host (CPU-only release, vendor none) plans the
 // CPU-only branch even for a MoE model.
@@ -1114,7 +1117,7 @@ func TestTuneModelConfigMetal(t *testing.T) {
 		t.Errorf("dense on apple = gpuLayers %q ctx %d, want all / 65536", cfg.GPULayers, cfg.CtxSize)
 	}
 	if cfg.FlashAttn {
-		t.Errorf("metal plan must keep flash-attn off (no benchmark path yet): %+v", cfg)
+		t.Errorf("metal plan must leave flash-attn unset so llama-server keeps -fa auto (fastest on M2): %+v", cfg)
 	}
 	if cfg.CacheTypeK != "" || cfg.CacheTypeV != "" {
 		t.Errorf("metal plan keeps the f16 cache, got K=%q V=%q", cfg.CacheTypeK, cfg.CacheTypeV)
@@ -1155,13 +1158,72 @@ func TestTuneModelConfigMetal(t *testing.T) {
 	}
 }
 
-// ─── Android big.LITTLE awareness ────────────────────────────────
+// A pinned q8_0 K/V pair survives a re-tune on the RAM-bounded plans and prices
+// the context ladder at tuneQ8KVSizeRatio the KV footprint, so the cache saving
+// converts into context instead of only into headroom.
+//
+// The fixture is the measured M2 case: a 4B Q4_K_M model (2.33 GiB, 36 layers,
+// 144 KiB of f16 KV per token) on 24 GB. At 10 GB free (8.5 GiB usable) the
+// 65536 rung costs 11.3 GiB in f16 and 7.1 GiB with the q8_0 pair — so the pair
+// is worth 32768 → 65536 on this budget.
+func TestTuneModelConfigPinnedQ8KVConvertsToContext(t *testing.T) {
+	tm := tuneModel{WeightsBytes: 2497281120, Layers: 36, KVBytesPerTokPerLayerF16: 4096, TrainCtx: 262144}
+	hw := tuneHardware{GPUVendor: vendorApple, RAMTotalGB: 24, RAMFreeGB: 10, PhysicalCores: 8, LogicalCPUs: 8, PerfCores: 4}
 
-// TestTuneModelConfigAndroidThreadCap verifies the big.LITTLE thread cap: on
-// Android with a known performance-core split the worker pool is capped to the
-// performance-cluster size; unknown splits, uniform topologies and desktop
-// platforms keep the prior rule byte-for-byte.
-func TestTuneModelConfigAndroidThreadCap(t *testing.T) {
+	// Unpinned keeps the historical plan byte-for-byte: f16 cache, 32768.
+	if cfg := tuneModelConfig(hw, tm); cfg.CtxSize != 32768 || cfg.CacheTypeK != "" || cfg.CacheTypeV != "" {
+		t.Errorf("f16 plan = ctx %d K=%q V=%q, want 32768 / \"\" / \"\"", cfg.CtxSize, cfg.CacheTypeK, cfg.CacheTypeV)
+	}
+
+	// Pinned: same hardware, one rung larger — and the pair stays written, or the
+	// chosen context would not be affordable at load time.
+	tm.PinnedQ8KV = true
+	cfg := tuneModelConfig(hw, tm)
+	if cfg.CtxSize != 65536 || cfg.CacheTypeK != "q8_0" || cfg.CacheTypeV != "q8_0" {
+		t.Errorf("pinned plan = ctx %d K=%q V=%q, want 65536 / q8_0 / q8_0", cfg.CtxSize, cfg.CacheTypeK, cfg.CacheTypeV)
+	}
+
+	// The CPU-only plan shares the budget logic, so it converts the same way.
+	cpu := hw
+	cpu.GPUVendor = vendorNone
+	if cfg := tuneModelConfig(cpu, tm); cfg.GPULayers != "0" || cfg.CtxSize != 65536 || cfg.CacheTypeK != "q8_0" {
+		t.Errorf("cpu-only pinned plan = gpuLayers %q ctx %q K=%q, want 0 / 65536 / q8_0", cfg.GPULayers, cfg.CtxSize, cfg.CacheTypeK)
+	}
+}
+
+// TestPinnedQ8KVRequiresThePair narrows the preservation to what the plan can
+// actually price: a complete q8_0 K+V pair. A half pin or a smaller quant keeps
+// the reset, because only q8_0 has a measured decode cost here and it is the
+// only quantized pair the NVIDIA A/B merge ever picks.
+func TestPinnedQ8KVRequiresThePair(t *testing.T) {
+	if !pinnedQ8KV(ModelConfig{CacheTypeK: "q8_0", CacheTypeV: "q8_0"}) {
+		t.Error("a complete q8_0 pair must count as pinned")
+	}
+	for name, c := range map[string]ModelConfig{
+		"K only":        {CacheTypeK: "q8_0"},
+		"V only":        {CacheTypeV: "q8_0"},
+		"mixed pair":    {CacheTypeK: "q8_0", CacheTypeV: "q4_0"},
+		"smaller quant": {CacheTypeK: "q4_0", CacheTypeV: "q4_0"},
+		"f16 explicit":  {CacheTypeK: "f16", CacheTypeV: "f16"},
+	} {
+		if pinnedQ8KV(c) {
+			t.Errorf("%s must keep the historical f16 reset, got %+v", name, c)
+		}
+	}
+}
+
+// ─── Asymmetric-CPU awareness ────────────────────────────────────
+
+// TestTuneModelConfigClusterThreadCap verifies the performance-cluster thread
+// cap: whenever the probe knows the split and the CPU is asymmetric, the worker
+// pool is capped to the performance-cluster size — on Android (cpufreq probe)
+// and on Apple Silicon (hw.perflevel0.physicalcpu) alike. Unknown splits and
+// uniform topologies keep the prior rule byte-for-byte.
+//
+// The cap used to be gated on Android only, which left M-series Macs pinned to
+// every core; measured on a 4P+4E M2 with a 4B Q4_K_M model (llama.cpp b10537,
+// tg128): 20.76 t/s at 4 threads, 18.81 at 6, 10.07 at 8.
+func TestTuneModelConfigClusterThreadCap(t *testing.T) {
 	tm := tuneModel{WeightsBytes: 2 << 30, Layers: 32, KVBytesPerTokPerLayerF16: 1024, TrainCtx: 32768}
 	base := tuneHardware{
 		GPUVendor:       vendorNone,
@@ -1191,11 +1253,27 @@ func TestTuneModelConfigAndroidThreadCap(t *testing.T) {
 		t.Errorf("android uniform: threads = %d, want 8", got)
 	}
 
-	// Desktop platforms never cap, whatever the cpufreq probe reported.
-	hw.PerfCores = 4
-	hw.AndroidPlatform = false
-	if got := tuneModelConfig(hw, tm).Threads; got != 8 {
-		t.Errorf("non-android: threads = %d, want 8", got)
+	// Apple Silicon 4P+4E: the Metal plan caps to the P-cluster too (the split
+	// is a CPU-topology fact, not an Android-only one).
+	hwApple := tuneHardware{
+		GPUVendor:     vendorApple,
+		RAMTotalGB:    24,
+		RAMFreeGB:     16,
+		PhysicalCores: 8,
+		LogicalCPUs:   8,
+		PerfCores:     4,
+	}
+	if got := tuneModelConfig(hwApple, tm).Threads; got != 4 {
+		t.Errorf("apple 4P+4E: threads = %d, want 4", got)
+	}
+
+	// A desktop CPU whose probe reports a split (arm64 Linux SBC: no "model
+	// name" line, so the cpufreq probe fills PerfCores) caps as well.
+	hwSBC := base
+	hwSBC.AndroidPlatform = false
+	hwSBC.PerfCores = 4
+	if got := tuneModelConfig(hwSBC, tm).Threads; got != 4 {
+		t.Errorf("non-android 4+4 split: threads = %d, want 4", got)
 	}
 }
 
