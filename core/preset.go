@@ -141,6 +141,14 @@ func modelPresetKV(m ModelInfo, cfg ModelConfig) ([]presetKV, error) {
 		// memory guard charges, in core/memfit.go: a sliding-window model copies
 		// that window's KV state to host RAM per checkpoint while the server
 		// keeps a short list of them for re-branching prompts.
+		//
+		// Writing the key on every plan is only safe because the option is old:
+		// llama-server aborts the whole start on an unknown preset key (measured
+		// against b11720 — "failed to initialize router models: option '…' not
+		// recognized in preset"), and --ctx-checkpoints has been registered since
+		// at least b8500 (grep of common/arg.cpp at b8500/b9000/b9500/b10000/
+		// b10342/b10698/b11720), so a runtime old enough to reject it predates
+		// every build this app has ever offered for download.
 		kvs = append(kvs, presetKV{key: "ctx-checkpoints", value: strconv.Itoa(ctxCheckpointValue(cfg))})
 		if cfg.GPULayers != "" && cfg.GPULayers != "auto" {
 			if !validIniValue(cfg.GPULayers) {
