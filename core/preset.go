@@ -134,14 +134,14 @@ func modelPresetKV(m ModelInfo, cfg ModelConfig) ([]presetKV, error) {
 		if cfg.Threads > 0 {
 			kvs = append(kvs, presetKV{key: "threads", value: strconv.Itoa(cfg.Threads)})
 		}
-		// Context checkpoints: llama-server auto-creates them during prompt
-		// processing (each copies KV state into host RAM, upstream default 32)
-		// and the app never calls the restore API, so CtxCheckpointsOff pins
-		// ctx-checkpoints = 0. The server prompt cache (cache-ram) is a
-		// different mechanism and is deliberately untouched here.
-		if cfg.CtxCheckpointsOff {
-			kvs = append(kvs, presetKV{key: "ctx-checkpoints", value: "0"})
-		}
+		// Context checkpoints: the budget the plan runs with, always stated
+		// rather than left to llama-server's own default of 32 (0 where the plan
+		// pins them off — every Android load and the Windows full-offload plan).
+		// ctxCheckpointValue and ctxCheckpointBytes are the same decision the
+		// memory guard charges, in core/memfit.go: a sliding-window model copies
+		// that window's KV state to host RAM per checkpoint while the server
+		// keeps a short list of them for re-branching prompts.
+		kvs = append(kvs, presetKV{key: "ctx-checkpoints", value: strconv.Itoa(ctxCheckpointValue(cfg))})
 		if cfg.GPULayers != "" && cfg.GPULayers != "auto" {
 			if !validIniValue(cfg.GPULayers) {
 				return nil, fmt.Errorf(tr("非法 GPULayers 值 %q：不能包含换行或首尾空白", "invalid GPULayers value %q: must not contain newlines or leading/trailing whitespace"), cfg.GPULayers)

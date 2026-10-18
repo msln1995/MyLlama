@@ -85,7 +85,9 @@ func TestGenerateModelsPresetFromConfigs(t *testing.T) {
 // TestGenerateModelsPresetFromNoConfig verifies a model with no configured
 // parameters still states a context: the writer resolves one through
 // routerUntunedCtx instead of leaving ctx-size out, and a model whose metadata
-// cannot be read lands on the app default.
+// cannot be read lands on the app default. It also states the checkpoint budget
+// the app runs every desktop plan with, instead of leaving it to llama-server's
+// own default of 32.
 func TestGenerateModelsPresetFromNoConfig(t *testing.T) {
 	pinProbeFreeMemoryGB(t, 64)
 	models := []ModelInfo{{Name: "plain", Path: "/models/plain.gguf"}}
@@ -97,7 +99,7 @@ func TestGenerateModelsPresetFromNoConfig(t *testing.T) {
 
 	data, _ := os.ReadFile(path)
 	content := string(data)
-	if want := "[plain]\nmodel = /models/plain.gguf\nctx-size = 4096\n\n"; content != want {
+	if want := "[plain]\nmodel = /models/plain.gguf\nctx-size = 4096\nctx-checkpoints = 8\n\n"; content != want {
 		t.Errorf("preset content does not match expected:\n got %q\nwant %q", content, want)
 	}
 }
@@ -721,15 +723,17 @@ func TestModelDirectArgs(t *testing.T) {
 }
 
 // TestModelDirectArgsBareEmbeddings verifies an embedding model gets the bare
-// --embeddings flag (upstream takes no value there) while everything else in
-// a zero-config model stays just alias + model path.
+// --embeddings flag (upstream takes no value there) while a zero-config model
+// adds nothing else but the checkpoint budget the plan always states — 8 on a
+// desktop host; on Android the same serializer emits 0, covered by
+// TestModelDirectArgsAndroidSkipsGPUOnlyFlags.
 func TestModelDirectArgsBareEmbeddings(t *testing.T) {
 	m := ModelInfo{Name: "bge-small-zh", Path: "/models/bge.gguf"}
 	args, err := modelDirectArgs(sanitizeAlias(m.Name), m, ModelConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--alias", "bge-small-zh", "-m", "/models/bge.gguf", "--embeddings"}
+	want := []string{"--alias", "bge-small-zh", "-m", "/models/bge.gguf", "--embeddings", "--ctx-checkpoints", "8"}
 	if len(args) != len(want) {
 		t.Fatalf("args = %v, want %v", args, want)
 	}
@@ -851,10 +855,11 @@ func TestCPUThreadDefault(t *testing.T) {
 	}
 }
 
-// TestGenerateModelsPresetFromCtxCheckpoints verifies the checkpoint pin is
-// written into the INI iff CtxCheckpointsOff is set: the zero value stays
-// silent so llama-server's own default (32 checkpoints) applies, and old
-// configs without the field keep generating byte-identical presets.
+// TestGenerateModelsPresetFromCtxCheckpoints verifies the checkpoint budget is
+// always stated: 0 where the plan pins it off, the app's cap of 8 otherwise
+// (instead of llama-server's own default of 32), and 0 on Android even for a
+// config saved without the pin — the phone's rule is a platform rule, so an
+// old config cannot bring back the unpriced retention there.
 func TestGenerateModelsPresetFromCtxCheckpoints(t *testing.T) {
 	models := []ModelInfo{{Name: "m", Path: "/models/m.gguf"}}
 
@@ -880,8 +885,22 @@ func TestGenerateModelsPresetFromCtxCheckpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "ctx-checkpoints") {
-		t.Errorf("zero config must not emit ctx-checkpoints: %q", string(data))
+	if !strings.Contains(string(data), "ctx-checkpoints = 8\n") {
+		t.Errorf("desktop plan must state the checkpoint cap: %q", string(data))
+	}
+
+	withPlatformGOOS(t, "android")
+	path, err = generateModelsPresetFrom(models, map[string]ModelConfig{"m": {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "ctx-checkpoints = 0\n") {
+		t.Errorf("android must keep checkpoints off even for a config without the pin: %q", string(data))
 	}
 }
 
@@ -946,7 +965,7 @@ func TestGenerateModelsPresetFromBoundsUntunedContext(t *testing.T) {
 
 	data, _ := os.ReadFile(out)
 	content := string(data)
-	if want := "[geom]\nmodel = " + filepath.ToSlash(path) + "\nctx-size = 16384\n\n"; content != want {
+	if want := "[geom]\nmodel = " + filepath.ToSlash(path) + "\nctx-size = 16384\nctx-checkpoints = 8\n\n"; content != want {
 		t.Errorf("bounded preset entry does not match:\n got %q\nwant %q", content, want)
 	}
 }

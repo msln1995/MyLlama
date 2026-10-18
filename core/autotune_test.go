@@ -37,6 +37,7 @@ func TestReadGGUFModelMetricsGQA(t *testing.T) {
 		u32KV("qwen35.attention.value_length", 128),
 		u32KV("qwen35.rope.dimension_count", 128),
 		u32KV("qwen35.full_attention_interval", 3),
+		u32KV("qwen35.attention.sliding_window", 512),
 		u32KV("qwen35.expert_count", 128),
 		u32KV("qwen35.expert_used_count", 8),
 		u32KV("qwen35.expert_shared_count", 1),
@@ -72,6 +73,7 @@ func TestReadGGUFModelMetricsGQA(t *testing.T) {
 		{"ValueLength", m.ValueLength, 128},
 		{"RopeDimCount", m.RopeDimCount, 128},
 		{"FullAttentionInterval", m.FullAttentionInterval, 3},
+		{"SwaWindow", m.SwaWindow, 512},
 		{"KVLoRaRank", m.KVLoRaRank, 0},
 		{"ExpertCount", m.ExpertCount, 128},
 		{"ExpertUsedCount", m.ExpertUsedCount, 8},
@@ -1623,12 +1625,13 @@ func TestTuneModelConfigClusterThreadCap(t *testing.T) {
 }
 
 // TestTuneModelConfigPlatformPins verifies the platform-scoped launch pins:
-// the Windows full-offload plan pins --threads 2 and disables context
-// checkpoints (memory-bus contention, unsloth #5692; the app never calls the
-// restore API), every Android plan disables context checkpoints (unified
-// memory: each auto-checkpoint copies KV state into host RAM), and the
-// cpu-moe / partial / Apple / non-Windows plans keep their own thread rules
-// with both pins off.
+// the Windows full-offload plan pins --threads 2 and turns context checkpoints
+// off (memory-bus contention, unsloth #5692; and the retention is host RAM the
+// offload cannot use), every Android plan turns them off (unified memory and no
+// swap, for a load that is already at its ceiling — and the only traffic the page
+// generates is appended turns, which measured identical with checkpoints off and
+// 188 MiB of RSS cheaper), and the cpu-moe / partial / Apple / non-Windows plans keep their own
+// thread rules and run at the app's checkpoint cap instead (core/memfit.go).
 func TestTuneModelConfigPlatformPins(t *testing.T) {
 	// 4B dense fixture fully offloads the 12 GB NVIDIA budget (ctx 65536 via
 	// the q8_0 plan), so the full-offload emission branch fires.
@@ -1655,7 +1658,7 @@ func TestTuneModelConfigPlatformPins(t *testing.T) {
 	}
 
 	// (2) Windows cramped-flip cpu-moe plan: keeps auto threads and the
-	// checkpoint default — the pin is scoped to the full-offload branch.
+	// app's checkpoint cap — the pin is scoped to the full-offload branch.
 	hw.RAMBandwidthGBs = 40
 	cfg = tuneModelConfig(hw, tmCrampedMoE)
 	if !cfg.CPUMoe {
@@ -1665,11 +1668,11 @@ func TestTuneModelConfigPlatformPins(t *testing.T) {
 		t.Errorf("windows cpu-moe plan: threads = %d, want 0 (auto)", cfg.Threads)
 	}
 	if cfg.CtxCheckpointsOff {
-		t.Error("windows cpu-moe plan must keep the checkpoint default")
+		t.Error("windows cpu-moe plan must keep the app's checkpoint cap")
 	}
 
 	// (3) Linux (all platform flags false) full offload: physical-core
-	// threads and the checkpoint default are untouched.
+	// threads and the checkpoint cap are untouched.
 	hw = tuneHardware{GPUVendor: vendorNvidia, VRAMMB: 12288, RAMTotalGB: 31, RAMFreeGB: 18, PhysicalCores: 8, LogicalCPUs: 16}
 	cfg = tuneModelConfig(hw, tm4B)
 	if cfg.GPULayers != "all" {
@@ -1679,10 +1682,10 @@ func TestTuneModelConfigPlatformPins(t *testing.T) {
 		t.Errorf("non-windows full offload: threads = %d, want 8 (physical cores)", cfg.Threads)
 	}
 	if cfg.CtxCheckpointsOff {
-		t.Error("non-windows full offload must keep the checkpoint default")
+		t.Error("non-windows full offload must keep the app's checkpoint cap")
 	}
 
-	// (4) Android CPU-only plan: checkpoints always disabled (unified memory).
+	// (4) Android CPU-only plan: checkpoints always off (unified memory).
 	hw = tuneHardware{GPUVendor: vendorNone, RAMTotalGB: 12, RAMFreeGB: 6, PhysicalCores: 8, LogicalCPUs: 8, AndroidPlatform: true}
 	cfg = tuneModelConfig(hw, tm4B)
 	if cfg.GPULayers != "0" {
@@ -1702,7 +1705,7 @@ func TestTuneModelConfigPlatformPins(t *testing.T) {
 		t.Errorf("apple plan: threads = %d, want 10 (physical cores)", cfg.Threads)
 	}
 	if cfg.CtxCheckpointsOff {
-		t.Error("apple plan must keep the checkpoint default")
+		t.Error("apple plan must keep the app's checkpoint cap")
 	}
 }
 

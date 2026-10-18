@@ -24,13 +24,93 @@ func availableMemoryBytes() int64 {
 	return int64(gb * float64(1<<30))
 }
 
+// ctxCheckpointCap is the llama-server context-checkpoint budget every plan
+// that does not pin them off runs with, in place of upstream's default of 32.
+//
+// Context checkpoints are a host-RAM retention the guard used to miss entirely.
+// A model whose memory cannot be pruned partially — sliding-window models
+// (n_swa > 0 without --swa-full) and the hybrid/recurrent ones llama.cpp
+// classifies as FULL/RS sequence-removal — copies that state into a checkpoint
+// while processing a prompt, up to the budget, and the server restores one
+// automatically when a request shares a long prefix with the cached prompt but
+// diverges before its end (an edited or regenerated turn). Plain-attention
+// models roll back in place and checkpoint nothing: measured against upstream
+// b11720, Qwen3-4B Q4_K_M given a single 22,321-token prompt logged
+// "context checkpoints enabled, max = 32" and created zero of them.
+//
+// The price of one checkpoint is the sliding-window slice of the KV cache.
+// Measured with gemma-3-1b-it Q4_K_M (26 layers, 22 of them sliding-window at
+// window 512, 1 KV head of 256 f16 = 1024 B per layer per token): every logged
+// checkpoint was 11.006 MiB, and 22 x 1024 x 512 = 11.0 MiB — the guard's
+// all-layer figure (26 x 1024 x 512 = 13.0 MiB) over-charges by 18%, which is
+// the direction a start-time budget wants its error in. With the q8_0 K/V pair
+// the same checkpoints came out at 5.85 MiB, i.e. kvCacheSizeFactor's measured
+// 0.531 again, so the cache type is charged with the same table the KV term
+// uses.
+//
+// 8 rather than 32 because the retention is what scales and the benefit
+// saturates at once. Same fixture, ctx 16384, four requests walking a shared
+// 13,553-token prefix and then revisiting a branched one:
+//
+//	checkpoints   peak RSS   revisit prefill   forced full re-processed
+//	32 (default)  1.21 GiB   2,724 tok / 2.24 s       0
+//	8             1.09 GiB   2,724 tok / 2.26 s       0
+//	0             1.03 GiB  10,861 tok / 8.39 s       2
+//
+// The cap keeps the whole saving (the list is oldest-first, and the search reads
+// it newest-first, so a short list still holds the state a chat revisits), and
+// append-only conversation — what the app's own chat page sends — never uses a
+// checkpoint at all (six appended turns ran identically with them off).
+const ctxCheckpointCap = 8
+
+// ctxCheckpointValue is the number emitted for cfg's plan: 0 on Android (where
+// every plan pins them off and the load is memory-existential) and for any plan
+// the tuner pinned off, else the cap. modelPresetKV writes exactly this value and
+// ctxCheckpointBytes charges exactly the memory it buys, so the preset and the
+// guard cannot drift apart.
+func ctxCheckpointValue(cfg ModelConfig) int {
+	if cfg.CtxCheckpointsOff || platformGOOS == "android" {
+		return 0
+	}
+	return ctxCheckpointCap
+}
+
+// ctxCheckpointBytes prices what the checkpoint budget can hold for one load:
+// cap x the model's per-token KV total x the window it copies x the configured
+// cache type, clamped by the context (a checkpoint cannot span more than the
+// window the load runs with). 0 when the plan runs no checkpoints, when the
+// model has no sliding window (nothing is checkpointed), or when no context is
+// configured yet.
+//
+// Recurrent-state models are the known under-charge: their checkpoint holds the
+// recurrent state rather than a KV slice, and no KV-times-window formula
+// describes it. They are charged 0 here, which is what they were charged before
+// this term existed, but they now run at the cap instead of 32, so the same
+// change that adds the price also shrinks that unpriced term fourfold.
+func ctxCheckpointBytes(tm tuneModel, cfg ModelConfig) int64 {
+	n := ctxCheckpointValue(cfg)
+	if n == 0 || tm.SwaWindow <= 0 || cfg.CtxSize <= 0 {
+		return 0
+	}
+	window := tm.SwaWindow
+	if window > cfg.CtxSize {
+		window = cfg.CtxSize
+	}
+	perTok := tm.KVBytesPerTokPerLayerF16 * float64(tm.Layers) * kvCacheSizeFactor(cfg)
+	return int64(float64(n) * perTok * float64(window))
+}
+
 // modelLoadBytes estimates what loading m with cfg keeps resident: the weight
 // files (tuneWeightsBytes adds the one mmproj projector cfg actually loads, the
 // same file the preset passes to llama-server), the KV cache
-// cfg.CtxSize needs, and the runtime overhead the auto-tuner plans with
-// (batch compute buffers, graph scratch, sampler arenas) priced at cfg's own
-// ubatch — the term is linear in ubatch, so a user who raises --ubatch-size for
-// faster prefill is charged for the memory it actually costs.
+// cfg.CtxSize needs, the context-checkpoint budget the plan runs with
+// (ctxCheckpointBytes — a copy of the sliding-window slice of that same cache,
+// which is why the user-facing messages count it under 上下文缓存 / "context
+// cache" rather than as a fourth category), and the runtime overhead the
+// auto-tuner plans with (batch compute buffers, graph scratch, sampler arenas)
+// priced at cfg's own ubatch — the term is linear in ubatch, so a user who
+// raises --ubatch-size for faster prefill is charged for the memory it actually
+// costs.
 //
 // The KV figure reuses the same tuneModel geometry the auto-tuner sizes its
 // context against and prices it with the cache type the config actually selects
@@ -54,6 +134,7 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 		kv := tm.KVBytesPerTokPerLayerF16 * float64(tm.Layers) * float64(cfg.CtxSize)
 		total += int64(kv * kvCacheSizeFactor(cfg))
 	}
+	total += ctxCheckpointBytes(tm, cfg)
 	return total + runtimeOverheadBytes(cfg.UBatchSize)
 }
 

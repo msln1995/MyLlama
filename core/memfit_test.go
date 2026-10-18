@@ -111,8 +111,26 @@ func writeMemfitGGUF(t *testing.T, dir string) string {
 	))
 }
 
-// TestModelLoadBytes pins the three terms of the planned footprint and how the
-// KV term reacts to the model metadata and the configured context.
+// writeMemfitSwaGGUF writes a gemma-3-1b-shaped sliding-window fixture: 26
+// layers, one KV head of 256-dim key and value (1024 B of f16 cache per layer
+// per token) and a 512-token sliding window, i.e. the geometry the measured
+// checkpoints were priced against upstream b11720.
+func writeMemfitSwaGGUF(t *testing.T, dir string) string {
+	t.Helper()
+	return writeTempGGUF(t, dir, "swa.gguf", buildGGUF(3,
+		strKV("general.architecture", "gemma3"),
+		u64KV("gemma3.block_count", 26),
+		u64KV("gemma3.context_length", 32768),
+		u32KV("gemma3.attention.head_count", 4),
+		u32KV("gemma3.attention.head_count_kv", 1),
+		u32KV("gemma3.attention.key_length", 256),
+		u32KV("gemma3.attention.value_length", 256),
+		u32KV("gemma3.attention.sliding_window", 512),
+	))
+}
+
+// TestModelLoadBytes pins the four terms of the planned footprint and how the KV
+// and checkpoint terms react to the model metadata and the configured context.
 func TestModelLoadBytes(t *testing.T) {
 	const (
 		mib     = int64(1 << 20)
@@ -123,9 +141,16 @@ func TestModelLoadBytes(t *testing.T) {
 		// 32 layers x 1024 B/token = 32 KiB per token.
 		fallbackKV4096 = 32 * 1024 * 4096
 		hybridKV4096   = 49152 * 4096
+		// The sliding-window fixture's own geometry: 26 layers x 1024 B/token
+		// of f16 cache, 512-token window, so one checkpoint copy is priced at
+		// 26 x 1024 x 512 = 13.0 MiB (measured: 11.0 MiB for the 22 window
+		// layers of the same model).
+		swaPerTok      = int64(26 * 1024)
+		swaCheckpoints = int64(ctxCheckpointCap) * swaPerTok * 512
 	)
 	dir := t.TempDir()
 	readable := writeMemfitGGUF(t, dir)
+	swa := writeMemfitSwaGGUF(t, dir)
 	unreadable := writeTempGGUF(t, dir, "junk.gguf", make([]byte, 64))
 	mmprojDir := t.TempDir()
 	mmprojModel := writeTempGGUF(t, mmprojDir, "vision.gguf", make([]byte, 64))
@@ -215,11 +240,94 @@ func TestModelLoadBytes(t *testing.T) {
 			cfg:  ModelConfig{CtxSize: 4096, UBatchSize: 2048},
 			want: fourGib + fallbackKV4096 + 4*overhd,
 		},
+		{
+			// The fourth term: a sliding-window model also pays for the
+			// checkpoint budget its plan runs with. At this context the
+			// retention is twice the cache it copies (8 x 512 window tokens
+			// against 2048 context tokens), which is the whole reason the
+			// budget is capped and priced instead of left at upstream's 32.
+			name: "checkpoint budget charged for a sliding-window model",
+			m:    ModelInfo{Name: "m", Path: swa, SizeBytes: fourGib},
+			cfg:  ModelConfig{CtxSize: 2048},
+			want: fourGib + swaPerTok*2048 + swaCheckpoints + overhd,
+		},
+		{
+			// The pin the settings page writes (and every Android and
+			// Windows full-offload plan gets) turns the term back off, and
+			// the preset emits the matching ctx-checkpoints = 0.
+			name: "pinned-off plan charges no checkpoints",
+			m:    ModelInfo{Name: "m", Path: swa, SizeBytes: fourGib},
+			cfg:  ModelConfig{CtxSize: 2048, CtxCheckpointsOff: true},
+			want: fourGib + swaPerTok*2048 + overhd,
+		},
+		{
+			// A plain-attention model creates no checkpoints at all (measured:
+			// Qwen3-4B, one 22,321-token prompt, zero checkpoint lines), so the
+			// term must not appear for it even though it runs at the cap.
+			name: "no checkpoint term without a sliding window",
+			m:    ModelInfo{Name: "m", Path: readable, SizeBytes: fourGib},
+			cfg:  ModelConfig{CtxSize: 2048},
+			want: fourGib + 49152*2048 + overhd,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := modelLoadBytes(tt.m, tt.cfg); got != tt.want {
 				t.Errorf("modelLoadBytes = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCtxCheckpointBytes pins the checkpoint term's formula and its switches on
+// the measured gemma-3-1b geometry (26 layers, 1 KV head of 256-dim key and
+// value = 1024 B of f16 cache per layer per token, 512-token window): each
+// checkpoint the server logged for that model was 11.006 MiB, matching 22 window
+// layers, while this term prices all 26 (13.0 MiB) — the 18% over-charge a
+// start-time budget wants in its error direction.
+func TestCtxCheckpointBytes(t *testing.T) {
+	const (
+		perTok   = int64(26 * 1024)
+		oneCkpt  = perTok * 512
+		capBytes = int64(ctxCheckpointCap) * oneCkpt
+	)
+	swa := tuneModel{Layers: 26, KVBytesPerTokPerLayerF16: 1024, SwaWindow: 512}
+	tests := []struct {
+		name string
+		tm   tuneModel
+		cfg  ModelConfig
+		goos string
+		want int64
+	}{
+		{"the cap times one window-sized copy", swa, ModelConfig{CtxSize: 4096}, "darwin", capBytes},
+		{
+			// The q8_0 pair shrinks the copy like it shrinks the cache: the
+			// same checkpoints measured 5.85 MiB against 11.0 MiB at f16,
+			// i.e. the 0.53125 ratio again.
+			"quantized cache prices the copies at its ratio", swa,
+			ModelConfig{CtxSize: 4096, CacheTypeK: "q8_0", CacheTypeV: "q8_0"}, "darwin",
+			int64(ctxCheckpointCap) * perTok * 17 / 32 * 512,
+		},
+		{
+			// A checkpoint copies the window, not the context: below the
+			// window the smaller of the two is what can be held.
+			"window clamped by a smaller context", swa, ModelConfig{CtxSize: 256}, "darwin",
+			int64(ctxCheckpointCap) * perTok * 256,
+		},
+		{"no sliding window copies nothing", tuneModel{Layers: 26, KVBytesPerTokPerLayerF16: 1024}, ModelConfig{CtxSize: 4096}, "darwin", 0},
+		{"pinned off", swa, ModelConfig{CtxSize: 4096, CtxCheckpointsOff: true}, "darwin", 0},
+		{
+			// Android is a platform rule, not a config field: it holds even
+			// for a stored config that never mentions checkpoints.
+			"android runs no checkpoints", swa, ModelConfig{CtxSize: 4096}, "android", 0,
+		},
+		{"no context configured yet", swa, ModelConfig{}, "darwin", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withPlatformGOOS(t, tt.goos)
+			if got := ctxCheckpointBytes(tt.tm, tt.cfg); got != tt.want {
+				t.Errorf("ctxCheckpointBytes = %d, want %d", got, tt.want)
 			}
 		})
 	}
@@ -344,6 +452,50 @@ func TestTunedUbatchPlanPassesTheMemoryGuard(t *testing.T) {
 	// that gets refused.
 	if err := modelLoadFitError(m, ModelConfig{CtxSize: 131072, CacheTypeK: "q8_0", CacheTypeV: "q8_0", UBatchSize: 2048}); err == nil {
 		t.Error("modelLoadFitError(131072 window at ubatch 2048) = nil, want a refusal: the fixture no longer straddles the boundary")
+	}
+}
+
+// TestTunedSwaPlanPricesCheckpointsInTheLadder closes the same loop for the
+// checkpoint term: a sliding-window model's plan must budget the retention the
+// start guard charges, or the tuner selects a rung the memory decision then
+// refuses (on a desktop that is a warning naming a tier the app just chose).
+//
+// Fixture: 4 GiB of weights, 26 KiB of f16 KV per token, a 512-token window and
+// 8 GiB of RAM, which leaves the tuner 6,266 MiB after its margins. The 32768
+// rung costs 6,208 MiB of weights + cache + reserve — affordable until the
+// 104 MiB checkpoint budget is priced with it, which pushes the plan down to
+// 16384 (5,896 MiB).
+func TestTunedSwaPlanPricesCheckpointsInTheLadder(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMemfitSwaGGUF(t, dir)
+	m := ModelInfo{Name: "swa-model", Path: path, SizeBytes: 4 * (1 << 30)}
+
+	metrics, ok := readGGUFModelMetrics(path)
+	if !ok {
+		t.Fatal("fixture GGUF is not readable")
+	}
+	tm := buildTuneModel(metrics, ok, tuneWeightsBytes(m, ModelConfig{}))
+	if tm.SwaWindow != 512 {
+		t.Fatalf("fixture SwaWindow = %d, want 512", tm.SwaWindow)
+	}
+	cfg := tuneModelConfig(tuneHardware{
+		GPUVendor:     vendorApple,
+		RAMTotalGB:    8,
+		RAMFreeGB:     8,
+		PhysicalCores: 8,
+	}, tm)
+	if cfg.CtxSize != 16384 {
+		t.Fatalf("tuner plan ctx = %d, want 16384: the checkpoint budget belongs in the ladder price", cfg.CtxSize)
+	}
+
+	pinProbeFreeMemoryGB(t, 6)
+	if err := modelLoadFitError(m, cfg); err != nil {
+		t.Errorf("modelLoadFitError(tuned SWA plan) = %v, want nil: the guard must not refuse the plan the tuner emitted", err)
+	}
+	// The rung a checkpoint-blind ladder would have kept really is unaffordable
+	// at this availability, so the plan above changed because of the term.
+	if err := modelLoadFitError(m, ModelConfig{CtxSize: 32768}); err == nil {
+		t.Error("modelLoadFitError(32768) = nil, want a refusal: the fixture no longer straddles the boundary")
 	}
 }
 

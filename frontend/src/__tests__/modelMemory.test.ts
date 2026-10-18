@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest'
 import {
   estimateMemory,
   kvCacheTypeFactor,
+  checkpointRetentionBytes,
   memorySummaryRows,
   runtimeOverheadBytes,
+  CTX_CHECKPOINT_CAP,
   KV_BYTES_PER_TOKEN_F16,
   RUNTIME_OVERHEAD_BYTES_AT_512,
   HEADROOM_TIGHT_GAP_BYTES,
@@ -16,7 +18,8 @@ const GIB = 1024 * 1024 * 1024
 // Realistic baseline mirroring the mock preview data: a ~2.3 GB Qwen3-4B GGUF,
 // 16 GB device with 9.4 GB free (numbers in bytes). kvBytesPerTokenF16 is 0 here
 // on purpose — that is the "not scanned" value, so every assertion below that
-// prices KV with KV_BYTES_PER_TOKEN_F16 is also the fallback test.
+// prices KV with KV_BYTES_PER_TOKEN_F16 is also the fallback test. swaWindow is 0
+// too: this model has no sliding window, so it checkpoints nothing.
 const BASE = {
   modelSizeBytes: 2_476_000_000,
   mmprojBytes: 0,
@@ -25,12 +28,22 @@ const BASE = {
   cacheTypeK: '',
   cacheTypeV: '',
   ubatchSize: 512,
+  swaWindow: 0,
+  ctxCheckpointsOff: false,
+  isAndroid: false,
   totalMemBytes: 16 * GIB,
   freeMemBytes: Math.floor(9.4 * GIB),
 }
 
-/** The three priced terms of BASE, with the runtime overhead at the default μBatch. */
+/** The priced terms of BASE summed (its checkpoint term is 0: no window). */
 const BASE_TOTAL = BASE.modelSizeBytes + 4096 * KV_BYTES_PER_TOKEN_F16 + RUNTIME_OVERHEAD_BYTES_AT_512
+
+/** gemma-3-1b's scanned geometry: 26 layers x 1024 B of f16 KV per token, a
+    512-token sliding window — the fixture the checkpoint numbers were measured
+    against (core/memfit.go's ctxCheckpointCap doc). */
+const SWA_PER_TOKEN = 26 * 1024
+const SWA_WINDOW = 512
+const SWA_CHECKPOINTS = CTX_CHECKPOINT_CAP * SWA_PER_TOKEN * SWA_WINDOW
 
 describe('kvCacheTypeFactor', () => {
   it('empty string and f16/bf16 share the f16 ratio of 1', () => {
@@ -216,6 +229,70 @@ describe('estimateMemory', () => {
       expect(estimateMemory({ ...BASE, kvBytesPerTokenF16: perToken }).kvBytes).toBe(4096 * KV_BYTES_PER_TOKEN_F16)
     }
   })
+
+  it('a sliding-window model is charged the checkpoint retention the guard charges', () => {
+    // 8 x (26,624 B/token x a 512-token window) — the same term
+    // core/memfit.go's ctxCheckpointBytes adds to the planned footprint, so a
+    // page that priced only weights + KV could call a windowed model's plan
+    // healthy while the device's own memory decision refused or warned about it.
+    const swa = { ...BASE, kvBytesPerTokenF16: 26_624, swaWindow: 512, ctxSize: 2048 }
+    const retention = CTX_CHECKPOINT_CAP * 26_624 * 512
+    const est = estimateMemory(swa)
+    expect(est.checkpointBytes).toBe(retention)
+    expect(est.totalBytes).toBe(BASE.modelSizeBytes + 2048 * 26_624 + retention + RUNTIME_OVERHEAD_BYTES_AT_512)
+    // The saving a quantized cache brings applies to the copies as well.
+    expect(
+      estimateMemory({ ...swa, cacheTypeK: 'q8_0', cacheTypeV: 'q8_0' }).checkpointBytes
+    ).toBe(Math.round(retention * 0.53125))
+  })
+
+  it('no window, no context, the pin or Android price no retention', () => {
+    const swa = { ...BASE, kvBytesPerTokenF16: 26_624, swaWindow: 512, ctxSize: 2048 }
+    const keep = estimateMemory(swa).checkpointBytes
+    expect(keep).toBeGreaterThan(0)
+    for (const off of [
+      { swaWindow: 0 },
+      { ctxSize: 0 },
+      { ctxCheckpointsOff: true },
+      { isAndroid: true },
+    ]) {
+      expect(estimateMemory({ ...swa, ...off }).checkpointBytes).toBe(0)
+    }
+    // A model the scan could not price carries no window, so it is charged the
+    // fallback KV geometry and nothing else — as the backend's fallback does.
+    expect(estimateMemory({ ...BASE, swaWindow: 0 }).checkpointBytes).toBe(0)
+  })
+})
+
+describe('checkpointRetentionBytes', () => {
+  const perToken = 26_624
+
+  it('is the cap times one window-sized copy of the cache', () => {
+    expect(checkpointRetentionBytes(512, perToken, 16384, 1, false, false)).toBe(CTX_CHECKPOINT_CAP * perToken * 512)
+  })
+
+  it('clamps the copy to the context when that is the smaller window', () => {
+    expect(checkpointRetentionBytes(512, perToken, 256, 1, false, false)).toBe(CTX_CHECKPOINT_CAP * perToken * 256)
+  })
+
+  it('takes the cache-type factor of the KV term', () => {
+    expect(checkpointRetentionBytes(512, perToken, 4096, 0.53125, false, false)).toBe(
+      Math.round(CTX_CHECKPOINT_CAP * perToken * 512 * 0.53125)
+    )
+  })
+
+  it('degrades to 0 for absent or impossible inputs', () => {
+    for (const [swa, tokens, ctx] of [
+      [0, perToken, 4096],
+      [-512, perToken, 4096],
+      [Number.NaN, perToken, 4096],
+      [512, 0, 4096],
+      [512, perToken, 0],
+      [512, perToken, Number.NaN],
+    ]) {
+      expect(checkpointRetentionBytes(swa, tokens, ctx, 1, false, false)).toBe(0)
+    }
+  })
 })
 
 describe('runtimeOverheadBytes', () => {
@@ -287,6 +364,7 @@ describe('memorySummaryRows', () => {
     const est: MemoryEstimate = {
       weightsBytes: 0,
       kvBytes: 0,
+      checkpointBytes: 0,
       overheadBytes: 0,
       totalBytes: 0,
       kvSavedBytes: 0,

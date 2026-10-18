@@ -56,6 +56,15 @@ type ModelInfo struct {
 	// keep the tuner's fallback (32 KiB/token); 0 means "not scanned", not
 	// "cheap".
 	KVBytesPerTokenF16 int64 `json:"kvBytesPerTokenF16"`
+	// SwaWindow is the model's sliding-window length in tokens
+	// ({arch}.attention.sliding_window): the slice of the KV cache llama-server
+	// cannot prune in place, so it copies it into context checkpoints while
+	// processing a prompt. It sizes the checkpoint term the start guard charges
+	// (core/memfit.go's ctxCheckpointBytes) and the same figure the
+	// model-settings estimate adds, so the page and the guard agree. 0 means the
+	// model has no sliding-window layers (nothing is checkpointed) or the header
+	// was unreadable.
+	SwaWindow int `json:"swaWindow"`
 }
 
 var cachedModels []ModelInfo
@@ -353,6 +362,10 @@ func buildModelInfo(path, author, fallbackName string) ModelInfo {
 	// for "this model was never scanned").
 	mm, ok := readGGUFModelMetrics(path)
 	model.KVBytesPerTokenF16 = tuneKVBytesPerTokenF16(mm, ok)
+	// The sliding-window length needs no fallback: a header that does not carry
+	// the key describes a model without sliding-window layers, and 0 is exactly
+	// the "nothing to checkpoint" answer the guard prices with.
+	model.SwaWindow = mm.SwaWindow
 	return model
 }
 

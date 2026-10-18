@@ -124,7 +124,9 @@ const IMPORT_DIR = 'C:\\Users\\demo\\Imported-Models'
 // memory estimate prices the context with. TinyLlama is deliberately 0: that is
 // the "not scanned" value, so `npm run dev:mock` also exercises the fallback
 // path (lib/modelMemory.ts's KV_BYTES_PER_TOKEN_F16) rather than only the real
-// geometry.
+// geometry. No entry carries swaWindow: all four are plain-attention
+// architectures (qwen2/qwen3/llama), which is the real 0 — nothing to
+// checkpoint (the binding defaults the field to 0).
 const models: any[] = [
   {
     author: '',

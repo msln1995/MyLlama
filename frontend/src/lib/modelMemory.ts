@@ -1,19 +1,21 @@
 /**
  * Memory-estimate helpers for the ModelSettings tablet summary (design draft
- * frames ⑪⑫): a live "weights + KV cache + runtime overhead" estimate that
- * reacts to the form's ctx-size, KV-cache-type and μBatch fields, plus the
- * summary-row builder shared by the portrait bottom island and the landscape
- * sticky rail (same data, two placements).
+ * frames ⑪⑫): a live "weights + KV cache + checkpoint retention + runtime
+ * overhead" estimate that reacts to the form's ctx-size, KV-cache-type and
+ * μBatch fields, plus the summary-row builder shared by the portrait bottom
+ * island and the landscape sticky rail (same data, two placements).
  *
  * Honesty rules (mirroring the other tablet phases): every term is real data.
  * The weights term is the scanned GGUF file size plus the vision projector the
- * model loads by default, and the KV term is priced with the model's own
- * per-token cache geometry, both from GetModels; only a model whose header could
- * not be read falls back to the documented typical-model constant below, and
- * every affected row is labeled as an estimate (预估/≈).
+ * model loads by default, the KV term is priced with the model's own per-token
+ * cache geometry and the checkpoint term with its sliding-window length, all
+ * three from GetModels; only a model whose header could not be read falls back
+ * to the documented typical-model constant below (and prices no checkpoint
+ * retention, exactly as the backend's fallback does), and every affected row is
+ * labeled as an estimate (预估/≈).
  * Rows whose inputs are unknown are dropped entirely instead of guessed.
  *
- * The three terms are the same three the backend's start guard prices
+ * The four terms are the same four the backend's start guard prices
  * (core/memfit.go's modelLoadBytes), and that agreement is the point: an
  * estimate of weights + KV alone was 1.25 GiB (at the default μBatch) too
  * optimistic, so this page could call a plan "充足" while the same device's
@@ -51,6 +53,16 @@ export const RUNTIME_OVERHEAD_BYTES_AT_512 = 1280 * 1024 * 1024
 /** The μBatch the overhead constant is priced at (also llama-server's default). */
 export const OVERHEAD_REFERENCE_UBATCH = 512
 
+/**
+ * The app's context-checkpoint budget: llama-server may keep this many prompt
+ * checkpoints resident, each a copy of the model's sliding-window cache
+ * (11.0 MiB measured per checkpoint for gemma-3-1b Q4_K_M on the M2 against
+ * upstream's default of 32; 8 kept the entire measured saving — a revisit of a
+ * branched prompt prefilled 3.75x faster — while the retention halved). The
+ * frontend mirror of core/memfit.go's `ctxCheckpointCap`; keep the two in sync.
+ */
+export const CTX_CHECKPOINT_CAP = 8
+
 /** Gap (bytes) below which the remaining headroom is flagged "tight". */
 export const HEADROOM_TIGHT_GAP_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -81,6 +93,17 @@ export interface MemoryEstimateInput {
   cacheTypeV: string
   /** Configured μBatch size (<= 0 / NaN = the 512 default llama-server uses). */
   ubatchSize: number
+  /**
+   * Model's sliding-window length in tokens from the scan (0 = none, or the
+   * model was not scanned). Only a windowed model has anything to checkpoint, so
+   * 0 prices no retention — the same answer the backend gives for a
+   * plain-attention model (core/memfit.go's ctxCheckpointBytes).
+   */
+  swaWindow: number
+  /** The plan turns context checkpoints off (the settings page's pin). */
+  ctxCheckpointsOff: boolean
+  /** Running on Android, where every plan turns checkpoints off as a platform rule. */
+  isAndroid: boolean
   /** Total system memory in bytes (0 = probe unavailable). */
   totalMemBytes: number
   /** Free system memory in bytes (0 = probe unavailable). */
@@ -92,9 +115,15 @@ export interface MemoryEstimate {
   weightsBytes: number
   /** KV-cache term, ctx-scaled and quantization-scaled (0 when ctx invalid). */
   kvBytes: number
+  /**
+   * Context-checkpoint retention term: the window-sized cache copies the plan
+   * may hold resident (0 when the model has no sliding window, the pin or the
+   * platform turns checkpoints off, or no context is set).
+   */
+  checkpointBytes: number
   /** Runtime reserve term, μBatch-scaled (0 only when nothing else is known). */
   overheadBytes: number
-  /** weightsBytes + kvBytes + overheadBytes (0 only when all terms are unknown). */
+  /** The four terms summed (0 only when all of them are unknown). */
   totalBytes: number
   /** KV bytes saved vs an all-f16 baseline by quantized cache types (>= 0). */
   kvSavedBytes: number
@@ -168,6 +197,31 @@ export function kvBytesPerToken(kvBytesPerTokenF16: number): number {
 }
 
 /**
+ * Context-checkpoint retention for one plan, in bytes: the cap times one copy of
+ * the window slice of the KV cache, clamped by the context (a checkpoint cannot
+ * span more than the window the load runs with) and priced with the same
+ * cache-type factor as the KV term — the frontend mirror of core/memfit.go's
+ * ctxCheckpointBytes, which is what the start guard charges.
+ *
+ * A windowed model can hold this much on top of its cache; a plain-attention
+ * model (window 0) checkpoints nothing and is charged 0, and Android plus the
+ * settings page's pin run with checkpoints off, so the term is 0 there too.
+ */
+export function checkpointRetentionBytes(
+  swaWindow: number,
+  kvBytesPerToken: number,
+  ctxSize: number,
+  kvAvgFactor: number,
+  ctxCheckpointsOff: boolean,
+  isAndroid: boolean
+): number {
+  if (ctxCheckpointsOff || isAndroid) return 0
+  if (!(swaWindow > 0) || !(ctxSize > 0) || !(kvBytesPerToken > 0)) return 0
+  const window = Math.min(Math.floor(swaWindow), Math.floor(ctxSize))
+  return Math.round(CTX_CHECKPOINT_CAP * kvBytesPerToken * window * kvAvgFactor)
+}
+
+/**
  * Compute the live memory estimate from the current form values and probes.
  * Pure: no reactive state, safe to call from computed properties and tests.
  */
@@ -182,11 +236,22 @@ export function estimateMemory(input: MemoryEstimateInput): MemoryEstimate {
   const kvAvgFactor = (kvCacheTypeFactor(input.cacheTypeK) + kvCacheTypeFactor(input.cacheTypeV)) / 2
   const kvBytes = ctx * perToken * kvAvgFactor
   const kvSavedBytes = ctx > 0 && kvAvgFactor < 1 ? ctx * perToken * (1 - kvAvgFactor) : 0
+  // A windowed model also keeps checkpoint copies of that same cache resident;
+  // the guard charges them, so the page must too or it calls an unaffordable
+  // plan healthy.
+  const checkpointBytes = checkpointRetentionBytes(
+    input.swaWindow,
+    perToken,
+    ctx,
+    kvAvgFactor,
+    input.ctxCheckpointsOff,
+    input.isAndroid
+  )
   // The reserve exists only for a load that has some price on it: with neither
   // weights nor KV known, showing a bare overhead figure would be a number
   // without a subject, and the rows keyed off the total drop instead.
   const overheadBytes = weightsBytes > 0 || kvBytes > 0 ? runtimeOverheadBytes(input.ubatchSize) : 0
-  const totalBytes = weightsBytes + kvBytes + overheadBytes
+  const totalBytes = weightsBytes + kvBytes + checkpointBytes + overheadBytes
   const availableBytes = input.freeMemBytes > 0 ? input.freeMemBytes : input.totalMemBytes > 0 ? input.totalMemBytes : 0
   let headroom: MemoryHeadroom = 'unknown'
   if (availableBytes > 0 && totalBytes > 0) {
@@ -194,7 +259,7 @@ export function estimateMemory(input: MemoryEstimateInput): MemoryEstimate {
     else if (availableBytes - totalBytes < HEADROOM_TIGHT_GAP_BYTES) headroom = 'tight'
     else headroom = 'ok'
   }
-  return { weightsBytes, kvBytes, overheadBytes, totalBytes, kvSavedBytes, availableBytes, headroom }
+  return { weightsBytes, kvBytes, checkpointBytes, overheadBytes, totalBytes, kvSavedBytes, availableBytes, headroom }
 }
 
 /** Localized labels for the summary rows (resolved once by the component). */

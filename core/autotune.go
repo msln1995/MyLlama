@@ -59,6 +59,14 @@ type modelMetrics struct {
 	// FullAttentionInterval is {arch}.full_attention_interval; >1 marks hybrid
 	// attention (e.g. qwen3.5) where only every Nth layer holds a KV cache.
 	FullAttentionInterval int
+	// SwaWindow is {arch}.attention.sliding_window; >0 marks a model with
+	// sliding-window layers, whose cached state llama-server cannot prune
+	// partially, so it copies that state into context checkpoints while
+	// processing a prompt (priced by core/memfit.go's ctxCheckpointBytes).
+	// 0 when the key is absent: a plain-attention model rolls back in place and
+	// checkpoints nothing (measured: Qwen3-4B, one 22,321-token prompt, zero
+	// "created context checkpoint" lines against upstream b11720).
+	SwaWindow int
 	// ExpertCount / ExpertUsedCount / ExpertSharedCount are {arch}.expert_count
 	// / expert_used_count / expert_shared_count (MoE geometry). ExpertCount <= 0
 	// marks a dense model for the tuner.
@@ -187,6 +195,7 @@ func readGGUFModelMetrics(path string) (modelMetrics, bool) {
 	m.KVLoRaRank = get("attention.kv_lora_rank")
 	m.RopeDimCount = get("rope.dimension_count")
 	m.FullAttentionInterval = get("full_attention_interval")
+	m.SwaWindow = get("attention.sliding_window")
 	m.ExpertCount = get("expert_count")
 	m.ExpertUsedCount = get("expert_used_count")
 	m.ExpertSharedCount = get("expert_shared_count")
@@ -556,8 +565,9 @@ type tuneHardware struct {
 	AndroidPlatform bool
 	// WindowsPlatform mirrors runtime.GOOS == "windows". Explicit input like
 	// AndroidPlatform: the full-offload plan pins --threads 2 and disables
-	// context checkpoints there (measured memory-bus contention, unsloth
-	// #5692), and the rule must stay unit-testable on every dev machine.
+	// context checkpoints there (an explicit large --threads contends on the
+	// memory bus, unsloth #5692; the checkpoints are off for the same RAM reason
+	// Android has), and the rule must stay unit-testable on every dev machine.
 	WindowsPlatform bool
 	// CPUModel is CPUInfo.Model, feeding the RAM-bandwidth cache
 	// fingerprint: the CPU package is the most identifying component of the
@@ -612,6 +622,11 @@ type tuneModel struct {
 	UBatchSize int
 	// TrainCtx is the trained context window; <=0 is treated as 32768.
 	TrainCtx int
+	// SwaWindow is the model's sliding-window length in tokens ({arch}
+	// .attention.sliding_window); 0 means the model has no sliding-window
+	// layers and therefore creates no context checkpoints. It sizes the
+	// checkpoint term the memory guard charges (core/memfit.go).
+	SwaWindow int
 	// ExpertBytes / DenseBytes split WeightsBytes into MoE expert weights and
 	// everything else. ExpertBytes > 0 marks a MoE model eligible for the
 	// --cpu-moe plan (experts in system RAM, dense weights + KV on the GPU).
@@ -669,6 +684,7 @@ func buildTuneModel(m modelMetrics, ok bool, weightsBytes int64) tuneModel {
 		Layers:                   layers,
 		KVBytesPerTokPerLayerF16: kvPerLayer,
 		TrainCtx:                 trainCtx,
+		SwaWindow:                m.SwaWindow,
 	}
 
 	// Expert/dense split: exact tensor sizes when the split validates against
@@ -940,10 +956,13 @@ func kvCacheSizeFactor(c ModelConfig) float64 {
 // model. Pure and deterministic: same inputs, same ModelConfig. The plan body
 // (tuneModelConfigPlan) is post-processed with the platform-level pins that
 // apply to every plan shape:
-//   - Android (unified memory): context checkpoints are always disabled.
-//     llama-server copies KV state into host RAM at each auto-checkpoint and
-//     the app never calls the restore API, so on 8-12 GB phones they are pure
-//     RAM pressure.
+//   - Android (unified memory, no swap, low-memory killer): context checkpoints
+//     are always disabled. A sliding-window model copies that window's KV state
+//     into host RAM at each checkpoint (see core/memfit.go's ctxCheckpointBytes
+//     for the price and the measurements) and appended conversation turns, which
+//     is all the phone is asked to serve, gain nothing from them: the same six
+//     appended turns ran at the same speed with the checkpoints off, 188 MiB of
+//     RSS cheaper.
 func tuneModelConfig(hw tuneHardware, m tuneModel) ModelConfig {
 	cfg := tuneModelConfigPlan(hw, m)
 	if hw.AndroidPlatform {
@@ -1005,9 +1024,9 @@ func mergeTunedConfig(existing, tuned ModelConfig) ModelConfig {
 //     below the t/s floor the flip never engages. On Windows the emitted
 //     full-offload plan additionally pins Threads=2 (an explicit large
 //     --threads contends on the memory bus, unsloth #5692 measurement) and
-//     disables context checkpoints (the app never restores them; each
-//     auto-checkpoint copies KV state into host RAM) — the pin never touches
-//     the cpu-moe, partial-offload, Apple or non-Windows plans.
+//     disables context checkpoints (host-RAM pressure with no gain for a fully
+//     offloaded cache; see core/memfit.go's ctxCheckpointBytes) — the pin never
+//     touches the cpu-moe, partial-offload, Apple or non-Windows plans.
 //  3. Full offload impossible (or flipped away from in step 2) but the model
 //     is MoE (ExpertBytes > 0) and the experts fit usable RAM → cpu-moe
 //     plan: experts stay on CPU (--cpu-moe), the GPU carries dense weights +
@@ -1127,15 +1146,33 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	if m.PinnedQ8KV {
 		ramKVPerTok *= tuneQ8KVSizeRatio
 	}
+	// ramCheckpoints prices the context-checkpoint budget the plan runs with at a
+	// candidate rung: a sliding-window model can hold cap x window tokens of KV in
+	// host RAM on top of the cache itself (core/memfit.go's ctxCheckpointBytes has
+	// the measurements), and the start-time memory decisions charge that term — a
+	// ladder pricing only weights + KV would select a window the over-commit
+	// warning and the settings-page estimate then call unaffordable. Android is
+	// excluded because the platform post-processor turns checkpoints off for every
+	// Android plan (tuneModelConfig), so a phone would pay for a retention it
+	// never gets.
+	ramCheckpoints := func(ctx int) float64 {
+		if hw.AndroidPlatform {
+			return 0
+		}
+		c := cfg
+		c.CtxSize = ctx
+		return float64(ctxCheckpointBytes(m, c))
+	}
 	// ramCtxSize picks the largest ladder context whose weights + KV plus the
-	// given reserve fit in usable RAM, falling back to the smallest ladder
-	// entry. The reserve is the memory a load needs that is neither weights nor
-	// KV: runtimeOverheadBytes priced at the plan's own ubatch — the same term
-	// both RAM-bounded plans and the start-time memory guard charge, measured
-	// linear in ubatch and equal on CPU and Metal (see tuneRuntimeOverheadMB).
+	// checkpoint budget and the given reserve fit in usable RAM, falling back to
+	// the smallest ladder entry. The reserve is the memory a load needs that is
+	// neither weights nor KV: runtimeOverheadBytes priced at the plan's own ubatch
+	// — the same term both RAM-bounded plans and the start-time memory guard
+	// charge, measured linear in ubatch and equal on CPU and Metal (see
+	// tuneRuntimeOverheadMB).
 	ramCtxSize := func(reserve float64) int {
 		for _, ctx := range ladder {
-			if w+ramKVPerTok*float64(ctx)+reserve <= usableRAM {
+			if w+ramKVPerTok*float64(ctx)+ramCheckpoints(ctx)+reserve <= usableRAM {
 				return ctx
 			}
 		}
@@ -1278,11 +1315,12 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 		}
 		// Windows full-offload pins: an explicit large --threads contends on
 		// the memory bus under full GPU offload (unsloth #5692 measurement),
-		// so pin 2 worker threads; and llama-server auto-creates context
-		// checkpoints during prompt processing (each copies KV state into
-		// host RAM, b10689) while the app never calls the restore API, so
-		// disable them too. Scoped to this branch only: the cpu-moe, partial
-		// and Apple plans keep their own thread rules.
+		// so pin 2 worker threads; and context checkpoints are off too — a
+		// sliding-window model copies its window's KV state to host RAM at each
+		// one, which is pure pressure under a full offload (see
+		// core/memfit.go's ctxCheckpointBytes). Scoped to this branch only: the
+		// cpu-moe, partial and Apple plans keep their own thread rules and run
+		// at the app's checkpoint cap.
 		if hw.WindowsPlatform {
 			cfg.Threads = 2
 			cfg.CtxCheckpointsOff = true

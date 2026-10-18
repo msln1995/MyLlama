@@ -193,11 +193,14 @@ type ModelConfig struct {
 	Reasoning     bool    `json:"reasoning"`     // disable thinking (writes reasoning = off)
 	SpecType      string  `json:"specType"`      // "", draft-mtp, ngram-simple, ngram-mod
 	SpecDraftNMax int     `json:"specDraftNMax"` // >0 writes spec-draft-n-max
-	// CtxCheckpointsOff disables llama-server's context checkpoints
-	// (writes ctx-checkpoints = 0; upstream default 32): each auto-checkpoint
-	// copies KV state into host RAM during prompt processing and the app never
-	// calls the restore API. Set by the auto-tuner (Windows full-offload
-	// plans, every Android plan); zero value keeps the upstream default, and
+	// CtxCheckpointsOff pins llama-server's context-checkpoint budget to 0
+	// (writes ctx-checkpoints = 0; plans that leave it false get the app's cap
+	// of 8 instead of upstream's 32). A model whose memory cannot be pruned in
+	// place — sliding-window, hybrid or recurrent — copies that state into host
+	// RAM per checkpoint, which is why the budget is the app's decision and why
+	// core/memfit.go charges it. Set by the auto-tuner for every Android plan and
+	// for the Windows full-offload plan; the Android rule also holds for a config
+	// saved before the pin existed (ctxCheckpointValue reads the platform).
 	// omitempty keeps old config JSONs loading byte-compatibly.
 	CtxCheckpointsOff bool `json:"ctxCheckpointsOff,omitempty"`
 	MLock             bool `json:"mlock,omitempty"`  // deprecated, kept only to migrate old configs

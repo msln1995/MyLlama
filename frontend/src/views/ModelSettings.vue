@@ -527,7 +527,9 @@ const showPortraitSummary = computed(() => platformState.value.isTablet)
 // ─── Live memory estimate (phone + tablet portrait summary islands) ───────────
 // Weights term: the scanned GGUF file size looked up by model name (0 while
 // unknown). KV term: the model's own per-token cache geometry from the same scan
-// (0 → the documented typical-model fallback in lib/modelMemory.ts). Memory
+// (0 → the documented typical-model fallback in lib/modelMemory.ts), plus the
+// checkpoint retention that geometry and the model's sliding window price
+// (core/memfit.go charges the same term). Memory
 // terms: the system snapshot captured on mount (0 = probe unavailable). The
 // estimate is a pure computed over the live form values, so every edit (ctx
 // length, KV quant types, μBatch, threads) updates both placements
@@ -537,6 +539,7 @@ const GIB = 1024 * 1024 * 1024
 const modelSizeBytes = ref(0)
 const modelMMProjBytes = ref(0)
 const modelKVBytesPerToken = ref(0)
+const modelSwaWindow = ref(0)
 const sysTotalBytes = ref(0)
 const sysFreeBytes = ref(0)
 
@@ -549,6 +552,9 @@ const memoryEstimate = computed(() =>
     cacheTypeK: cfg.cacheTypeK,
     cacheTypeV: cfg.cacheTypeV,
     ubatchSize: Number(cfg.ubatchSize) || 0,
+    swaWindow: modelSwaWindow.value,
+    ctxCheckpointsOff: !!cfg.ctxCheckpointsOff,
+    isAndroid: platformState.value.isAndroid,
     totalMemBytes: sysTotalBytes.value,
     freeMemBytes: sysFreeBytes.value,
   })
@@ -582,15 +588,17 @@ const summaryRows = computed(() =>
   )
 )
 
-/** Look up the model's scanned GGUF size, projector size and per-token KV
-    geometry (the estimate's weights and KV terms). All stay 0 when the scan has
-    no entry for this model, which is what the estimate reads as unknown. */
+/** Look up the model's scanned GGUF size, projector size, per-token KV geometry
+    and sliding-window length (the estimate's weights, KV and checkpoint terms).
+    All stay 0 when the scan has no entry for this model, which is what the
+    estimate reads as unknown. */
 async function lookupModelTerms() {
   const name = decodedModelName.value
   if (!name) return
   try {
     const found = (await getModels()).find(
-      (m: { name?: string; sizeBytes?: number; mmprojBytes?: number; kvBytesPerTokenF16?: number }) => m?.name === name
+      (m: { name?: string; sizeBytes?: number; mmprojBytes?: number; kvBytesPerTokenF16?: number; swaWindow?: number }) =>
+        m?.name === name
     )
     const size = Number(found?.sizeBytes)
     modelSizeBytes.value = size > 0 ? size : 0
@@ -600,6 +608,10 @@ async function lookupModelTerms() {
     // to the documented typical-model constant for it.
     const perToken = Number(found?.kvBytesPerTokenF16)
     modelKVBytesPerToken.value = perToken > 0 ? perToken : 0
+    // For the window 0 is also the real answer: a plain-attention model has
+    // nothing to checkpoint (core/memfit.go's ctxCheckpointBytes charges it 0).
+    const window = Number(found?.swaWindow)
+    modelSwaWindow.value = window > 0 ? window : 0
   } catch {
     // Model scan unavailable (e.g. standalone preview): leave 0 — the summary
     // then honestly omits the estimate rows instead of showing a guess.

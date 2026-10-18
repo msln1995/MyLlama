@@ -656,11 +656,14 @@ export class ModelConfig {
     "specDraftNMax": number;
 
     /**
-     * CtxCheckpointsOff disables llama-server's context checkpoints
-     * (writes ctx-checkpoints = 0; upstream default 32): each auto-checkpoint
-     * copies KV state into host RAM during prompt processing and the app never
-     * calls the restore API. Set by the auto-tuner (Windows full-offload
-     * plans, every Android plan); zero value keeps the upstream default, and
+     * CtxCheckpointsOff pins llama-server's context-checkpoint budget to 0
+     * (writes ctx-checkpoints = 0; plans that leave it false get the app's cap
+     * of 8 instead of upstream's 32). A model whose memory cannot be pruned in
+     * place — sliding-window, hybrid or recurrent — copies that state into host
+     * RAM per checkpoint, which is why the budget is the app's decision and why
+     * core/memfit.go charges it. Set by the auto-tuner for every Android plan and
+     * for the Windows full-offload plan; the Android rule also holds for a config
+     * saved before the pin existed (ctxCheckpointValue reads the platform).
      * omitempty keeps old config JSONs loading byte-compatibly.
      */
     "ctxCheckpointsOff"?: boolean;
@@ -801,6 +804,18 @@ export class ModelInfo {
      */
     "kvBytesPerTokenF16": number;
 
+    /**
+     * SwaWindow is the model's sliding-window length in tokens
+     * ({arch}.attention.sliding_window): the slice of the KV cache llama-server
+     * cannot prune in place, so it copies it into context checkpoints while
+     * processing a prompt. It sizes the checkpoint term the start guard charges
+     * (core/memfit.go's ctxCheckpointBytes) and the same figure the
+     * model-settings estimate adds, so the page and the guard agree. 0 means the
+     * model has no sliding-window layers (nothing is checkpointed) or the header
+     * was unreadable.
+     */
+    "swaWindow": number;
+
     /** Creates a new ModelInfo instance. */
     constructor($$source: Partial<ModelInfo> = {}) {
         if (!("author" in $$source)) {
@@ -838,6 +853,9 @@ export class ModelInfo {
         }
         if (!("kvBytesPerTokenF16" in $$source)) {
             this["kvBytesPerTokenF16"] = 0;
+        }
+        if (!("swaWindow" in $$source)) {
+            this["swaWindow"] = 0;
         }
 
         Object.assign(this, $$source);
