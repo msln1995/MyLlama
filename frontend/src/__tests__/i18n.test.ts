@@ -49,12 +49,12 @@ describe('lib/i18n', () => {
     expect(t('settings.repo')).toBe('Repository')
   })
 
-  it('non-Windows updates hint keys render in both locales and point at GitHub Releases', () => {
+  it('updates fallback hint keys render in both locales and point at GitHub Releases', () => {
     setLocale('zh')
-    expect(t('settings.updateNotSupported')).toBe('自动更新当前仅支持 Windows，请前往 GitHub Releases 获取新版本。')
+    expect(t('settings.updateNotSupported')).toBe('自动更新当前仅支持 Windows 和 Android，请前往 GitHub Releases 获取新版本。')
     expect(t('settings.updateReleasesLink')).toBe('GitHub Releases')
     setLocale('en')
-    expect(t('settings.updateNotSupported')).toContain('Windows-only')
+    expect(t('settings.updateNotSupported')).toContain('Windows and Android')
     expect(t('settings.updateNotSupported')).toContain('GitHub Releases')
     expect(t('settings.updateReleasesLink')).toBe('GitHub Releases')
   })

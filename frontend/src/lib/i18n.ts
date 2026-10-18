@@ -99,9 +99,10 @@ export const messages: Record<Locale, Record<string, string>> = {
     // (design draft frame ①: the hero points at the checklist steps)
     'home.hero.subOnboard': '先完成上方步骤 ① ②，AI 就绪后这里会亮起',
     'home.hero.standby': '待命',
-    // The hero metric is the rolling 60s average of the decode speed (same
-    // figure the Api page charts), so the label names the averaging window.
-    'home.hero.metricLbl': 'tokens / 秒 · 近 60 秒均值',
+    // The hero metric is the latest decode-speed sample (llama-server's tg_3s
+    // realtime window, refreshed each second by the monitor sampler), not an
+    // average — the Api page's chart is what spans a 60-sample window.
+    'home.hero.metricLbl': 'tokens / 秒 · 实时采样',
     'home.hero.cta': '进入对话 →',
     'home.memory.aux': '{pct}% · 可用 {free}',
     'home.cpu.aux': '{model} · {n} 核',
@@ -279,7 +280,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'api.serviceSettings': '服务设置',
     'api.cfgPortSub': '1024 – 65535',
     'api.cfgMaxModelsSub': '同时驻留内存的模型上限',
-    'api.cfgCacheRamSub': '--mlock 预留 · 0 = 不预留',
+    'api.cfgCacheRamSub': '--cache-ram 上限 · 0 = 服务端默认',
     'api.cfgLockedSheet': '服务运行中无法修改，停止后编辑',
     'api.done': '完成',
     'api.emptyTitle': '暂无可用模型',
@@ -597,7 +598,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'settings.updateDesc': '当前版本 {version} · 自动检查每两天一次',
     'settings.checking': '检查中...',
     'settings.latest': '✓ 已是最新版本',
-    'settings.updateNotSupported': '自动更新当前仅支持 Windows，请前往 GitHub Releases 获取新版本。',
+    'settings.updateNotSupported': '自动更新当前仅支持 Windows 和 Android，请前往 GitHub Releases 获取新版本。',
     'settings.updateReleasesLink': 'GitHub Releases',
     'settings.language': '界面语言',
     'settings.languageAuto': '自动（跟随系统）',
@@ -930,9 +931,10 @@ export const messages: Record<Locale, Record<string, string>> = {
     // (design draft frame ①: the hero points at the checklist steps)
     'home.hero.subOnboard': 'Finish steps 1–2 above and the AI lights up here',
     'home.hero.standby': 'Standby',
-    // The hero metric is the rolling 60s average of the decode speed (same
-    // figure the Api page charts), so the label names the averaging window.
-    'home.hero.metricLbl': 'tokens / s · 60s average',
+    // The hero metric is the latest decode-speed sample (llama-server's tg_3s
+    // realtime window, refreshed each second by the monitor sampler), not an
+    // average — the Api page's chart is what spans a 60-sample window.
+    'home.hero.metricLbl': 'tokens / s · live sample',
     'home.hero.cta': 'Chat now →',
     'home.memory.aux': '{pct}% · {free} free',
     'home.cpu.aux': '{model} · {n} cores',
@@ -1110,7 +1112,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'api.serviceSettings': 'Service Settings',
     'api.cfgPortSub': '1024 – 65535',
     'api.cfgMaxModelsSub': 'Max models resident in memory',
-    'api.cfgCacheRamSub': '--mlock reservation · 0 = none',
+    'api.cfgCacheRamSub': '--cache-ram cap · 0 = server default',
     'api.cfgLockedSheet': 'Locked while the server is running — stop it to edit',
     'api.done': 'Done',
     'api.emptyTitle': 'No models available',
@@ -1428,7 +1430,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'settings.updateDesc': 'Current version {version} · auto-checks every two days',
     'settings.checking': 'Checking...',
     'settings.latest': '✓ Up to date',
-    'settings.updateNotSupported': 'In-app updates are Windows-only for now — grab new versions from GitHub Releases.',
+    'settings.updateNotSupported': 'In-app updates cover Windows and Android for now — grab new versions from GitHub Releases.',
     'settings.updateReleasesLink': 'GitHub Releases',
     'settings.language': 'Interface Language',
     'settings.languageAuto': 'Auto (follow system)',

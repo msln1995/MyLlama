@@ -9,6 +9,7 @@ import {
   showServingGpuSetting,
   updateSectionMode,
   showUpdateCheckActions,
+  showUpdateNotSupportedHint,
   showGpuCards,
   showCudaCompat,
   showCudaRuntimeComponent,
@@ -310,6 +311,25 @@ describe('OS-scoped setting gates (Settings.vue visibility)', () => {
     for (const width of [390, MOBILE_MAX, TABLET_MAX, TABLET_MAX + 1, 1920]) {
       expect(updateSectionMode(buildPlatformState(os, width))).toBe(mode)
     }
+  })
+
+  // The "no in-app update path on this OS" hint must stay off Windows and
+  // Android (both have an install path, so the hint would contradict the check
+  // button) and off the phone tier entirely (there the Releases link is the
+  // row tail). Android is 'link' mode above, so this gate keys off the action
+  // cluster rather than the mode.
+  it.each<[OsId, boolean]>([
+    ['windows', false],
+    ['darwin', true],
+    ['linux', true],
+    ['android', false],
+    ['ios', true],
+    ['other', true],
+  ])('%s -> showUpdateNotSupportedHint=%s above the phone tier', (os, hint) => {
+    for (const width of [MOBILE_MAX + 1, TABLET_MAX + 1, 1920]) {
+      expect(showUpdateNotSupportedHint(buildPlatformState(os, width))).toBe(hint)
+    }
+    expect(showUpdateNotSupportedHint(buildPlatformState(os, MOBILE_MAX))).toBe(false)
   })
 })
 

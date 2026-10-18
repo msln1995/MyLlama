@@ -208,6 +208,19 @@ export function updateSectionMode(state: PlatformState): UpdateSectionMode {
   return state.os === 'windows' ? 'native' : 'link'
 }
 
+/**
+ * Whether the update row renders the "no in-app update path on this OS" hint.
+ * Windows (NSIS self-update) and Android (system PackageInstaller for the
+ * in-app downloaded APK) both have an install path, so the hint belongs only to
+ * the OSes whose backend update probe short-circuits to "no update"; the phone
+ * tier is excluded because there the Releases link already is the row tail.
+ * Android remains 'link' mode above (it keeps the Releases footnote), which is
+ * why this gate keys off {@link showUpdateCheckActions} rather than the mode.
+ */
+export function showUpdateNotSupportedHint(state: PlatformState): boolean {
+  return !showUpdateCheckActions(state) && !state.isMobile
+}
+
 // ─── Hardware-capability render gates ────────────────────────────────────────
 // Platform parity does NOT mean showing identical UI everywhere: a section
 // backed by a probe that cannot succeed on a platform must not render there at

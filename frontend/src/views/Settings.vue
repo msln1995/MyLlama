@@ -661,7 +661,7 @@
         <!-- Desktop link mode (no native install path): hint instead of the
              action; the Releases link opens through the shared external-link
              handler (system browser, never in-WebView navigation) -->
-        <p v-else-if="!isPhone" class="row-foot update-hint">
+        <p v-else-if="showNotSupportedHint" class="row-foot update-hint">
           {{ t('settings.updateNotSupported') }}
           <a
             class="hint-link"
@@ -719,7 +719,7 @@ import { buildPairPayload, parsePairPayload, validateRemoteHost, type RemoteChat
 import { updateState, checkForUpdate } from '../lib/update'
 import { getAppVersion, getLlamaCpp, getSystemInfo, getServerConfig, getServerStatus, getLanAddresses, saveServerConfig, browseLlamaCppDownloadDir, browseModelDownloadDir, setApiRouteMode, getModels, startQrScan } from '../wails'
 import { restartServer } from '../lib/serverControls'
-import { accelBuildKey, showTraySetting, showApiRouteSetting, showServingGpuSetting, updateSectionMode, showUpdateCheckActions, usePlatform } from '../lib/platform'
+import { accelBuildKey, showTraySetting, showApiRouteSetting, showServingGpuSetting, updateSectionMode, showUpdateCheckActions, showUpdateNotSupportedHint, usePlatform } from '../lib/platform'
 import { handleLinkClick } from '../lib/linkHandler'
 import { DOCS_ICON } from '../lib/navigation'
 import { docSections } from '../docs/manifest'
@@ -1352,6 +1352,11 @@ const updatesNative = computed(() => updateSectionMode(platform.value) === 'nati
 // in-app install path (NSIS / PackageInstaller); linux/darwin/other short-circuit
 // the update probe to "no update" so the action would be a no-op there.
 const showCheckActions = computed(() => showUpdateCheckActions(platform.value))
+
+// "No in-app update path" hint: link-mode desktop/tablet tiers only (macOS,
+// Linux) — Windows and Android have an install path, so the hint would
+// contradict the check-for-updates button rendered above it.
+const showNotSupportedHint = computed(() => showUpdateNotSupportedHint(platform.value))
 
 // System tray toggle: rendered on Windows/macOS only. Disabling takes effect immediately (backend removes icon and
 // persists); systray cannot restart in same process, so re-enabling requires app restart (hint shown below toggle).
