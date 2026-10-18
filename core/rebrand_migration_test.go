@@ -360,9 +360,18 @@ func TestRewriteLegacyPaths(t *testing.T) {
 // rewrite.
 func TestApplyLegacyPathMarker(t *testing.T) {
 	t.Run("rewrites and persists", func(t *testing.T) {
-		tmp := withTempCwd(t)
+		withTempCwd(t)
 		withCwdRelativePaths(t)
 		saveConfigState(t)
+		// The rewrite replaces the legacy prefix with os.Getwd(), and on macOS
+		// Getwd reports the resolved physical path (/private/var/... behind the
+		// /var symlink) rather than t.TempDir()'s logical one, so the expected
+		// paths must come from the same call the production code uses — exactly
+		// like the self-referencing-marker subtest below.
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
 		legacy := t.TempDir() // a real dir distinct from the cwd
 		cfgJSON := fmt.Sprintf(`{"llamaCppDir":%q,"modelDir":%q,"theme":"dark","modelConfigs":{"m1":{"threads":4,"mmproj":%q}}}`,
 			filepath.Join(legacy, "llama-cpp"), filepath.Join(legacy, "LLM-Models"), filepath.Join(legacy, "mmproj.gguf"))
@@ -381,7 +390,7 @@ func TestApplyLegacyPathMarker(t *testing.T) {
 		customLlamaCppMu.Lock()
 		gotLlamaDir := customLlamaCppDir
 		customLlamaCppMu.Unlock()
-		if want := filepath.Join(tmp, "llama-cpp"); gotLlamaDir != want {
+		if want := filepath.Join(cwd, "llama-cpp"); gotLlamaDir != want {
 			t.Errorf("in-memory llamaCppDir = %q, want %q", gotLlamaDir, want)
 		}
 		// The rewrite is persisted to the active config file.
@@ -393,11 +402,11 @@ func TestApplyLegacyPathMarker(t *testing.T) {
 		if err := json.Unmarshal(persisted, &reloaded); err != nil {
 			t.Fatal(err)
 		}
-		if reloaded.ModelDir != filepath.Join(tmp, "LLM-Models") {
-			t.Errorf("persisted modelDir = %q, want %q", reloaded.ModelDir, filepath.Join(tmp, "LLM-Models"))
+		if reloaded.ModelDir != filepath.Join(cwd, "LLM-Models") {
+			t.Errorf("persisted modelDir = %q, want %q", reloaded.ModelDir, filepath.Join(cwd, "LLM-Models"))
 		}
-		if got := reloaded.ModelConfigs["m1"].MMProj; got != filepath.Join(tmp, "mmproj.gguf") {
-			t.Errorf("persisted mmproj = %q, want %q", got, filepath.Join(tmp, "mmproj.gguf"))
+		if got := reloaded.ModelConfigs["m1"].MMProj; got != filepath.Join(cwd, "mmproj.gguf") {
+			t.Errorf("persisted mmproj = %q, want %q", got, filepath.Join(cwd, "mmproj.gguf"))
 		}
 	})
 
