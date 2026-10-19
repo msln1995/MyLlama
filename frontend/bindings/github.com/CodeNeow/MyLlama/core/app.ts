@@ -309,6 +309,15 @@ export function GetSystemInfo(): $CancellablePromise<$models.SystemInfo | null> 
 }
 
 /**
+ * GetSystemTheme returns the current system theme preference ("light" or
+ * "dark"). Used by the frontend when the user selects "auto" theme mode, so
+ * the app can follow the system appearance.
+ */
+export function GetSystemTheme(): $CancellablePromise<string> {
+    return $Call.ByID(1831938701);
+}
+
+/**
  * GetUpdateDownloadStatus returns the current state and progress of the
  * update download.
  */

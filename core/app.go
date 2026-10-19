@@ -341,6 +341,13 @@ func (a *App) SetTheme(theme string) {
 	applyThemeBackground(theme)
 }
 
+// GetSystemTheme returns the current system theme preference ("light" or
+// "dark"). Used by the frontend when the user selects "auto" theme mode, so
+// the app can follow the system appearance.
+func (a *App) GetSystemTheme() string {
+	return getSystemTheme()
+}
+
 // SetSidebarCollapsed sets the sidebar collapsed/expanded preference: writes
 // to global state and persists to config; no side effects like window
 // background changes (pure UI preference, mirroring the minimal form of

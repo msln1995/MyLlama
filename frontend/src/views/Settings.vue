@@ -51,18 +51,14 @@
             <span class="row-title">{{ t('settings.themeMode') }}</span>
             <span class="row-sub">{{ t('settings.themeDesc') }}</span>
           </div>
-          <div class="row-tail row-tail-switch">
-            <div
-              class="switch"
-              :class="{ on: currentTheme === 'dark' }"
-              role="switch"
-              :aria-checked="currentTheme === 'dark'"
+          <div class="row-tail row-tail-select">
+            <ThemedSelect
+              :options="themeOptions"
+              :model-value="currentTheme"
+              @update:model-value="setTheme"
               :aria-label="t('settings.themeMode')"
-              tabindex="0"
-              @click="toggleTheme"
-              @keydown.enter="toggleTheme"
-            >
-            </div>
+              variant="toolbar"
+            />
           </div>
         </div>
       </div>
@@ -803,9 +799,11 @@ const currentTheme = computed({
   set: (v) => setTheme(v)
 })
 
-function toggleTheme() {
-  currentTheme.value = currentTheme.value === 'dark' ? 'light' : 'dark'
-}
+const themeOptions = computed(() => [
+  { value: 'auto', label: t('settings.themeAutoShort') },
+  { value: 'light', label: t('settings.themeLight') },
+  { value: 'dark', label: t('settings.themeDark') },
+])
 
 // ─── Interface language ──────────────────────────────────────────────────────
 // Compact segment labels for the row tail; the row sub-line carries the full

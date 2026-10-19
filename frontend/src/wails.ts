@@ -33,6 +33,13 @@ export async function setTheme(theme: string): Promise<void> {
   return app().SetTheme(theme)
 }
 
+// Read the current system theme ("light" | "dark"); used by the 'auto' theme
+// mode to resolve the effective theme. Platform-specific: macOS reads
+// AppleInterfaceStyle, Android reads uimode, others default to "light".
+export async function getSystemTheme(): Promise<string> {
+  return app().GetSystemTheme()
+}
+
 // Set the sidebar collapsed/expanded preference (pure UI state, no window-related side effects)
 export async function setSidebarCollapsed(collapsed: boolean): Promise<void> {
   return app().SetSidebarCollapsed(collapsed)

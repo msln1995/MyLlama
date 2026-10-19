@@ -1,5 +1,5 @@
 import { reactive } from 'vue'
-import { getConfig, setTheme as setThemeBackend, setSidebarCollapsed as setSidebarCollapsedBackend, setOnboardingDismissed as setOnboardingDismissedBackend, setDownloadSource as setDownloadSourceBackend, setLanguage as setLanguageBackend, setTrayEnabled as setTrayEnabledBackend, getServerConfig, saveServerConfig as saveServerConfigBackend, saveRemoteChat as saveRemoteChatBackend, type RemoteChatConfig } from './wails'
+import { getConfig, setTheme as setThemeBackend, setSidebarCollapsed as setSidebarCollapsedBackend, setOnboardingDismissed as setOnboardingDismissedBackend, setDownloadSource as setDownloadSourceBackend, setLanguage as setLanguageBackend, setTrayEnabled as setTrayEnabledBackend, getServerConfig, saveServerConfig as saveServerConfigBackend, saveRemoteChat as saveRemoteChatBackend, getSystemTheme, type RemoteChatConfig } from './wails'
 import type { RemoteChatProfile } from './lib/chatRemote'
 import { setLocale } from './lib/i18n'
 
@@ -69,6 +69,16 @@ export async function loadConfig() {
   try {
     const config = await getConfig()
     appConfig.theme = config.theme || 'light'
+    // Resolve 'auto' theme to actual system theme on load
+    let effectiveTheme = appConfig.theme
+    if (appConfig.theme === 'auto') {
+      try {
+        effectiveTheme = await getSystemTheme()
+      } catch {
+        effectiveTheme = 'light'
+      }
+    }
+    document.documentElement.setAttribute('data-theme', effectiveTheme)
     appConfig.llamaCppDir = config.llamaCppDir || ''
     appConfig.modelsDir = config.modelsDir || ''
     appConfig.llamaCppDownloadDir = config.llamaCppDownloadDir || ''
@@ -108,10 +118,19 @@ export async function loadConfig() {
 
 export async function setTheme(theme: string) {
   appConfig.theme = theme
-  document.documentElement.setAttribute('data-theme', theme)
+  // Resolve 'auto' to the actual system theme
+  let effectiveTheme = theme
+  if (theme === 'auto') {
+    try {
+      effectiveTheme = await getSystemTheme()
+    } catch {
+      effectiveTheme = 'light'
+    }
+  }
+  document.documentElement.setAttribute('data-theme', effectiveTheme)
   localStorage.setItem(THEME_KEY, theme)
   try {
-    await setThemeBackend(theme)
+    await setThemeBackend(effectiveTheme)
   } catch {}
 }
 
