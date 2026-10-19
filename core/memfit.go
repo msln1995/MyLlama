@@ -343,7 +343,19 @@ func fittingCtxRung(m ModelInfo, cfg ModelConfig, availBytes int64) int {
 // prompt cache may retain. The rest stays with the OS: a machine that begins a
 // session with zero slack has nothing left for the next turn's allocator, and on
 // a phone the low-memory killer is the fallback.
+//
+// Measured on the vivo X60 (11 GB RAM, Android 13) at ctx 16384 with a 1351 MiB
+// clamp (50% of ~2.7 GB headroom): replay was 5× slower than unclamped (77s vs
+// 16s per round) but RSS was the same or higher (4293 vs 3895 MiB). The clamp
+// was counterproductive — it destroyed prompt-cache performance without saving
+// memory. Android now uses 0.9 to leave the cache room to work; desktop keeps
+// 0.5 because swapping mid-session is the failure mode there, not a killed
+// process.
 const promptCacheShare = 0.5
+
+// promptCacheShareAndroid is the Android-specific share. See promptCacheShare
+// for the measurement that motivated the higher value.
+const promptCacheShareAndroid = 0.9
 
 // routerLibrary snapshots the two inputs every launch-time memory decision needs
 // - the scanned model list and the stored per-model configs - so the prompt-cache
@@ -752,7 +764,11 @@ func promptCacheRAMMiB(requestedMiB int, plannedNeedBytes, availBytes int64) int
 	if headroom <= 0 {
 		return 0
 	}
-	bound := int64(float64(headroom) * promptCacheShare / float64(1<<20))
+	share := promptCacheShare
+	if platformGOOS == "android" {
+		share = promptCacheShareAndroid
+	}
+	bound := int64(float64(headroom) * share / float64(1<<20))
 	if bound >= int64(requestedMiB) {
 		return requestedMiB
 	}
