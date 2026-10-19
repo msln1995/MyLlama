@@ -58,7 +58,8 @@ export const RUNTIME_OVERHEAD_BYTES_AT_512 = 1280 * 1024 * 1024
  * largest reading). With every layer and the whole cache on the GPU there is no
  * CPU graph left to hold buffers, which is why a Mac starts from a quarter of
  * the phone's figure. A config that leaves blocks on the host pays this floor
- * plus one more copy of those blocks' weights (see {@link cpuResidentLayers}).
+ * plus one more copy of those blocks' weights, and --cpu-moe pays it again for
+ * the expert pool it moves off the GPU (see {@link reserveBytes}).
  * The frontend mirror of core/autotune.go's `tuneMetalRuntimeOverheadMB`.
  */
 export const RUNTIME_OVERHEAD_METAL_BYTES_AT_512 = 320 * 1024 * 1024
@@ -137,6 +138,16 @@ export interface MemoryEstimateInput {
    * The host-resident split is measured against it.
    */
   modelLayers: number
+  /**
+   * MoE expert pool inside the scanned file (0 = a dense model, or the model was
+   * not scanned). It is what --cpu-moe can move to the host, and on a Mac that
+   * move costs a second copy of those bytes (core/memfit.go's hostWeightBytes).
+   */
+  expertBytes: number
+  /** The plan keeps every MoE expert on the CPU (the settings page's cpu-moe toggle). */
+  cpuMoe: boolean
+  /** The plan keeps the first N blocks' experts on the CPU (--n-cpu-moe, 0 = off). */
+  nCpuMoe: number
   /**
    * macOS with an Apple GPU serving, the platform half of what the backend guard
    * reads for the Metal reserve (core/memfit.go's loadRuntimeOverheadBytes).
@@ -262,24 +273,77 @@ export function cpuResidentLayers(gpuLayers: string, modelLayers: number): numbe
 }
 
 /**
- * The reserve term for one load: the phone-measured CPU figure everywhere, and
- * on a Mac serving from Metal the measured floor plus one more copy of the
- * weights the host still computes. The two signals the backend reads for the
- * Metal half are the caller's `appleMetalServing` and the config's own
- * gpu-layers (core/memfit.go's loadRuntimeOverheadBytes).
+ * Blocks whose MoE experts --cpu-moe pins to the host: every block for the plain
+ * flag (a config that sets both is read as the flag, the conservative half), the
+ * first N for --n-cpu-moe clamped to the block count, none for a plan that emits
+ * neither. The frontend mirror of core/memfit.go's cpuMoeHostLayers; a dense
+ * model has no expert pool, so the count prices nothing there.
  */
-export function reserveBytes(
-  appleMetalServing: boolean,
-  gpuLayers: string,
-  modelLayers: number,
-  weightsBytes: number,
+export function cpuMoeHostLayers(cpuMoe: boolean, nCpuMoe: number, modelLayers: number): number {
+  const layers = splitLayerCount(modelLayers)
+  if (cpuMoe) return layers
+  const n = Math.floor(Number(nCpuMoe) || 0)
+  if (n <= 0) return 0
+  return Math.min(n, layers)
+}
+
+/** Inputs to the reserve term: the plan's own offload settings plus the scanned
+ *  geometry they price against. */
+export interface ReserveInput {
+  /** macOS with an Apple GPU serving (see {@link MemoryEstimateInput.appleMetalServing}). */
+  appleMetalServing: boolean
+  /** Configured gpu-layers, as written. */
+  gpuLayers: string
+  /** Model block count from the scan (0 = the fallback count). */
+  modelLayers: number
+  /** Weights term the load runs with (main file plus projector). */
+  weightsBytes: number
+  /** MoE expert pool from the scan (0 = dense model, or never scanned). */
+  expertBytes: number
+  /** The plan keeps every MoE expert on the CPU (--cpu-moe). */
+  cpuMoe: boolean
+  /** The plan keeps the first N blocks' experts on the CPU (--n-cpu-moe). */
+  nCpuMoe: number
+  /** Configured μBatch size (<= 0 / NaN = the 512 default). */
   ubatchSize: number
-): number {
-  if (!appleMetalServing) return runtimeOverheadBytes(ubatchSize)
-  const cpu = cpuResidentLayers(gpuLayers, modelLayers)
-  const floor = runtimeOverheadBytes(ubatchSize, true)
-  if (cpu <= 0) return floor
-  return Math.round(floor + (weightsBytes * cpu) / splitLayerCount(modelLayers))
+}
+
+/**
+ * Integer division the way Go truncates it, term by term, so the page and the
+ * guard land on the same byte for the same inputs.
+ */
+function intDiv(bytes: number, layers: number): number {
+  return Math.floor(bytes / layers)
+}
+
+/**
+ * The reserve term for one load: the phone-measured CPU figure everywhere, and on
+ * a Mac serving from Metal the measured floor plus the weights the host holds
+ * *again* on top of the weight term - the blocks a gpu-layers number leaves
+ * behind, and the expert pool --cpu-moe moves off the GPU. The three signals the
+ * backend reads for the Metal half are the caller's appleMetalServing and the
+ * plan's own gpu-layers / cpu-moe settings
+ * (core/memfit.go's loadRuntimeOverheadBytes and hostWeightBytes).
+ *
+ * The expert copy is measured, not inferred: OLMoE-1B-7B Q4_0 (3456 MiB of
+ * experts over 16 blocks) on the M2 at ctx 4096 went from 575 MB of dirty memory
+ * with -ngl 99 to 4035 MB with -ngl 99 --cpu-moe, paired runs agreeing within
+ * 2 MB. Blocks the host already runs are counted once, so a partial offload plus
+ * --cpu-moe does not pay for the same bytes twice.
+ */
+export function reserveBytes(input: ReserveInput): number {
+  if (!input.appleMetalServing) return runtimeOverheadBytes(input.ubatchSize)
+  const floor = runtimeOverheadBytes(input.ubatchSize, true)
+  const layers = splitLayerCount(input.modelLayers)
+  const cpu = cpuResidentLayers(input.gpuLayers, input.modelLayers)
+  let host = intDiv(input.weightsBytes * cpu, layers)
+  const pinned = cpuMoeHostLayers(input.cpuMoe, input.nCpuMoe, input.modelLayers)
+  const offloaded = layers - cpu
+  if (pinned > 0 && offloaded > 0) {
+    host += intDiv(input.expertBytes * Math.min(pinned, offloaded), layers)
+  }
+  if (host <= 0) return floor
+  return floor + host
 }
 
 /**
@@ -349,7 +413,16 @@ export function estimateMemory(input: MemoryEstimateInput): MemoryEstimate {
   // without a subject, and the rows keyed off the total drop instead.
   const overheadBytes =
     weightsBytes > 0 || kvBytes > 0
-      ? reserveBytes(input.appleMetalServing, input.gpuLayers, input.modelLayers, weightsBytes, input.ubatchSize)
+      ? reserveBytes({
+          appleMetalServing: input.appleMetalServing,
+          gpuLayers: input.gpuLayers,
+          modelLayers: input.modelLayers,
+          weightsBytes,
+          expertBytes: input.expertBytes > 0 ? input.expertBytes : 0,
+          cpuMoe: input.cpuMoe,
+          nCpuMoe: input.nCpuMoe,
+          ubatchSize: input.ubatchSize,
+        })
       : 0
   const totalBytes = weightsBytes + kvBytes + checkpointBytes + overheadBytes
   const availableBytes = input.freeMemBytes > 0 ? input.freeMemBytes : input.totalMemBytes > 0 ? input.totalMemBytes : 0

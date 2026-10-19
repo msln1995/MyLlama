@@ -6,6 +6,7 @@ import {
   memorySummaryRows,
   runtimeOverheadBytes,
   cpuResidentLayers,
+  cpuMoeHostLayers,
   CTX_CHECKPOINT_CAP,
   KV_BYTES_PER_TOKEN_F16,
   RUNTIME_OVERHEAD_BYTES_AT_512,
@@ -39,6 +40,11 @@ const BASE = {
   // 0 = the scan published no block count; the reserve helper then assumes the
   // backend's own fallback layer count.
   modelLayers: 0,
+  // Dense by default: no expert pool and no --cpu-moe, so the reserve never sees
+  // the expert copy below.
+  expertBytes: 0,
+  cpuMoe: false,
+  nCpuMoe: 0,
   appleMetalServing: false,
   totalMemBytes: 16 * GIB,
   freeMemBytes: Math.floor(9.4 * GIB),
@@ -271,6 +277,50 @@ describe('estimateMemory', () => {
     expect(cpuResidentLayers('-1', 36)).toBe(36)
     expect(cpuResidentLayers('12.5', 36)).toBe(36)
     expect(cpuResidentLayers(' 36 ', 36)).toBe(36)
+  })
+
+  it('cpuMoeHostLayers counts the blocks whose experts stay on the host', () => {
+    expect(cpuMoeHostLayers(true, 0, 36)).toBe(36)
+    expect(cpuMoeHostLayers(false, 0, 36)).toBe(0)
+    expect(cpuMoeHostLayers(false, 8, 36)).toBe(8)
+    // Clamped to the block count, and both flags read as the plain one.
+    expect(cpuMoeHostLayers(false, 99, 36)).toBe(36)
+    expect(cpuMoeHostLayers(true, 8, 36)).toBe(36)
+    // A negative or unusable count is "not set", the same as the backend's <= 0.
+    expect(cpuMoeHostLayers(false, -4, 36)).toBe(0)
+    expect(cpuMoeHostLayers(false, Number.NaN, 36)).toBe(0)
+    // An unscanned model is priced with the backend's fallback count.
+    expect(cpuMoeHostLayers(true, 0, 0)).toBe(32)
+  })
+
+  it('--cpu-moe on a Mac pays for the expert pool a second time', () => {
+    // The M2 reading behind this term: OLMoE-1B-7B Q4_0 (3456 MiB of experts over
+    // 16 blocks) at ctx 4096 held 575 MB of dirty memory with -ngl 99 and 4035 MB
+    // with -ngl 99 --cpu-moe - paired runs agreeing within 2 MB, i.e. the whole
+    // expert pool. Before this term the page showed the 320 MiB floor for that
+    // plan and called a 3.4 GB over-commit affordable.
+    const MIB = 1024 * 1024
+    const macMoE = {
+      ...BASE,
+      appleMetalServing: true,
+      modelSizeBytes: 3600 * MIB,
+      modelLayers: 36,
+      expertBytes: 2700 * MIB,
+      cpuMoe: true,
+    }
+    expect(estimateMemory(macMoE).overheadBytes).toBe((320 + 2700) * MIB)
+    // Only the blocks Metal runs get the expert copy; the ones already on the
+    // host are counted once, as weight bytes.
+    expect(estimateMemory({ ...macMoE, gpuLayers: '27' }).overheadBytes).toBe((320 + 900 + 2025) * MIB)
+    expect(estimateMemory({ ...macMoE, gpuLayers: '0' }).overheadBytes).toBe((320 + 3600) * MIB)
+    expect(estimateMemory({ ...macMoE, cpuMoe: false, nCpuMoe: 8 }).overheadBytes).toBe((320 + 600) * MIB)
+    // A dense model has no pool to move, and a non-Mac pays the CPU figure.
+    expect(estimateMemory({ ...macMoE, expertBytes: 0 }).overheadBytes).toBe(320 * MIB)
+    expect(estimateMemory({ ...macMoE, appleMetalServing: false }).overheadBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512)
+    // The expert copy raises the total, so a plan the page called affordable
+    // stops being one.
+    const available = BASE.modelSizeBytes + 4096 * KV_BYTES_PER_TOKEN_F16 + 320 * MIB
+    expect(estimateMemory({ ...macMoE, modelSizeBytes: BASE.modelSizeBytes, totalMemBytes: available, freeMemBytes: 0 }).headroom).toBe('over')
   })
 
   it('a scanned model prices KV with its own GGUF geometry, not the constant', () => {

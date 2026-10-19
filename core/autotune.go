@@ -473,6 +473,31 @@ func estimateExpertBytes(m modelMetrics, weightsBytes int64) int64 {
 	return int64(est)
 }
 
+// expertDenseSplit splits weightsBytes into the MoE expert pool and everything
+// else, the same chain both memory decisions read: the exact tensor-table walk
+// (readGGUFTensorSplit over m.Path) when its sums land within tuneTensorSplitTol
+// of the on-disk size - the gap being the header, the tensor-info area and
+// padding - and the metadata estimate otherwise. An unreadable header (ok false)
+// is all-dense, which is what a model with no readable geometry is charged as.
+//
+// It is a function of its own because the scanned model list publishes the
+// expert half (ModelInfo.ExpertBytes): the model-settings estimate needs it to
+// price the second copy --cpu-moe buys on Apple silicon (core/memfit.go's
+// hostWeightBytes), and a page that guessed at it would disagree with the guard.
+func expertDenseSplit(m modelMetrics, ok bool, weightsBytes int64) (expert, dense int64) {
+	if !ok {
+		return 0, weightsBytes
+	}
+	if m.Path != "" && weightsBytes > 0 {
+		if e, d, splitOK := readGGUFTensorSplit(m.Path); splitOK &&
+			math.Abs(float64(e+d-weightsBytes))/float64(weightsBytes) <= tuneTensorSplitTol {
+			return e, d
+		}
+	}
+	e := estimateExpertBytes(m, weightsBytes)
+	return e, weightsBytes - e
+}
+
 // ─── KV cache estimation ─────────────────────────────────────────
 
 // kvBytesPerTokenF16 estimates the f16 KV cache bytes one token needs on one
@@ -700,20 +725,7 @@ func buildTuneModel(m modelMetrics, ok bool, weightsBytes int64) tuneModel {
 
 	// Expert/dense split: exact tensor sizes when the split validates against
 	// the file size, else the metadata estimate.
-	expert, dense := int64(0), weightsBytes
-	splitUsed := false
-	if m.Path != "" && weightsBytes > 0 {
-		if e, d, splitOK := readGGUFTensorSplit(m.Path); splitOK &&
-			math.Abs(float64(e+d-weightsBytes))/float64(weightsBytes) <= tuneTensorSplitTol {
-			expert, dense, splitUsed = e, d, true
-		}
-	}
-	if !splitUsed {
-		e := estimateExpertBytes(m, weightsBytes)
-		expert, dense = e, weightsBytes-e
-	}
-	tm.ExpertBytes = expert
-	tm.DenseBytes = dense
+	tm.ExpertBytes, tm.DenseBytes = expertDenseSplit(m, ok, weightsBytes)
 	if m.ExpertCount > 0 {
 		tm.ExpertUsedFrac = float64(m.ExpertUsedCount) / float64(m.ExpertCount)
 	}

@@ -71,6 +71,13 @@ type ModelInfo struct {
 	// top of its runtime reserve (core/memfit.go's cpuResidentLayers), so the
 	// model-settings estimate needs it to mirror the guard.
 	Layers int `json:"layers"`
+	// ExpertBytes is the MoE expert pool inside this file, from the same tensor
+	// split the auto-tuner plans with (core/autotune.go's expertDenseSplit). It is
+	// the part of a MoE model --cpu-moe can move to the CPU, which an Apple
+	// silicon load then holds a second time (core/memfit.go's hostWeightBytes), so
+	// the model-settings estimate needs it to mirror the guard. 0 means a dense
+	// model, an unreadable header, or a model that was never scanned.
+	ExpertBytes int64 `json:"expertBytes"`
 }
 
 var cachedModels []ModelInfo
@@ -373,6 +380,10 @@ func buildModelInfo(path, author, fallbackName string) ModelInfo {
 	// the key describes a model without sliding-window layers, and 0 is exactly
 	// the "nothing to checkpoint" answer the guard prices with.
 	model.SwaWindow = mm.SwaWindow
+	// The MoE expert pool of the main file (an mmproj never holds experts, so the
+	// scan's weight figure is the file size itself; the guard re-runs the same
+	// split against the weights its config loads).
+	model.ExpertBytes, _ = expertDenseSplit(mm, ok, model.SizeBytes)
 	return model
 }
 

@@ -825,6 +825,16 @@ export class ModelInfo {
      */
     "layers": number;
 
+    /**
+     * ExpertBytes is the MoE expert pool inside this file, from the same tensor
+     * split the auto-tuner plans with (core/autotune.go's expertDenseSplit). It is
+     * the part of a MoE model --cpu-moe can move to the CPU, which an Apple
+     * silicon load then holds a second time (core/memfit.go's hostWeightBytes), so
+     * the model-settings estimate needs it to mirror the guard. 0 means a dense
+     * model, an unreadable header, or a model that was never scanned.
+     */
+    "expertBytes": number;
+
     /** Creates a new ModelInfo instance. */
     constructor($$source: Partial<ModelInfo> = {}) {
         if (!("author" in $$source)) {
@@ -868,6 +878,9 @@ export class ModelInfo {
         }
         if (!("layers" in $$source)) {
             this["layers"] = 0;
+        }
+        if (!("expertBytes" in $$source)) {
+            this["expertBytes"] = 0;
         }
 
         Object.assign(this, $$source);

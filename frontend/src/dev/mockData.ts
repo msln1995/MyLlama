@@ -125,8 +125,11 @@ const IMPORT_DIR = 'C:\\Users\\demo\\Imported-Models'
 // the "not scanned" value, so `npm run dev:mock` also exercises the fallback
 // path (lib/modelMemory.ts's KV_BYTES_PER_TOKEN_F16) rather than only the real
 // geometry. No entry carries swaWindow: all four are plain-attention
-// architectures (qwen2/qwen3/llama), which is the real 0 — nothing to
-// checkpoint (the binding defaults the field to 0). The `layers` counts are the
+// architectures (qwen3/qwen2/llama), which is the real 0 — nothing to
+// checkpoint (the binding defaults the field to 0). None carries expertBytes
+// either, and for the same honest reason: all four are dense, so there is no MoE
+// expert pool for --cpu-moe to move (lib/modelMemory.ts's cpuMoeHostLayers
+// prices 0 bytes there). The `layers` counts are the
 // block counts those architectures really have (they match each entry's own
 // per-token KV geometry), so the preview can show a Mac reserving the Metal
 // figure for 'all' and the CPU figure for a numeric partial offload; the entry

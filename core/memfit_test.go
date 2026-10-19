@@ -378,6 +378,150 @@ func TestLoadRuntimeOverheadBytesShape(t *testing.T) {
 	}
 }
 
+// TestLoadRuntimeOverheadBytesCPUMoe prices the expert half of the second copy a
+// Mac load pays: --cpu-moe moves the expert pool onto the host even for the
+// blocks Metal runs, and those bytes are dirty memory on top of the weight term.
+// Measured as phys_footprint on the M2 with OLMoE-1B-7B Q4_0 (3456 MiB of
+// experts over 16 blocks) at ctx 4096 and the default ubatch: 575 MB with -ngl 99
+// and 4035 MB with -ngl 99 --cpu-moe, over paired runs whose repeat readings
+// agreed within 2 MB. That 3460 MiB step is what the guard charged nothing for
+// before this term - a 3.4 GB under-price on a load the settings page offers on
+// every Apple silicon build. The fixture below spreads 3600 MiB of weights over
+// 36 blocks (100 MiB each) with a 2700 MiB expert pool (75 MiB per block).
+func TestLoadRuntimeOverheadBytesCPUMoe(t *testing.T) {
+	const mib = int64(1 << 20)
+	cases := []struct {
+		name      string
+		goos      string
+		vendor    string
+		gpuLayers string
+		expertMB  int64
+		cpuMoe    bool
+		nCpuMoe   int
+		wantMB    int64
+	}{
+		// The measured shape: every block offloaded, every expert on the host.
+		{name: "cpu-moe full offload", gpuLayers: "all", expertMB: 2700, cpuMoe: true, wantMB: 320 + 2700},
+		// Blocks the host already runs are counted once: at -ngl 27 the nine host
+		// blocks pay their own weight bytes (900 MiB) and only the 27 blocks Metal
+		// holds add expert bytes (2700 x 27/36 = 2025).
+		{name: "cpu-moe over the offloaded blocks", gpuLayers: "27", expertMB: 2700, cpuMoe: true, wantMB: 320 + 900 + 2025},
+		// With every block on the host the experts are already inside the dense
+		// copy, so the flag costs nothing extra - no double counting.
+		{name: "cpu-moe with every block on the host", gpuLayers: "0", expertMB: 2700, cpuMoe: true, wantMB: 320 + 3600},
+		// --n-cpu-moe pins the first N blocks' experts, clamped to the block count.
+		{name: "n-cpu-moe eight blocks", gpuLayers: "all", expertMB: 2700, nCpuMoe: 8, wantMB: 320 + 600},
+		{name: "n-cpu-moe past the block count", gpuLayers: "all", expertMB: 2700, nCpuMoe: 99, wantMB: 320 + 2700},
+		{name: "n-cpu-moe inside the offloaded span only", gpuLayers: "27", expertMB: 2700, nCpuMoe: 9, wantMB: 320 + 900 + 675},
+		// A flag set on a dense model has no expert pool to move.
+		{name: "dense model", gpuLayers: "all", expertMB: 0, cpuMoe: true, wantMB: 320},
+		// Both flags set is read as the plain one, the conservative half.
+		{name: "both flags", gpuLayers: "all", expertMB: 2700, cpuMoe: true, nCpuMoe: 8, wantMB: 320 + 2700},
+		// The expert copy is Apple silicon's, not a universal law: on the phone the
+		// host tensors are the mapped pages the weight term already covers.
+		{name: "linux cpu-moe", goos: "linux", vendor: vendorNone, gpuLayers: "all", expertMB: 2700, cpuMoe: true, wantMB: 1280},
+		{name: "android cpu-moe", goos: "android", vendor: vendorApple, gpuLayers: "all", expertMB: 2700, cpuMoe: true, wantMB: 1280},
+	}
+	orig := platformGOOS
+	t.Cleanup(func() { platformGOOS = orig })
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			platformGOOS = tt.goos
+			if tt.goos == "" {
+				platformGOOS = "darwin"
+			}
+			vendor := tt.vendor
+			if vendor == "" {
+				vendor = vendorApple
+			}
+			tm := tuneModel{Layers: 36, WeightsBytes: 3600 * mib, ExpertBytes: tt.expertMB * mib}
+			cfg := ModelConfig{GPULayers: tt.gpuLayers, CPUMoe: tt.cpuMoe, NCpuMoe: tt.nCpuMoe, UBatchSize: 512}
+			got := loadRuntimeOverheadBytes(cfg, tuneTarget{Vendor: vendor}, tm)
+			if got != tt.wantMB*mib {
+				t.Errorf("loadRuntimeOverheadBytes(%s, gpuLayers %q, cpuMoe %v, nCpuMoe %d) = %d MiB, want %d",
+					platformGOOS, tt.gpuLayers, tt.cpuMoe, tt.nCpuMoe, got/mib, tt.wantMB)
+			}
+		})
+	}
+	// The same load at a bigger batch: the floor doubles, the expert copy does not.
+	platformGOOS = "darwin"
+	tm := tuneModel{Layers: 36, WeightsBytes: 3600 * mib, ExpertBytes: 2700 * mib}
+	got := loadRuntimeOverheadBytes(ModelConfig{GPULayers: "all", CPUMoe: true, UBatchSize: 1024},
+		tuneTarget{Vendor: vendorApple}, tm)
+	if want := (640 + 2700) * mib; got != want {
+		t.Errorf("cpu-moe at ubatch 1024 = %d MiB, want %d", got/mib, want/mib)
+	}
+}
+
+// writeMemfitMoEGGUF writes a 4-block qwen35 MoE fixture whose file is padded to
+// exactly the tensor records it declares (786,432 B of experts + 262,144 B of
+// dense weights = 1 MiB), so the expert pool comes from the precise tensor-table
+// split rather than the metadata estimate, and the guard's weight term, expert
+// term and the scan's published ExpertBytes all read the same 1 MiB file.
+func writeMemfitMoEGGUF(t *testing.T, dir string) string {
+	t.Helper()
+	const tensorBytes = 786432 + 262144
+	raw := buildGGUFTensors(3,
+		[]ggufKV{
+			strKV("general.architecture", "qwen35"),
+			u64KV("qwen35.block_count", 4),
+			u64KV("qwen35.context_length", 32768),
+			u32KV("qwen35.attention.head_count", 8),
+			u32KV("qwen35.attention.head_count_kv", 4),
+			u32KV("qwen35.attention.key_length", 128),
+			u32KV("qwen35.attention.value_length", 128),
+		},
+		[]ggufTensor{
+			{name: "blk.0.ffn_up_exps.weight", dims: []uint64{196608}, typ: 0},
+			{name: "token_embd.weight", dims: []uint64{65536}, typ: 0},
+		})
+	return writeTempGGUF(t, dir, "moe.gguf", append(raw, make([]byte, tensorBytes-len(raw))...))
+}
+
+// TestModelLoadBytesChargesCPUMoeExperts closes the loop between the file, the
+// guard and the setting: the same modelLoadBytes the start guard and the router's
+// resident-set budget price is what must grow by the expert pool when the plan
+// keeps those experts on the host - the 3460 MiB step measured on the M2 with
+// OLMoE-1B-7B Q4_0, not a reserve constant someone could forget to raise.
+func TestModelLoadBytesChargesCPUMoeExperts(t *testing.T) {
+	const (
+		moeWeights = int64(786432 + 262144)
+		expertPool = int64(786432)
+	)
+	dir := t.TempDir()
+	m := ModelInfo{Name: "moe-model", Path: writeMemfitMoEGGUF(t, dir), SizeBytes: moeWeights}
+
+	orig := platformGOOS
+	platformGOOS = "darwin"
+	t.Cleanup(func() { platformGOOS = orig })
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorApple})
+
+	full := ModelConfig{CtxSize: 4096, GPULayers: "all", UBatchSize: 512}
+	offloaded := ModelConfig{CtxSize: 4096, GPULayers: "all", UBatchSize: 512, CPUMoe: true}
+	if got := modelLoadBytes(m, offloaded) - modelLoadBytes(m, full); got != expertPool {
+		t.Errorf("--cpu-moe at full offload adds %d B, want the whole expert pool (%d)", got, expertPool)
+	}
+	// Half the blocks' experts pinned is half the pool.
+	partial := ModelConfig{CtxSize: 4096, GPULayers: "all", UBatchSize: 512, NCpuMoe: 2}
+	if got := modelLoadBytes(m, partial) - modelLoadBytes(m, full); got != expertPool/2 {
+		t.Errorf("--n-cpu-moe 2 of 4 adds %d B, want %d", got, expertPool/2)
+	}
+	// Blocks the host already runs are counted once: at -ngl 0 every byte is
+	// already in the dense copy, so the flag changes nothing.
+	plain := ModelConfig{CtxSize: 4096, GPULayers: "0", UBatchSize: 512}
+	hosted := ModelConfig{CtxSize: 4096, GPULayers: "0", UBatchSize: 512, CPUMoe: true}
+	if got := modelLoadBytes(m, hosted); got != modelLoadBytes(m, plain) {
+		t.Errorf("-ngl 0 with --cpu-moe = %d, want the same %d (no double counting)",
+			got, modelLoadBytes(m, plain))
+	}
+	// The copy is Apple silicon's: on the phone the host tensors are the mapped
+	// pages the weight term already covers, so the flag is free there.
+	platformGOOS = "linux"
+	if got := modelLoadBytes(m, offloaded) - modelLoadBytes(m, full); got != 0 {
+		t.Errorf("--cpu-moe on linux adds %d B, want 0 (the CPU-shaped reserve already covers it)", got)
+	}
+}
+
 // TestMetalReserveBuysContext is the user-visible half of the Metal shape: the
 // same 4 GiB model at ctx 8192 is 960 MiB cheaper to plan on a Mac when the plan
 // offloads every one of the fixture's 36 layers - and the reserve grows again

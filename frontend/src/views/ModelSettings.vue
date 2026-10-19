@@ -541,6 +541,10 @@ const modelMMProjBytes = ref(0)
 const modelKVBytesPerToken = ref(0)
 const modelSwaWindow = ref(0)
 const modelLayers = ref(0)
+// The MoE expert pool of the scanned file: what --cpu-moe can move to the host,
+// which an Apple silicon load then holds a second time (core/memfit.go's
+// hostWeightBytes). 0 = a dense model, or the scan has no entry for it.
+const modelExpertBytes = ref(0)
 const sysTotalBytes = ref(0)
 const sysFreeBytes = ref(0)
 // macOS with an Apple GPU serving: with the model's block count and the
@@ -564,6 +568,9 @@ const memoryEstimate = computed(() =>
     isAndroid: platformState.value.isAndroid,
     gpuLayers: cfg.gpuLayers,
     modelLayers: modelLayers.value,
+    expertBytes: modelExpertBytes.value,
+    cpuMoe: !!cfg.cpuMoe,
+    nCpuMoe: Number(cfg.nCpuMoe) || 0,
     appleMetalServing: appleMetalServing.value,
     totalMemBytes: sysTotalBytes.value,
     freeMemBytes: sysFreeBytes.value,
@@ -608,13 +615,14 @@ interface ScannedModelTerms {
   kvBytesPerTokenF16?: number
   swaWindow?: number
   layers?: number
+  expertBytes?: number
 }
 
 /** Look up the model's scanned GGUF size, projector size, per-token KV geometry,
-    sliding-window length and block count (the estimate's weights, KV,
-    checkpoint and reserve-shape terms). The size/geometry fields stay 0 when the
-    scan has no entry for this model, which is what the estimate reads as
-    unknown. */
+    sliding-window length, block count and MoE expert pool (the estimate's
+    weights, KV, checkpoint and reserve-shape terms). The size/geometry fields
+    stay 0 when the scan has no entry for this model, which is what the estimate
+    reads as unknown. */
 async function lookupModelTerms() {
   const name = decodedModelName.value
   if (!name) return
@@ -638,6 +646,11 @@ async function lookupModelTerms() {
     // count, so both sides price the same load the same.
     const layers = Number(found?.layers)
     modelLayers.value = layers > 0 ? layers : 0
+    // The expert pool prices the second copy --cpu-moe buys on a Mac
+    // (core/memfit.go's hostWeightBytes). 0 is both "dense model" and "not
+    // scanned", and neither has anything to charge.
+    const experts = Number(found?.expertBytes)
+    modelExpertBytes.value = experts > 0 ? experts : 0
   } catch {
     // Model scan unavailable (e.g. standalone preview): leave 0 — the summary
     // then honestly omits the estimate rows instead of showing a guess.

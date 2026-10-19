@@ -332,6 +332,49 @@ func TestScanModelsDirCarriesKVGeometry(t *testing.T) {
 	}
 }
 
+// TestScanModelsDirCarriesExpertPool verifies the scan publishes the MoE expert
+// pool, the figure the model-settings estimate needs to price the second copy
+// --cpu-moe buys on Apple silicon (core/memfit.go's hostWeightBytes). It comes
+// from the same split the auto-tuner and the start guard plan against
+// (core/autotune.go's expertDenseSplit), so a page and a guard looking at one
+// file cannot disagree about how much of it the flag can move. A dense model
+// publishes 0 - there is no expert pool to hold on the host.
+func TestScanModelsDirCarriesExpertPool(t *testing.T) {
+	base := t.TempDir()
+	moeDir := filepath.Join(base, "acme", "moe-model")
+	plainDir := filepath.Join(base, "acme", "dense-model")
+	for _, d := range []string{moeDir, plainDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 786432 B of expert weights + 262144 B dense = 1 MiB, and the file is padded
+	// to exactly their sum so the tensor-table split validates against the on-disk
+	// size instead of falling back to the metadata estimate.
+	const tensorBytes = 786432 + 262144
+	raw := buildGGUFTensors(3,
+		[]ggufKV{strKV("general.architecture", "qwen35")},
+		[]ggufTensor{
+			{name: "blk.0.ffn_up_exps.weight", dims: []uint64{196608}, typ: 0},
+			{name: "token_embd.weight", dims: []uint64{65536}, typ: 0},
+		})
+	writeTempGGUF(t, moeDir, "moe.gguf", append(raw, make([]byte, tensorBytes-len(raw))...))
+	writeTempGGUF(t, plainDir, "model.gguf", buildGGUF(3,
+		strKV("general.architecture", "qwen2"),
+	))
+
+	experts := map[string]int64{}
+	for _, m := range scanModelsDir(base) {
+		experts[m.Name] = m.ExpertBytes
+	}
+	if experts["moe-model"] != 786432 {
+		t.Errorf("MoE model ExpertBytes = %d, want 786432 (the expert tensors only)", experts["moe-model"])
+	}
+	if experts["dense-model"] != 0 {
+		t.Errorf("dense model ExpertBytes = %d, want 0", experts["dense-model"])
+	}
+}
+
 // TestScanModelsDirGGUFMetaRepoIDName verifies a general.name that embeds the full
 // source repo id ("org/model", written by some converters) is trimmed to the model
 // segment. The generic file name is not a candidate here (the metadata name does

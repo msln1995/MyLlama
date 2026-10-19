@@ -154,25 +154,88 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 // darwin + apple is the only way this shape exists, and a snapshot left over from
 // another platform can never reprice a phone's load.
 //
-// On a Mac the term is the measured Metal floor plus one more copy of the layers
-// the host still computes - see metalRuntimeOverheadBytes for the floor and
-// cpuResidentLayers for the copy. An unpinned config is the floor alone, not a
-// guess at it: llama-server's own default offloads every layer on Apple silicon
-// (measured: no -ngl flag at all leaves +141 MiB beyond weights + f16 KV, against
-// +2504 MiB of RSS with -ngl 0).
+// On a Mac the term is the measured Metal floor plus the weights the host holds
+// in addition to the copy the weight term already covers - see
+// metalRuntimeOverheadBytes for the floor, hostWeightBytes for the second copy
+// and cpuResidentLayers for the layer split. An unpinned config is the floor
+// alone, not a guess at it: llama-server's own default offloads every layer on
+// Apple silicon (measured: no -ngl flag at all leaves +141 MiB beyond weights +
+// f16 KV, against +2504 MiB of RSS with -ngl 0).
 func loadRuntimeOverheadBytes(cfg ModelConfig, serving tuneTarget, tm tuneModel) int64 {
 	if platformGOOS != "darwin" || serving.Vendor != vendorApple {
 		return runtimeOverheadBytes(cfg.UBatchSize)
 	}
-	reserve := metalRuntimeOverheadBytes(cfg.UBatchSize)
-	if cpu := cpuResidentLayers(cfg.GPULayers, tm.Layers); cpu > 0 {
-		reserve += tm.WeightsBytes * int64(cpu) / int64(tm.Layers)
-	}
-	return reserve
+	return metalRuntimeOverheadBytes(cfg.UBatchSize) + hostWeightBytes(cfg, tm)
 }
 
-// cpuResidentLayers counts the blocks a gpu-layers setting leaves on the host.
-// It is what sizes the second copy a Mac load pays: measured with phys_footprint
+// hostWeightBytes prices the weights a Mac load keeps on the host *on top of* the
+// weight term, which already covers one copy of the file. Two settings put bytes
+// there, and each buys a second copy of a different part of the model:
+//
+//   - a gpu-layers number leaves the last blocks to the CPU, so the host holds
+//     those blocks' weights again;
+//   - --cpu-moe / --n-cpu-moe moves the expert pool onto the CPU even for the
+//     blocks the GPU runs, so the host holds those experts as well.
+//
+// Both were measured as phys_footprint (the dirty, non-reclaimable half) on the
+// M2. The dense half is cpuResidentLayers' numbers. The expert half: OLMoE-1B-7B
+// Q4_0 (16 blocks, 3746 MiB of weights of which 3456 MiB are experts) at ctx 4096
+// and the default ubatch went from 575 MB of dirty memory with -ngl 99 to 4035 MB
+// with -ngl 99 --cpu-moe - paired runs, the second copy of the reading inside
+// 2 MB - a step of 3460 MiB against the 3456 MiB expert pool. Without the term
+// this load was charged the 320 MiB floor alone, i.e. the guard under-priced it
+// by 3.4 GB, exactly the error class that let a 15.85 GiB RSS thrash through as
+// "fits".
+//
+// The two halves never overlap: -ngl N offloads the *first* N blocks, so the
+// blocks already on the host are priced by the dense term, and only the
+// min(expert-on-host-count, offloaded-block-count) blocks below the cut line add
+// expert bytes. Summed, that is exactly the physical picture - all dense bytes
+// for the host blocks plus the whole expert pool when --cpu-moe covers every
+// block - which is why a partial offload plus --cpu-moe does not pay for the same
+// bytes twice (the naive "share of the file + share of the experts" would
+// over-charge the 8-of-16 split on this fixture by 1.7 GiB).
+func hostWeightBytes(cfg ModelConfig, tm tuneModel) int64 {
+	layers := tm.Layers
+	if layers <= 0 {
+		return 0
+	}
+	cpu := cpuResidentLayers(cfg.GPULayers, layers)
+	host := tm.WeightsBytes * int64(cpu) / int64(layers)
+	if k := cpuMoeHostLayers(cfg, layers); k > 0 {
+		offloaded := layers - cpu
+		if k > offloaded {
+			k = offloaded
+		}
+		host += tm.ExpertBytes * int64(k) / int64(layers)
+	}
+	return host
+}
+
+// cpuMoeHostLayers counts the blocks whose MoE experts --cpu-moe pins to the CPU:
+// every block for the plain flag, the first N for --n-cpu-moe, none for a plan
+// that emits neither. A config that sets both is read as the flag (all blocks),
+// the conservative of the two - llama-server treats them as alternatives, so no
+// plan the app writes has an expert placement this function would understate.
+//
+// The experts of a dense model are 0 bytes (tuneModel.ExpertBytes), so this
+// returns a count that prices nothing there; only a MoE load pays it.
+func cpuMoeHostLayers(cfg ModelConfig, layers int) int {
+	if cfg.CPUMoe {
+		return layers
+	}
+	if cfg.NCpuMoe > 0 {
+		if cfg.NCpuMoe > layers {
+			return layers
+		}
+		return cfg.NCpuMoe
+	}
+	return 0
+}
+
+// cpuResidentLayers counts the blocks a gpu-layers setting leaves on the host. It
+// is the dense half of the second copy a Mac load pays (hostWeightBytes prices it
+// alongside the experts --cpu-moe pins to the host). Measured with phys_footprint
 // (the dirty, non-reclaimable half) on the M2 at ctx 8192 and ubatch 512, every
 // CPU-resident layer adds its own weight bytes again - the 36-layer 4B Q4_K_M
 // (2381 MiB of weights, 66.1 MiB per layer) grew its dirty memory by 608 MiB with
