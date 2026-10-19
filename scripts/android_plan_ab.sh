@@ -34,6 +34,11 @@ OUT=${OUT:-/tmp/plan-ab}
 LOG=/data/local/tmp/srv-$LABEL.log
 mkdir -p "$OUT"
 
+# Stop the server by pid, not by pkill -f: the pkill pattern matches the invoking
+# `adb shell` command line itself, so the remote shell kills itself and the caller
+# gets empty output plus a lingering server.
+stop_server() { adb shell "p=\$(pidof llama-server); [ -n \"\$p\" ] && kill \$p; true" 2>/dev/null; }
+
 # The app's direct-mode CPU plan for a 4B Q4 on an Exynos 1080 (see
 # core/preset.go modelDirectArgs: GPU offload stripped, threads capped at the
 # performance cores). Only --ctx-size and --cache-ram vary per arm.
@@ -41,7 +46,7 @@ ARGS="--host 127.0.0.1 --port 8080 -m $MODEL --alias Qwen3-4B --ctx-size $CTX \
 --batch-size 2048 --ubatch-size 512 --threads 4 --ctx-checkpoints 0 --gpu-layers 0 \
 --cont-batching --no-webui --cache-ram $CACHERAM"
 
-adb shell "pkill -f llama-server" 2>/dev/null
+stop_server
 sleep 3
 adb shell "rm -f $LOG"
 
@@ -80,12 +85,25 @@ adb forward tcp:18080 tcp:8080 >/dev/null
       cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq /sys/devices/system/cpu/cpu4/cpufreq/scaling_cur_freq /sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq /sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq" \
       | tr -s ' \n' ' '
     echo
+    # One line per tick: "<tid> <utime+stime jiffies> <last-run cpu>;" for every
+    # thread. Read together across ticks this gives CPU-time-weighted core
+    # placement: a thread's runtime delta lands on the core it reports, so
+    # threads that are simply parked contribute ~nothing. (Field 39 of stat is
+    # the last CPU it ran on; a single sample of it says nothing, because an
+    # idle worker still reports the core it fell asleep on - see the 2026-10-18
+    # note in docs/design/autotune.md.)
+    adb shell "p=\$(pidof llama-server); [ -n \"\$p\" ] || exit 0;
+      for t in /proc/\$p/task/*; do tid=\${t##*/};
+        awk -F') ' -v t=\$tid '{split(\$2,a,\" \"); printf t\" \"a[12]+a[13]\" \"a[37]\";\"}' \$t/stat 2>/dev/null;
+      done; echo" >> "$OUT/$LABEL-threads.txt"
     sleep 4
   done > "$OUT/$LABEL-sample.txt"
 ) &
 SAMP=$!
 
 sleep 5
+# The placement analyzer pairs samples within this run only, so start clean.
+rm -f "$OUT/$LABEL-threads.txt"
 python3 - "$LABEL" "$OUT/$LABEL-work.txt" <<'PY'
 import json, random, string, sys, time, urllib.error, urllib.request
 
@@ -148,12 +166,13 @@ PY
 kill $SAMP 2>/dev/null
 
 sleep 10
-adb shell "pkill -f llama-server" 2>/dev/null
+stop_server
 sleep 3
 adb shell "cat $LOG" > "$OUT/$LABEL-srv.log" 2>/dev/null
 
-echo "--- $LABEL RSS samples (MiB) / min avail / cpufreq ceiling"
-python3 - "$OUT/$LABEL-sample.txt" <<'PY'
+echo "--- $LABEL RSS samples (MiB) / min avail / cpufreq ceiling / core placement"
+python3 - "$OUT/$LABEL-sample.txt" "$OUT/$LABEL-threads.txt" <<'PY'
+import os
 import sys
 
 rss, avail, cur0, cur4, cur7, max4 = [], [], [], [], [], []
@@ -179,6 +198,34 @@ if rss:
         line += (f" cpuMHz med(cur0/cur4/cur7)={med(cur0)}/{med(cur4)}/{med(cur7)}"
                  f" min_big={min(cur7)} ceiling_big={med(max4)}")
     print(line)
+
+# CPU-time-weighted placement: each thread's runtime delta between two ticks is
+# charged to the core it reports on the later tick, so parked threads drop out
+# and the result answers "where did the compute actually happen".
+if os.path.exists(sys.argv[2]):
+    ticks = []
+    for line in open(sys.argv[2]):
+        cur = {}
+        for item in line.strip().split(";"):
+            f = item.split()
+            if len(f) == 3 and f[1].isdigit() and f[2].isdigit():
+                cur[f[0]] = (int(f[1]), int(f[2]))
+        if cur:
+            ticks.append(cur)
+    core_ms = {}
+    for prev, nxt in zip(ticks, ticks[1:]):
+        for tid, (run, core) in nxt.items():
+            if tid in prev:
+                d = run - prev[tid][0]
+                if 0 < d < 500:  # jiffies per tick; >=500 would be >5 cores busy
+                    core_ms[core] = core_ms.get(core, 0) + d
+    total = sum(core_ms.values())
+    if total:
+        share = sorted(((c, 100.0 * ms / total) for c, ms in core_ms.items()),
+                       key=lambda x: -x[1])
+        big = sum(p for c, p in share if int(c) >= 4)
+        print("cores(jiffies-weighted): " + " ".join(f"cpu{c}={p:.0f}%" for c, p in share)
+              + f" | perf_cluster={big:.0f}% ticks={len(ticks)}")
 PY
 grep -E "prompt eval time|eval time =|graphs reused|slot.*n_ctx|model size|KV.*buffer" \
   "$OUT/$LABEL-srv.log" | tail -30
