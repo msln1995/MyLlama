@@ -13,6 +13,14 @@
 #
 # Single reads are worthless on this class of device — the same arm re-measured
 # 446s vs 590s wall clock — so run each arm at least twice and compare medians.
+#
+# The sampler also records each cluster's cpufreq, because it dominates the
+# numbers: this vivo caps all three clusters to ~1.15 GHz whenever the display is
+# off (2002/2600/2808 MHz with it on, 1170/1144/1144 with it off, at 31C — a
+# screen-state power policy, not heat), which is a 2.45x clock cut on the big
+# cores. Arms run with the screen off therefore measure a different machine from
+# arms run with it on, and the app's real condition is screen-on. Keep the screen
+# awake for comparable arms (adb shell svc power stayon true).
 
 set -u
 export PATH="$PATH:$HOME/Library/Android/sdk/platform-tools"
@@ -37,9 +45,18 @@ adb shell "pkill -f llama-server" 2>/dev/null
 sleep 3
 adb shell "rm -f $LOG"
 
+# Optional core pinning (CPUSET=<hex mask>, f0 = cpu4-7 the 2.6/2.8 GHz cluster,
+# 0f = cpu0-3 the 2.0 GHz cluster): the tuner emits --threads equal to the
+# performance-core count, but that is a thread count, not a placement promise -
+# the scheduler can still land those threads on the little cluster. Pinning is
+# how to tell the two effects apart. Android's toybox taskset takes a hex MASK,
+# not the util-linux "-c 4-7" list form.
+PREFIX=""
+if [ -n "${CPUSET:-}" ]; then PREFIX="taskset $CPUSET "; fi
+
 # adb shell never returns while the daemon holds the socket, so launch detached
 # locally and poll the server log instead of waiting on the command.
-( adb shell "cd $BIN && LD_LIBRARY_PATH=$BIN setsid nohup ./llama-server $ARGS > $LOG 2>&1 < /dev/null &" \
+( adb shell "cd $BIN && LD_LIBRARY_PATH=$BIN setsid nohup ${PREFIX}./llama-server $ARGS > $LOG 2>&1 < /dev/null &" \
   </dev/null >/dev/null 2>&1 & )
 
 for _ in $(seq 1 90); do
@@ -58,7 +75,9 @@ adb forward tcp:18080 tcp:8080 >/dev/null
 
 (
   while true; do
-    adb shell "ps -A -o RSS,NAME | grep llama-server | head -1; grep MemAvailable /proc/meminfo" \
+    adb forward tcp:18080 tcp:8080 >/dev/null 2>&1
+    adb shell "ps -A -o RSS,NAME | grep llama-server | head -1; grep MemAvailable /proc/meminfo;
+      cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq /sys/devices/system/cpu/cpu4/cpufreq/scaling_cur_freq /sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq /sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq" \
       | tr -s ' \n' ' '
     echo
     sleep 4
@@ -68,7 +87,7 @@ SAMP=$!
 
 sleep 5
 python3 - "$LABEL" "$OUT/$LABEL-work.txt" <<'PY'
-import json, random, string, sys, time, urllib.request
+import json, random, string, sys, time, urllib.error, urllib.request
 
 BASE = "http://127.0.0.1:18080"
 label, outfile = sys.argv[1], sys.argv[2]
@@ -84,15 +103,27 @@ def filler(n_words, seed):
 
 
 def chat(messages, max_tokens):
-    payload = {"model": "Qwen3-4B", "messages": messages, "max_tokens": max_tokens,
-               "temperature": 0.0, "stream": False}
-    req = urllib.request.Request(BASE + "/v1/chat/completions", data=json.dumps(payload).encode(),
-                                 headers={"Content-Type": "application/json"})
-    t0 = time.time()
-    with urllib.request.urlopen(req, timeout=1200) as r:
-        body = json.loads(r.read())
-    u = body.get("usage", {})
-    return u.get("prompt_tokens", 0), u.get("completion_tokens", 0), time.time() - t0
+    # The adb forward can drop mid-request (it closed two arms' first request
+    # without a response before this existed); the sampler re-asserts it every
+    # tick, so one retry after a gap covers the window. The retry is recorded in
+    # the work file so a retried rep is never mistaken for a clean timing read.
+    for attempt in range(3):
+        payload = {"model": "Qwen3-4B", "messages": messages, "max_tokens": max_tokens,
+                   "temperature": 0.0, "stream": False}
+        req = urllib.request.Request(BASE + "/v1/chat/completions",
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        t0 = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=1200) as r:
+                body = json.loads(r.read())
+        except (urllib.error.URLError, OSError) as exc:
+            out.write(f"retry {attempt + 1}: {type(exc).__name__}\n")
+            time.sleep(8)
+            continue
+        u = body.get("usage", {})
+        return u.get("prompt_tokens", 0), u.get("completion_tokens", 0), time.time() - t0
+    raise RuntimeError("three consecutive connection failures")
 
 
 out.write(f"# {label}\n")
@@ -121,21 +152,33 @@ adb shell "pkill -f llama-server" 2>/dev/null
 sleep 3
 adb shell "cat $LOG" > "$OUT/$LABEL-srv.log" 2>/dev/null
 
-echo "--- $LABEL RSS samples (MiB) / min avail"
+echo "--- $LABEL RSS samples (MiB) / min avail / cpufreq ceiling"
 python3 - "$OUT/$LABEL-sample.txt" <<'PY'
 import sys
 
-rss, avail = [], []
+rss, avail, cur0, cur4, cur7, max4 = [], [], [], [], [], []
 for line in open(sys.argv[1]):
     parts = line.split()
-    if len(parts) >= 4 and parts[0].isdigit():
-        rss.append(int(parts[0]) // 1024)
-        for i, word in enumerate(parts):
-            if word.startswith("MemAvailable"):
-                avail.append(int(parts[i + 1]) // 1024)
+    if len(parts) < 4 or not parts[0].isdigit():
+        continue
+    rss.append(int(parts[0]) // 1024)
+    for i, word in enumerate(parts):
+        if word.startswith("MemAvailable") and i + 1 < len(parts):
+            avail.append(int(parts[i + 1]) // 1024)
+    # Trailing MHz readings (cur per cluster, then the big-cluster max); absent
+    # in samples taken before the probe existed.
+    tail = [int(w) for w in parts[-4:] if w.isdigit() and int(w) > 100000]
+    if len(tail) == 4:
+        cur0.append(tail[0] // 1000), cur4.append(tail[1] // 1000)
+        cur7.append(tail[2] // 1000), max4.append(tail[3] // 1000)
 if rss:
-    print(f"peak_rss_MiB={max(rss)} last_rss_MiB={rss[-1]} "
-          f"min_avail_MiB={min(avail) if avail else -1} n={len(rss)}")
+    line = (f"peak_rss_MiB={max(rss)} last_rss_MiB={rss[-1]} "
+            f"min_avail_MiB={min(avail) if avail else -1} n={len(rss)}")
+    if cur7:
+        med = lambda xs: sorted(xs)[len(xs) // 2]
+        line += (f" cpuMHz med(cur0/cur4/cur7)={med(cur0)}/{med(cur4)}/{med(cur7)}"
+                 f" min_big={min(cur7)} ceiling_big={med(max4)}")
+    print(line)
 PY
 grep -E "prompt eval time|eval time =|graphs reused|slot.*n_ctx|model size|KV.*buffer" \
   "$OUT/$LABEL-srv.log" | tail -30
