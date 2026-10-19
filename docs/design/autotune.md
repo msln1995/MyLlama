@@ -112,8 +112,8 @@ cpu-moe 方案细节：`GPULayers="all"` + `CPUMoe=true`（专家驻留系统 RA
 | `tuneOtherVRAMReserveMB` | 700 | AMD/其他预留 |
 | `tuneQ8KVSizeRatio` | 0.53125 | q8_0 KV = 8.5 bit/权重 ÷ f16 的 16 bit |
 | `tuneRuntimeOverheadMB` / `tuneRuntimeOverheadUBatch` | 1280 @ 512 | 既非权重也非 KV 的运行开销（批计算缓冲、图 scratch、采样器内存），随 ubatch 线性过原点。CPU-only/安卓口径：Exynos 1080 上 4.17 GB 模型在 ctx 4096/32768 的绝对残差 1.19/1.10 GB，M2 的 `-ngl 0` 同量级 |
-| `tuneMetalRuntimeOverheadMB` | 320 @ 512 | 同一项在 Apple Metal 计划上的口径：M2 实测 RSS 减权重减 f16 KV = +149/+186（4B Q4_K_M ctx 8192 配对复测）、+185（同模型 ctx 32768）、+160（0.6B ctx 8192）、+302（ubatch 2048），取最大读数的 1.7 倍向上取整。层与缓存全在 GPU 侧，没有 CPU 计算图再持有批缓冲，所以它是 1280 的四分之一 |
-| 形状选择（`core/memfit.go` 的 `loadRuntimeOverheadBytes`） | darwin + Apple GPU + `gpu-layers ≠ 0` | 计划、启动守卫、超卖告警与前端估算共用的判定链：只有真正跑在 Metal 上的加载按 320 计价；显式 `-ngl 0` 的 Mac 加载仍按 1280 |
+| `tuneMetalRuntimeOverheadMB` | 320 @ 512 | 同一项在 Apple Metal 计划上的口径：M2 实测 RSS 减权重减 f16 KV = +149/+186（4B Q4_K_M ctx 8192 配对复测）、+185（同模型 ctx 32768）、+160（0.6B ctx 8192）、+302（ubatch 2048），取最大读数的 1.7 倍向上取整。层与缓存全在 GPU 侧，没有 CPU 计算图再持有批缓冲，所以它是 1280 的四分之一。这一项跟的是「留在 CPU 上的层数」而非芯片：同一 36 层 4B（ctx 8192、ubatch 512）配对实测 `-ngl 99` +141/+142、`-ngl 27` +727/+728、`-ngl 18` +1232/+1234、`-ngl 0` +2504，约每层 63 MiB，所以不足全卸载就按 CPU 口径计价（宁可对 30/36 这类拆分多算几百 MiB） |
+| 形状选择（`core/memfit.go` 的 `loadRuntimeOverheadBytes`） | darwin + Apple GPU + 每层都卸载 | 计划、启动守卫、超卖告警与前端估算共用的判定链：只有真正跑在 Metal 上的加载按 320 计价。`'' / auto / all` 与「数值 ≥ 模型层数」算全卸载；`-ngl 0` 与任何部分卸载都按 1280。层数来自 `ModelInfo.Layers`（`tuneLayerCount`，读不到 header 时兜底 32），前端 `servesFromAppleMetal` 是同一条规则 |
 | `tuneComputeBufBaseMB` | 384 | 计算缓冲（logits + 激活工作区）基线 |
 | `tuneComputeBufLargeMB` | +256 @ ctx≥16384 | 长上下文追加 |
 | `tuneComputeBufHugeMB` | +512 @ ctx≥65536 | 巨上下文再追加（超线性增长） |

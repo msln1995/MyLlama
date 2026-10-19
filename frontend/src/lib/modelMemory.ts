@@ -65,6 +65,14 @@ export const RUNTIME_OVERHEAD_METAL_BYTES_AT_512 = 320 * 1024 * 1024
 export const OVERHEAD_REFERENCE_UBATCH = 512
 
 /**
+ * Layer count the backend assumes for a model whose GGUF header could not be
+ * read (core/autotune.go's tuneLayerCount). The frontend prices a load with the
+ * scanned model's own count and uses this only when the scan reported none, so
+ * the two sides still decide the reserve shape identically.
+ */
+export const TUNE_FALLBACK_LAYERS = 32
+
+/**
  * The app's context-checkpoint budget: llama-server may keep this many prompt
  * checkpoints resident, each a copy of the model's sliding-window cache
  * (11.0 MiB measured per checkpoint for gemma-3-1b Q4_K_M on the M2 against
@@ -116,15 +124,23 @@ export interface MemoryEstimateInput {
   /** Running on Android, where every plan turns checkpoints off as a platform rule. */
   isAndroid: boolean
   /**
-   * The configured GPU layer count as written ('' / 'auto' = emit nothing,
-   * '0' = CPU-only run). Only read together with appleMetalServing: a load that
-   * runs the CPU graph pays the CPU reserve even on a Mac.
+   * The configured GPU layer count as written ('' / 'auto' / 'all' = offload
+   * every layer, a number = that many). Read together with appleMetalServing and
+   * modelLayers: the reserve follows the layers the host still computes.
    */
   gpuLayers: string
   /**
-   * macOS with an Apple GPU serving, the two signals the backend guard reads for
-   * the Metal-shaped reserve (core/memfit.go's loadRuntimeOverheadBytes). False
-   * everywhere else, so the reserve stays the phone/CPU measurement.
+   * Model's block count from the scan (0 = unknown, which falls back to
+   * {@link TUNE_FALLBACK_LAYERS}, the same figure the backend guard assumes).
+   * A numeric gpu-layers is compared against it to tell full offload from a
+   * partial one.
+   */
+  modelLayers: number
+  /**
+   * macOS with an Apple GPU serving, the platform half of what the backend guard
+   * reads for the Metal-shaped reserve (core/memfit.go's
+   * loadRuntimeOverheadBytes). False everywhere else, so the reserve stays the
+   * phone/CPU measurement.
    */
   appleMetalServing: boolean
   /** Total system memory in bytes (0 = probe unavailable). */
@@ -204,9 +220,8 @@ export function kvCacheTypeFactor(cacheType: string): number {
  * runs when the form has no value yet.
  *
  * `metal` switches to the Apple-silicon measurement of the same term. The
- * caller decides with {@link servesFromAppleMetal} — the same two signals the
- * backend's loadRuntimeOverheadBytes reads (platform plus serving GPU, and
- * whether the config pinned the layers back to the CPU).
+ * caller decides with {@link servesFromAppleMetal} — the platform, the serving
+ * GPU, and whether the config leaves any layer on the CPU.
  */
 export function runtimeOverheadBytes(ubatchSize: number, metal = false): number {
   const base = metal ? RUNTIME_OVERHEAD_METAL_BYTES_AT_512 : RUNTIME_OVERHEAD_BYTES_AT_512
@@ -218,12 +233,25 @@ export function runtimeOverheadBytes(ubatchSize: number, metal = false): number 
  * Whether a load is priced in the Metal shape: `appleMetalServing` is the
  * caller's answer for macOS with an Apple GPU serving (the two signals the
  * backend reads — see core/memfit.go's loadRuntimeOverheadBytes), and the
- * config must not have pinned every layer back to the CPU with gpu-layers 0.
- * An unset gpu-layers counts as Metal — the preset then emits no -ngl flag, and
- * llama-server's own default on Apple silicon is full offload.
+ * config has to leave no layer on the CPU. The reserve is not a property of the
+ * chip but of the layers the host still computes: on the M2 with a 36-layer 4B
+ * Q4_K_M, full offload added +141 MiB to RSS, -ngl 27 (9 layers on the CPU)
+ * +727, -ngl 18 +1232 and -ngl 0 +2504 — ~63 MiB per CPU-resident layer, so
+ * anything short of full offload pays the CPU-only figure.
+ *
+ * '' / 'auto' / 'all' are the full-offload spellings (the first two emit no
+ * -ngl flag, whose server-side default here is full offload). A number counts
+ * only against a known layer count; a model the scan could not price falls back
+ * to the backend guard's own 32-layer figure, never to a silent "unknown means
+ * Metal".
  */
-export function servesFromAppleMetal(appleMetalServing: boolean, gpuLayers: string): boolean {
-  return appleMetalServing && (gpuLayers || '').trim() !== '0'
+export function servesFromAppleMetal(appleMetalServing: boolean, gpuLayers: string, modelLayers: number): boolean {
+  if (!appleMetalServing) return false
+  const value = (gpuLayers || '').trim()
+  if (value === '' || value === 'auto' || value === 'all') return true
+  const layers = Number.isFinite(modelLayers) && modelLayers > 0 ? Math.floor(modelLayers) : TUNE_FALLBACK_LAYERS
+  const n = Number(value)
+  return Number.isInteger(n) && n >= layers
 }
 
 /**
@@ -293,7 +321,10 @@ export function estimateMemory(input: MemoryEstimateInput): MemoryEstimate {
   // without a subject, and the rows keyed off the total drop instead.
   const overheadBytes =
     weightsBytes > 0 || kvBytes > 0
-      ? runtimeOverheadBytes(input.ubatchSize, servesFromAppleMetal(input.appleMetalServing, input.gpuLayers))
+      ? runtimeOverheadBytes(
+          input.ubatchSize,
+          servesFromAppleMetal(input.appleMetalServing, input.gpuLayers, input.modelLayers)
+        )
       : 0
   const totalBytes = weightsBytes + kvBytes + checkpointBytes + overheadBytes
   const availableBytes = input.freeMemBytes > 0 ? input.freeMemBytes : input.totalMemBytes > 0 ? input.totalMemBytes : 0

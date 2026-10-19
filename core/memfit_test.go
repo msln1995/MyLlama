@@ -298,19 +298,14 @@ func TestModelLoadBytes(t *testing.T) {
 	}
 }
 
-// TestCtxCheckpointBytes pins the checkpoint term's formula and its switches on
-// the measured gemma-3-1b geometry (26 layers, 1 KV head of 256-dim key and
-// value = 1024 B of f16 cache per layer per token, 512-token window): each
-// checkpoint the server logged for that model was 11.006 MiB, matching 22 window
-// layers, while this term prices all 26 (13.0 MiB) — the 18% over-charge a
-// start-time budget wants in its error direction.
 // TestLoadRuntimeOverheadBytesShape pins which reserve a load is charged. The
-// Metal figure is only for the load that actually runs on Metal: macOS plus an
-// Apple serving GPU plus a config that did not pin the layers back to the CPU.
-// Everything else pays the CPU-only measurement, including a Mac that asks for
-// -ngl 0 (the CPU graph holds the batch buffers, so so does its RSS step) and a
-// non-macOS host whose GPU probe happens to answer apple — the reserve is a
-// property of the code path the load takes, not of the chip alone.
+// Metal figure is only for the load that actually runs all of its layers on
+// Metal: macOS, an Apple serving GPU and a gpu-layers setting that reaches the
+// model's block count. Everything else pays the CPU-only measurement, including
+// a partial offload (the CPU graph holds the batch buffers for the layers it
+// still computes, so its RSS step grows with them), a Mac that asks for -ngl 0,
+// and a non-macOS host whose GPU probe happens to answer apple — the reserve is
+// a property of the code path the load takes, not of the chip alone.
 func TestLoadRuntimeOverheadBytesShape(t *testing.T) {
 	const mib = int64(1 << 20)
 	cases := []struct {
@@ -318,26 +313,37 @@ func TestLoadRuntimeOverheadBytesShape(t *testing.T) {
 		goos      string
 		vendor    string
 		gpuLayers string
+		layers    int
 		ubatch    int
 		wantMB    int64
 	}{
-		{"metal auto", "darwin", vendorApple, "auto", 512, 320},
-		{"metal all", "darwin", vendorApple, "all", 512, 320},
-		{"metal partial", "darwin", vendorApple, "12", 512, 320},
+		{"metal auto", "darwin", vendorApple, "auto", 36, 512, 320},
+		{"metal all", "darwin", vendorApple, "all", 36, 512, 320},
 		// An unset value emits no -ngl flag, and llama-server's own default on
 		// Apple silicon is full offload (measured: the RSS grows by the f16 KV
 		// geometry with no flag at all), so it is the Metal shape too.
-		{"metal default", "darwin", vendorApple, "", 512, 320},
-		{"metal explicit cpu", "darwin", vendorApple, "0", 512, 1280},
-		{"mac with a cuda card", "darwin", "nvidia", "all", 512, 1280},
-		{"linux probing apple", "linux", vendorApple, "all", 512, 1280},
-		{"android probing apple", "android", vendorApple, "all", 512, 1280},
-		{"windows cpu only", "windows", vendorNone, "0", 512, 1280},
+		{"metal default", "darwin", vendorApple, "", 36, 512, 320},
+		// The measured layer-by-layer step: 9 of 36 layers left on the CPU costs
+		// +727 MiB over the offloaded run, 18 of them +1232 MiB.
+		{"metal exact layer count", "darwin", vendorApple, "36", 36, 512, 320},
+		{"metal over-count", "darwin", vendorApple, "99", 36, 512, 320},
+		{"partial 27 of 36", "darwin", vendorApple, "27", 36, 512, 1280},
+		{"partial 18 of 36", "darwin", vendorApple, "18", 36, 512, 1280},
+		{"metal explicit cpu", "darwin", vendorApple, "0", 36, 512, 1280},
+		// A number cannot be compared against a model whose geometry was never
+		// read; the guard's 32-layer fallback decides, so "unknown" is not a free
+		// pass to the cheaper figure.
+		{"number, 32-layer fallback", "darwin", vendorApple, "20", 32, 512, 1280},
+		{"garbage setting", "darwin", vendorApple, "half", 36, 512, 1280},
+		{"mac with a cuda card", "darwin", "nvidia", "all", 36, 512, 1280},
+		{"linux probing apple", "linux", vendorApple, "all", 36, 512, 1280},
+		{"android probing apple", "android", vendorApple, "all", 36, 512, 1280},
+		{"windows cpu only", "windows", vendorNone, "0", 36, 512, 1280},
 		// The ubatch scaling is the same law on both shapes.
-		{"metal at 1024", "darwin", vendorApple, "all", 1024, 640},
-		{"metal at 2048", "darwin", vendorApple, "all", 2048, 1280},
-		{"metal ubatch unset", "darwin", vendorApple, "all", 0, 320},
-		{"cpu at 2048", "linux", vendorNone, "0", 2048, 5120},
+		{"metal at 1024", "darwin", vendorApple, "all", 36, 1024, 640},
+		{"metal at 2048", "darwin", vendorApple, "all", 36, 2048, 1280},
+		{"metal ubatch unset", "darwin", vendorApple, "all", 36, 0, 320},
+		{"cpu at 2048", "linux", vendorNone, "0", 36, 2048, 5120},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -345,18 +351,19 @@ func TestLoadRuntimeOverheadBytesShape(t *testing.T) {
 			platformGOOS = tt.goos
 			t.Cleanup(func() { platformGOOS = orig })
 			got := loadRuntimeOverheadBytes(ModelConfig{GPULayers: tt.gpuLayers, UBatchSize: tt.ubatch},
-				tuneTarget{Vendor: tt.vendor})
+				tuneTarget{Vendor: tt.vendor}, tt.layers)
 			if got != tt.wantMB*mib {
-				t.Errorf("loadRuntimeOverheadBytes(%s, %s, gpuLayers %q, ubatch %d) = %d MiB, want %d",
-					tt.goos, tt.vendor, tt.gpuLayers, tt.ubatch, got/mib, tt.wantMB)
+				t.Errorf("loadRuntimeOverheadBytes(%s, %s, gpuLayers %q, layers %d, ubatch %d) = %d MiB, want %d",
+					tt.goos, tt.vendor, tt.gpuLayers, tt.layers, tt.ubatch, got/mib, tt.wantMB)
 			}
 		})
 	}
 }
 
 // TestMetalReserveBuysContext is the user-visible half of the Metal shape: the
-// same 4 GiB model with a 131072-token window is 960 MiB cheaper to plan on a
-// Mac, which the router's prompt-cache budget hands straight back.
+// same 4 GiB model at ctx 8192 is 960 MiB cheaper to plan on a Mac, which the
+// router's prompt-cache budget hands straight back — and only while the plan
+// offloads every one of the fixture's 36 layers.
 func TestMetalReserveBuysContext(t *testing.T) {
 	dir := t.TempDir()
 	path := writeMemfitGGUF(t, dir)
@@ -376,6 +383,24 @@ func TestMetalReserveBuysContext(t *testing.T) {
 		t.Errorf("metal load is %d MiB cheaper, want %d (the reserve difference at this ubatch)",
 			diff/(1<<20), (tuneRuntimeOverheadMB - tuneMetalRuntimeOverheadMB))
 	}
+	// A split that leaves any layer on the CPU is not the Metal shape: measured on
+	// the M2 with this model's 36-layer Q4_K_M, -ngl 27 cost +727 MiB and -ngl 18
+	// +1232 MiB over the offloaded run, i.e. above the CPU figure entirely.
+	for _, gpuLayers := range []string{"0", "27", "18", "35"} {
+		split := modelLoadBytes(m, ModelConfig{CtxSize: 8192, GPULayers: gpuLayers, UBatchSize: 512})
+		if split != cpu {
+			t.Errorf("-ngl %s load = %d MiB, want the CPU-shaped %d",
+				gpuLayers, split/(1<<20), cpu/(1<<20))
+		}
+	}
+	// Covering the block count exactly is the Metal shape, over-counting too.
+	for _, gpuLayers := range []string{"36", "99", "auto", ""} {
+		offloaded := modelLoadBytes(m, ModelConfig{CtxSize: 8192, GPULayers: gpuLayers, UBatchSize: 512})
+		if offloaded != metal {
+			t.Errorf("-ngl %q load = %d MiB, want the Metal-shaped %d",
+				gpuLayers, offloaded/(1<<20), metal/(1<<20))
+		}
+	}
 	// The saved reserve is free memory as far as the budget is concerned, so the
 	// router retains more prompt cache with the same model loaded.
 	const avail = int64(6 << 30)
@@ -386,6 +411,12 @@ func TestMetalReserveBuysContext(t *testing.T) {
 	}
 }
 
+// TestCtxCheckpointBytes pins the checkpoint term's formula and its switches on
+// the measured gemma-3-1b geometry (26 layers, 1 KV head of 256-dim key and
+// value = 1024 B of f16 cache per layer per token, 512-token window): each
+// checkpoint the server logged for that model was 11.006 MiB, matching 22 window
+// layers, while this term prices all 26 (13.0 MiB) — the 18% over-charge a
+// start-time budget wants in its error direction.
 func TestCtxCheckpointBytes(t *testing.T) {
 	const (
 		perTok   = int64(26 * 1024)

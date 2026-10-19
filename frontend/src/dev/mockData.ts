@@ -126,7 +126,12 @@ const IMPORT_DIR = 'C:\\Users\\demo\\Imported-Models'
 // path (lib/modelMemory.ts's KV_BYTES_PER_TOKEN_F16) rather than only the real
 // geometry. No entry carries swaWindow: all four are plain-attention
 // architectures (qwen2/qwen3/llama), which is the real 0 — nothing to
-// checkpoint (the binding defaults the field to 0).
+// checkpoint (the binding defaults the field to 0). The `layers` counts are the
+// block counts those architectures really have (they match each entry's own
+// per-token KV geometry), so the preview can show a Mac reserving the Metal
+// figure for 'all' and the CPU figure for a numeric partial offload; the entry
+// with no geometry carries the backend's own 32-layer fallback (core/autotune.go's
+// tuneLayerCount), which is what the guard prices such a model with.
 const models: any[] = [
   {
     author: '',
@@ -137,6 +142,7 @@ const models: any[] = [
     architecture: 'qwen3',
     quantization: 'Q4_K_M',
     kvBytesPerTokenF16: 36 * 4096,
+    layers: 36,
     // One vision-capable entry so `npm run dev:mock` exercises the chat page's
     // mmproj gating (attach enabled) and My Models' badge instead of a flat all-false list
     hasMmproj: true,
@@ -156,6 +162,7 @@ const models: any[] = [
     architecture: 'qwen2',
     quantization: 'Q4_K_M',
     kvBytesPerTokenF16: 28 * 2048,
+    layers: 28,
     hasMmproj: false,
     sourceDir: config.modelDownloadDir,
     alias: 'Qwen2.5-Coder-7B-Instruct-Q4_K_M',
@@ -169,6 +176,7 @@ const models: any[] = [
     architecture: 'llama',
     quantization: 'Q5_K_M',
     kvBytesPerTokenF16: 28 * 4096,
+    layers: 28,
     hasMmproj: false,
     sourceDir: IMPORT_DIR,
     alias: 'Llama-3.2-3B-Instruct-Q5_K_M',
@@ -184,6 +192,7 @@ const models: any[] = [
     // The scan publishes 0 for a model it could not price; the estimate then
     // uses the fallback constant, so the preview shows both paths.
     kvBytesPerTokenF16: 0,
+    layers: 32,
     hasMmproj: false,
     sourceDir: IMPORT_DIR,
     alias: 'TinyLlama-1.1B-Chat-v1.0-Q8_0',

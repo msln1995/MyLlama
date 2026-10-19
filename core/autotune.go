@@ -521,6 +521,20 @@ func kvCacheLayers(m modelMetrics) int {
 	return m.BlockCount
 }
 
+// tuneLayerCount is the model's block count with the same unreadable-header
+// fallback buildTuneModel uses (32), so a client pricing a load reads the layer
+// count the tuner did. It is what decides the reserve shape of a partial
+// offload on Apple silicon (core/memfit.go's offloadsEveryLayer).
+func tuneLayerCount(m modelMetrics, ok bool) int {
+	if !ok {
+		return 32
+	}
+	if m.BlockCount <= 0 {
+		return 32
+	}
+	return m.BlockCount
+}
+
 // tuneKVBytesPerTokenF16 is the f16 KV cost of one token across every
 // KV-bearing layer of the model - the same product buildTuneModel prices its
 // context ladder with (KVBytesPerTokPerLayerF16 x Layers, including the
@@ -667,10 +681,7 @@ func buildTuneModel(m modelMetrics, ok bool, weightsBytes int64) tuneModel {
 			DenseBytes:               weightsBytes,
 		}
 	}
-	layers := m.BlockCount
-	if layers <= 0 {
-		layers = 32
-	}
+	layers := tuneLayerCount(m, ok)
 	trainCtx := m.ContextLength
 	if trainCtx <= 0 {
 		trainCtx = 32768

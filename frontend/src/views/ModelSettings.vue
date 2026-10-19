@@ -540,12 +540,14 @@ const modelSizeBytes = ref(0)
 const modelMMProjBytes = ref(0)
 const modelKVBytesPerToken = ref(0)
 const modelSwaWindow = ref(0)
+const modelLayers = ref(0)
 const sysTotalBytes = ref(0)
 const sysFreeBytes = ref(0)
-// macOS with an Apple GPU serving: the two signals the backend's memory guard
-// reads to charge a load the Metal-shaped runtime reserve instead of the
-// CPU-only one (core/memfit.go's loadRuntimeOverheadBytes). Captured with the
-// same hardware snapshot as the memory figures.
+// macOS with an Apple GPU serving: with the model's block count and the
+// configured gpu-layers this is what the backend's memory guard reads to charge a
+// load the Metal-shaped runtime reserve instead of the CPU-only one
+// (core/memfit.go's loadRuntimeOverheadBytes). Captured with the same hardware
+// snapshot as the memory figures.
 const appleMetalServing = ref(false)
 
 const memoryEstimate = computed(() =>
@@ -561,6 +563,7 @@ const memoryEstimate = computed(() =>
     ctxCheckpointsOff: !!cfg.ctxCheckpointsOff,
     isAndroid: platformState.value.isAndroid,
     gpuLayers: cfg.gpuLayers,
+    modelLayers: modelLayers.value,
     appleMetalServing: appleMetalServing.value,
     totalMemBytes: sysTotalBytes.value,
     freeMemBytes: sysFreeBytes.value,
@@ -595,18 +598,28 @@ const summaryRows = computed(() =>
   )
 )
 
-/** Look up the model's scanned GGUF size, projector size, per-token KV geometry
-    and sliding-window length (the estimate's weights, KV and checkpoint terms).
-    All stay 0 when the scan has no entry for this model, which is what the
-    estimate reads as unknown. */
+/** The scan fields the memory estimate reads for one model (all optional: the
+    binding's rows are matched by name, and a model the scan does not list has
+    none of them). */
+interface ScannedModelTerms {
+  name?: string
+  sizeBytes?: number
+  mmprojBytes?: number
+  kvBytesPerTokenF16?: number
+  swaWindow?: number
+  layers?: number
+}
+
+/** Look up the model's scanned GGUF size, projector size, per-token KV geometry,
+    sliding-window length and block count (the estimate's weights, KV,
+    checkpoint and reserve-shape terms). The size/geometry fields stay 0 when the
+    scan has no entry for this model, which is what the estimate reads as
+    unknown. */
 async function lookupModelTerms() {
   const name = decodedModelName.value
   if (!name) return
   try {
-    const found = (await getModels()).find(
-      (m: { name?: string; sizeBytes?: number; mmprojBytes?: number; kvBytesPerTokenF16?: number; swaWindow?: number }) =>
-        m?.name === name
-    )
+    const found = (await getModels()).find((m: ScannedModelTerms) => m?.name === name)
     const size = Number(found?.sizeBytes)
     modelSizeBytes.value = size > 0 ? size : 0
     const mmproj = Number(found?.mmprojBytes)
@@ -619,6 +632,12 @@ async function lookupModelTerms() {
     // nothing to checkpoint (core/memfit.go's ctxCheckpointBytes charges it 0).
     const window = Number(found?.swaWindow)
     modelSwaWindow.value = window > 0 ? window : 0
+    // The block count decides whether a numeric gpu-layers offloads everything,
+    // which is what picks the reserve shape on a Mac (core/memfit.go's
+    // offloadsEveryLayer). 0 = never scanned; the estimate then assumes the
+    // backend's own fallback count, so both sides price the same load the same.
+    const layers = Number(found?.layers)
+    modelLayers.value = layers > 0 ? layers : 0
   } catch {
     // Model scan unavailable (e.g. standalone preview): leave 0 — the summary
     // then honestly omits the estimate rows instead of showing a guess.

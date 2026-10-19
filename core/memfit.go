@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"sort"
+	"strconv"
 )
 
 // ─── Memory fit pre-check (direct mode) ───────────────────────────
@@ -138,14 +139,13 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 		total += int64(kv * kvCacheSizeFactor(cfg))
 	}
 	total += ctxCheckpointBytes(tm, cfg)
-	return total + loadRuntimeOverheadBytes(cfg, probeServingGPU())
+	return total + loadRuntimeOverheadBytes(cfg, probeServingGPU(), tm.Layers)
 }
 
 // loadRuntimeOverheadBytes is the non-weight, non-KV reserve term of
 // modelLoadBytes, taken in the shape the load actually runs: the Metal
-// measurement when llama-server serves this on Apple silicon's unified GPU and
-// the plan has not pinned the model to the CPU, the CPU-only (phone-measured)
-// figure otherwise.
+// measurement when llama-server serves this on Apple silicon's unified GPU with
+// every layer offloaded, the CPU-only (phone-measured) figure otherwise.
 //
 // The serving GPU is the same cached probe the over-commit warning next to it
 // reads (probeServingGPU, one detection chain per process), so the two memory
@@ -159,13 +159,37 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 // this term prices (+141 MiB beyond weights + f16 KV for a 4B Q4_K_M at ctx 4096,
 // against +2585 MiB of RSS with -ngl 0, most of which is the model's own file
 // pages - and those the available-memory probe this term is compared against
-// counts as reclaimable). Only an explicit gpu-layers 0 asks for the CPU shape,
-// and tuneRuntimeOverheadMB is what that shape measures.
-func loadRuntimeOverheadBytes(cfg ModelConfig, serving tuneTarget) int64 {
-	if platformGOOS == "darwin" && serving.Vendor == vendorApple && cfg.GPULayers != "0" {
+// counts as reclaimable). What that residual tracks is the layers the host still
+// computes, so the shape follows offloadsEveryLayer rather than the mere absence
+// of a -ngl 0.
+func loadRuntimeOverheadBytes(cfg ModelConfig, serving tuneTarget, layers int) int64 {
+	if platformGOOS == "darwin" && serving.Vendor == vendorApple && offloadsEveryLayer(cfg.GPULayers, layers) {
 		return metalRuntimeOverheadBytes(cfg.UBatchSize)
 	}
 	return runtimeOverheadBytes(cfg.UBatchSize)
+}
+
+// offloadsEveryLayer reports whether a gpu-layers setting leaves no layer on the
+// CPU, which is what decides the reserve shape on Apple silicon. The term is not a
+// property of the chip - it tracks the layers the host still computes, measured on
+// the M2 with a 36-layer 4B Q4_K_M at ctx 8192 and ubatch 512 (paired runs):
+// -ngl 99 +141/+142, -ngl 27 (9 layers on the CPU) +727/+728, -ngl 18 +1232/+1234,
+// -ngl 0 +2504. Roughly 63 MiB per CPU-resident layer on top of the ~140 the GPU
+// run keeps, so anything short of full offload pays the CPU figure; that
+// over-charges a 30-of-36 layer split by a few hundred MiB, which is the safe
+// direction for a reserve.
+//
+// "" / "auto" / "all" are the full-offload spellings (the first two emit no -ngl
+// flag, whose server-side default is full offload here). A number counts only when
+// the model's layer count is known and it reaches it - so an unreadable header's
+// fallback count (32) decides, never a silent "unknown means Metal".
+func offloadsEveryLayer(gpuLayers string, layers int) bool {
+	switch gpuLayers {
+	case "", "auto", "all":
+		return true
+	}
+	n, err := strconv.Atoi(gpuLayers)
+	return err == nil && layers > 0 && n >= layers
 }
 
 // fittingCtxRung is the advice half of the memory check: the largest tier of the

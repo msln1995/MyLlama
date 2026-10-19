@@ -65,6 +65,13 @@ type ModelInfo struct {
 	// model has no sliding-window layers (nothing is checkpointed) or the header
 	// was unreadable.
 	SwaWindow int `json:"swaWindow"`
+	// Layers is the model's block count, the same figure the auto-tuner uses (an
+	// unreadable header lands on its 32-layer fallback; 0 means "not scanned").
+	// It decides which runtime reserve a Mac load is priced at — the Metal
+	// measurement only once every layer is offloaded, the CPU measurement from
+	// there down (core/memfit.go's offloadsEveryLayer, with the measured layer by
+	// layer step) — so the model-settings estimate needs it to mirror the guard.
+	Layers int `json:"layers"`
 }
 
 var cachedModels []ModelInfo
@@ -362,6 +369,7 @@ func buildModelInfo(path, author, fallbackName string) ModelInfo {
 	// for "this model was never scanned").
 	mm, ok := readGGUFModelMetrics(path)
 	model.KVBytesPerTokenF16 = tuneKVBytesPerTokenF16(mm, ok)
+	model.Layers = tuneLayerCount(mm, ok)
 	// The sliding-window length needs no fallback: a header that does not carry
 	// the key describes a model without sliding-window layers, and 0 is exactly
 	// the "nothing to checkpoint" answer the guard prices with.

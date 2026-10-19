@@ -36,6 +36,9 @@ const BASE = {
   // CPU-shaped by default: no Apple GPU serving, so every assertion below keyed
   // on RUNTIME_OVERHEAD_BYTES_AT_512 prices the reserve the phone/CPU way.
   gpuLayers: 'auto',
+  // 0 = the scan published no block count; the reserve-shape helper then assumes
+  // the backend's own fallback layer count.
+  modelLayers: 0,
   appleMetalServing: false,
   totalMemBytes: 16 * GIB,
   freeMemBytes: Math.floor(9.4 * GIB),
@@ -215,7 +218,8 @@ describe('estimateMemory', () => {
       2 * RUNTIME_OVERHEAD_METAL_BYTES_AT_512
     )
     // Only a Mac with an Apple GPU gets it: the flag is the caller's answer for
-    // darwin + vendor apple, and the layer count must not pin the run to the CPU.
+    // darwin + vendor apple, and the layer count must not leave any layer on the
+    // CPU.
     expect(estimateMemory({ ...BASE, gpuLayers: '0', appleMetalServing: true }).overheadBytes).toBe(
       RUNTIME_OVERHEAD_BYTES_AT_512
     )
@@ -227,6 +231,15 @@ describe('estimateMemory', () => {
     expect(estimateMemory({ ...BASE, gpuLayers: '', appleMetalServing: true }).overheadBytes).toBe(
       RUNTIME_OVERHEAD_METAL_BYTES_AT_512
     )
+    // A partial offload is not: the same 36-layer model with 27 layers on the GPU
+    // measured +727 MiB of RSS beyond weights + KV (9 left on the CPU cost ~63
+    // MiB each on top of the offloaded run's +141), so it pays the CPU figure.
+    expect(estimateMemory({ ...BASE, gpuLayers: '27', modelLayers: 36, appleMetalServing: true }).overheadBytes).toBe(
+      RUNTIME_OVERHEAD_BYTES_AT_512
+    )
+    expect(estimateMemory({ ...BASE, gpuLayers: '36', modelLayers: 36, appleMetalServing: true }).overheadBytes).toBe(
+      RUNTIME_OVERHEAD_METAL_BYTES_AT_512
+    )
     // The cheaper term is real headroom: the same 4 GB-cheaper plan is what the
     // backend's router budget hands back as prompt cache.
     const cpu = estimateMemory({ ...BASE, appleMetalServing: false })
@@ -234,12 +247,25 @@ describe('estimateMemory', () => {
     expect(cpu.totalBytes - m.totalBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512 - RUNTIME_OVERHEAD_METAL_BYTES_AT_512)
   })
 
-  it('servesFromAppleMetal requires both the platform flag and an offloaded run', () => {
-    expect(servesFromAppleMetal(true, 'all')).toBe(true)
-    expect(servesFromAppleMetal(true, 'auto')).toBe(true)
-    expect(servesFromAppleMetal(true, '')).toBe(true)
-    expect(servesFromAppleMetal(true, '0')).toBe(false)
-    expect(servesFromAppleMetal(false, 'all')).toBe(false)
+  it('servesFromAppleMetal requires the platform flag and every layer offloaded', () => {
+    expect(servesFromAppleMetal(true, 'all', 36)).toBe(true)
+    expect(servesFromAppleMetal(true, 'auto', 36)).toBe(true)
+    expect(servesFromAppleMetal(true, '', 36)).toBe(true)
+    expect(servesFromAppleMetal(true, '0', 36)).toBe(false)
+    expect(servesFromAppleMetal(false, 'all', 36)).toBe(false)
+    // A number only reaches full offload when it covers the model's blocks.
+    expect(servesFromAppleMetal(true, '99', 36)).toBe(true)
+    expect(servesFromAppleMetal(true, '50', 36)).toBe(true)
+    expect(servesFromAppleMetal(true, '35', 36)).toBe(false)
+    expect(servesFromAppleMetal(true, '30', 36)).toBe(false)
+    // An unscanned model is priced with the backend's fallback count (32), never
+    // with a silent "unknown means Metal" - so 30 of an unknown model is partial.
+    expect(servesFromAppleMetal(true, '30', 0)).toBe(false)
+    expect(servesFromAppleMetal(true, '32', 0)).toBe(true)
+    expect(servesFromAppleMetal(true, '32', Number.NaN)).toBe(true)
+    // A non-numeric setting is not full offload either.
+    expect(servesFromAppleMetal(true, 'half', 36)).toBe(false)
+    expect(servesFromAppleMetal(true, ' 36 ', 36)).toBe(true)
   })
 
   it('a scanned model prices KV with its own GGUF geometry, not the constant', () => {

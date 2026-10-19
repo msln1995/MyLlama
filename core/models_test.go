@@ -251,7 +251,8 @@ func TestScanModelsDirGGUFMeta(t *testing.T) {
 // 0: the frontend reads 0 as "this model was never scanned". The same scan
 // publishes the sliding-window length, the other figure the checkpoint term needs
 // (core/memfit.go's ctxCheckpointBytes), where 0 is the real answer for a
-// plain-attention model rather than a missing one.
+// plain-attention model rather than a missing one, and the block count, which
+// picks a Mac load's runtime-reserve shape.
 func TestScanModelsDirCarriesKVGeometry(t *testing.T) {
 	base := t.TempDir()
 	hybridDir := filepath.Join(base, "acme", "with-geometry")
@@ -295,9 +296,11 @@ func TestScanModelsDirCarriesKVGeometry(t *testing.T) {
 	}
 	got := map[string]int64{}
 	windows := map[string]int{}
+	layers := map[string]int{}
 	for _, m := range models {
 		got[m.Name] = m.KVBytesPerTokenF16
 		windows[m.Name] = m.SwaWindow
+		layers[m.Name] = m.Layers
 	}
 	if got["with-geometry"] != 49152 {
 		t.Errorf("hybrid model KVBytesPerTokenF16 = %d, want 49152 (12 KV layers x 4096)", got["with-geometry"])
@@ -314,6 +317,18 @@ func TestScanModelsDirCarriesKVGeometry(t *testing.T) {
 	}
 	if windows["with-geometry"] != 0 {
 		t.Errorf("hybrid model SwaWindow = %d, want 0: no window means no checkpoints to price", windows["with-geometry"])
+	}
+	// The block count is the third published figure: it decides whether a
+	// numeric gpu-layers offloads every layer, and so which runtime reserve a Mac
+	// load is priced at (core/memfit.go's offloadsEveryLayer). The metadata-less
+	// model carries the tuner's 32-layer fallback, not 0 - the shape decision has
+	// to be made, never deferred to "unknown means the cheaper figure".
+	if layers["with-geometry"] != 36 || layers["sliding-window"] != 26 {
+		t.Errorf("published Layers = %d / %d, want 36 / 26",
+			layers["with-geometry"], layers["sliding-window"])
+	}
+	if layers["Name Only"] != 32 {
+		t.Errorf("metadata-less model Layers = %d, want the tuner fallback 32", layers["Name Only"])
 	}
 }
 
