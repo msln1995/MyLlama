@@ -50,6 +50,17 @@ export const KV_BYTES_PER_TOKEN_F16 = 128 * 1024
  */
 export const RUNTIME_OVERHEAD_BYTES_AT_512 = 1280 * 1024 * 1024
 
+/**
+ * The same reserve for a load Apple's Metal backend serves: measured on an M2
+ * as RSS minus weights minus the f16 KV geometry — +149 and +186 MiB for a 4B
+ * Q4_K_M at ctx 8192 (paired runs), +185 at ctx 32768, +160 for a 0.6B at
+ * ctx 8192, +302 at μBatch 2048 — rounded up to 320 (1.7x the largest reading).
+ * With every layer and the whole cache on the GPU there is no CPU graph left to
+ * hold buffers, which is why a Mac gets a quarter of the phone's figure. The
+ * frontend mirror of core/autotune.go's `tuneMetalRuntimeOverheadMB`.
+ */
+export const RUNTIME_OVERHEAD_METAL_BYTES_AT_512 = 320 * 1024 * 1024
+
 /** The μBatch the overhead constant is priced at (also llama-server's default). */
 export const OVERHEAD_REFERENCE_UBATCH = 512
 
@@ -104,6 +115,18 @@ export interface MemoryEstimateInput {
   ctxCheckpointsOff: boolean
   /** Running on Android, where every plan turns checkpoints off as a platform rule. */
   isAndroid: boolean
+  /**
+   * The configured GPU layer count as written ('' / 'auto' = emit nothing,
+   * '0' = CPU-only run). Only read together with appleMetalServing: a load that
+   * runs the CPU graph pays the CPU reserve even on a Mac.
+   */
+  gpuLayers: string
+  /**
+   * macOS with an Apple GPU serving, the two signals the backend guard reads for
+   * the Metal-shaped reserve (core/memfit.go's loadRuntimeOverheadBytes). False
+   * everywhere else, so the reserve stays the phone/CPU measurement.
+   */
+  appleMetalServing: boolean
   /** Total system memory in bytes (0 = probe unavailable). */
   totalMemBytes: number
   /** Free system memory in bytes (0 = probe unavailable). */
@@ -179,10 +202,28 @@ export function kvCacheTypeFactor(cacheType: string): number {
  * {@link RUNTIME_OVERHEAD_BYTES_AT_512} for the measurements). A missing or
  * non-positive μBatch charges the default, which is also what llama-server
  * runs when the form has no value yet.
+ *
+ * `metal` switches to the Apple-silicon measurement of the same term. The
+ * caller decides with {@link servesFromAppleMetal} — the same two signals the
+ * backend's loadRuntimeOverheadBytes reads (platform plus serving GPU, and
+ * whether the config pinned the layers back to the CPU).
  */
-export function runtimeOverheadBytes(ubatchSize: number): number {
+export function runtimeOverheadBytes(ubatchSize: number, metal = false): number {
+  const base = metal ? RUNTIME_OVERHEAD_METAL_BYTES_AT_512 : RUNTIME_OVERHEAD_BYTES_AT_512
   const ubatch = Number.isFinite(ubatchSize) && ubatchSize > 0 ? Math.floor(ubatchSize) : OVERHEAD_REFERENCE_UBATCH
-  return Math.round((RUNTIME_OVERHEAD_BYTES_AT_512 * ubatch) / OVERHEAD_REFERENCE_UBATCH)
+  return Math.round((base * ubatch) / OVERHEAD_REFERENCE_UBATCH)
+}
+
+/**
+ * Whether a load is priced in the Metal shape: `appleMetalServing` is the
+ * caller's answer for macOS with an Apple GPU serving (the two signals the
+ * backend reads — see core/memfit.go's loadRuntimeOverheadBytes), and the
+ * config must not have pinned every layer back to the CPU with gpu-layers 0.
+ * An unset gpu-layers counts as Metal — the preset then emits no -ngl flag, and
+ * llama-server's own default on Apple silicon is full offload.
+ */
+export function servesFromAppleMetal(appleMetalServing: boolean, gpuLayers: string): boolean {
+  return appleMetalServing && (gpuLayers || '').trim() !== '0'
 }
 
 /**
@@ -250,7 +291,10 @@ export function estimateMemory(input: MemoryEstimateInput): MemoryEstimate {
   // The reserve exists only for a load that has some price on it: with neither
   // weights nor KV known, showing a bare overhead figure would be a number
   // without a subject, and the rows keyed off the total drop instead.
-  const overheadBytes = weightsBytes > 0 || kvBytes > 0 ? runtimeOverheadBytes(input.ubatchSize) : 0
+  const overheadBytes =
+    weightsBytes > 0 || kvBytes > 0
+      ? runtimeOverheadBytes(input.ubatchSize, servesFromAppleMetal(input.appleMetalServing, input.gpuLayers))
+      : 0
   const totalBytes = weightsBytes + kvBytes + checkpointBytes + overheadBytes
   const availableBytes = input.freeMemBytes > 0 ? input.freeMemBytes : input.totalMemBytes > 0 ? input.totalMemBytes : 0
   let headroom: MemoryHeadroom = 'unknown'

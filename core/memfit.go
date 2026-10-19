@@ -111,9 +111,9 @@ func ctxCheckpointBytes(tm tuneModel, cfg ModelConfig) int64 {
 // which is why the user-facing messages count it under 上下文缓存 / "context
 // cache" rather than as a fourth category), and the runtime overhead the
 // auto-tuner plans with (batch compute buffers, graph scratch, sampler arenas)
-// priced at cfg's own ubatch — the term is linear in ubatch, so a user who
-// raises --ubatch-size for faster prefill is charged for the memory it actually
-// costs.
+// priced at cfg's own ubatch in the shape the load runs (loadRuntimeOverheadBytes
+// — the term is linear in ubatch, so a user who raises --ubatch-size for faster
+// prefill is charged for the memory it actually costs).
 //
 // The KV figure reuses the same tuneModel geometry the auto-tuner sizes its
 // context against and prices it with the cache type the config actually selects
@@ -138,7 +138,34 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 		total += int64(kv * kvCacheSizeFactor(cfg))
 	}
 	total += ctxCheckpointBytes(tm, cfg)
-	return total + runtimeOverheadBytes(cfg.UBatchSize)
+	return total + loadRuntimeOverheadBytes(cfg, probeServingGPU())
+}
+
+// loadRuntimeOverheadBytes is the non-weight, non-KV reserve term of
+// modelLoadBytes, taken in the shape the load actually runs: the Metal
+// measurement when llama-server serves this on Apple silicon's unified GPU and
+// the plan has not pinned the model to the CPU, the CPU-only (phone-measured)
+// figure otherwise.
+//
+// The serving GPU is the same cached probe the over-commit warning next to it
+// reads (probeServingGPU, one detection chain per process), so the two memory
+// decisions on this path cannot disagree about which machine they are pricing,
+// and the platform has to say so too: the GPU list is arch- and OS-gated, so
+// darwin + apple is the only way this shape exists, and a snapshot left over from
+// another platform can never reprice a phone's load.
+//
+// An unpinned config is the Metal shape too, not a guess at it: llama-server's own
+// default offloads every layer on Apple silicon, measured as the same residual
+// this term prices (+141 MiB beyond weights + f16 KV for a 4B Q4_K_M at ctx 4096,
+// against +2585 MiB of RSS with -ngl 0, most of which is the model's own file
+// pages - and those the available-memory probe this term is compared against
+// counts as reclaimable). Only an explicit gpu-layers 0 asks for the CPU shape,
+// and tuneRuntimeOverheadMB is what that shape measures.
+func loadRuntimeOverheadBytes(cfg ModelConfig, serving tuneTarget) int64 {
+	if platformGOOS == "darwin" && serving.Vendor == vendorApple && cfg.GPULayers != "0" {
+		return metalRuntimeOverheadBytes(cfg.UBatchSize)
+	}
+	return runtimeOverheadBytes(cfg.UBatchSize)
 }
 
 // fittingCtxRung is the advice half of the memory check: the largest tier of the

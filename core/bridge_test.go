@@ -1242,6 +1242,7 @@ func routerModelDir(t *testing.T, dir, author, variant string) {
 // plateau, so a plan that already spends the RAM budget over-commits the machine
 // mid-session and the user sees swapping, not an error.
 func TestBuildServerCommandRouterCacheRAMBounded(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	dir := pinDirectModelDir(t)
 	routerModelDir(t, dir, "router-author", "router-model")
 	pinProbeFreeMemoryGB(t, 4) // 4096 MiB free at launch
@@ -1279,6 +1280,7 @@ func TestBuildServerCommandRouterCacheRAMBounded(t *testing.T) {
 // emit --cache-ram 0, because omitting the flag would hand the budget to
 // llama-server's own default of 8192 MiB — the opposite of what was measured.
 func TestBuildServerCommandRouterCacheRAMZeroDisables(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	dir := pinDirectModelDir(t)
 	routerModelDir(t, dir, "router-author", "router-model")
 	modelConfigsMu.Lock()
@@ -1308,6 +1310,7 @@ func TestBuildServerCommandRouterCacheRAMZeroDisables(t *testing.T) {
 // loadsStayInHostRAM); the same library on a discrete-GPU host stays quiet, and
 // either way the command still builds.
 func TestBuildServerCommandRouterWarnsOnOvercommit(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	dir := pinDirectModelDir(t)
 	routerModelDir(t, dir, "warn-author", "warn-heavy-model")
 	modelConfigsMu.Lock()
@@ -1360,6 +1363,7 @@ func TestBuildServerCommandRouterWarnsOnOvercommit(t *testing.T) {
 // exceed the free memory, so the launch has to say so and disable retention
 // rather than price the session against a single model.
 func TestBuildServerCommandRouterPricesResidentSet(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	dir := pinDirectModelDir(t)
 	routerModelDir(t, dir, "resident-author", "resident-a")
 	routerModelDir(t, dir, "resident-author", "resident-b")

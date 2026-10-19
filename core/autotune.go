@@ -749,13 +749,41 @@ const (
 	//   - M2 running a 313 MiB 24-layer model, RSS step from an idle load to the
 	//     first processed batch, ubatch 128/256/512/1024/2048 = +114/248/518/
 	//     1051/2130 MiB (a repeat run matched within 0.2%), and the same sweep
-	//     with -ngl 0 gave +116/252/525/1062/2141 MiB — so the term is linear in
-	//     ubatch through the origin and does not care which backend runs it.
+	//     with -ngl 0 gave +116/252/525/1062/2141 MiB — so the term grows with
+	//     ubatch and the same shape appears on either backend. Note what that
+	//     step is not: it also counts the pages the first batch brings in (the
+	//     weights and the cache lines the batch writes), which the weight and KV
+	//     terms already price, so it overstates this term. The absolute figures -
+	//     RSS minus weights minus f16 KV - are what the two constants below hold.
 	// runtimeOverheadBytes scales this 512-ubatch figure by ubatch/512; the
 	// ctx-keyed VRAM curve above prices a different thing (the discrete-GPU
 	// buffers at huge contexts) and stays what it was.
 	tuneRuntimeOverheadMB     = 1280
 	tuneRuntimeOverheadUBatch = 512
+	// The same reserve for a load Apple's Metal backend serves, measured on the
+	// M2 these plans run on as RSS beyond weights + f16 KV once a batch has been
+	// processed, at the app's default ubatch 512: +149 and +186 (4B Q4_K_M, ctx
+	// 8192, paired runs), +185 (same model, ctx 32768, so it is
+	// context-independent like the phone's figure) and +160 for a 0.6B Q4_K_M at
+	// ctx 8192. Rounded up to 320 here: 1.7x the largest reading.
+	//
+	// The same shape is what an unpinned config gets: the same 4B loaded with no
+	// -ngl flag at all came out +141 (ctx 4096) - llama.cpp's own default offloads
+	// every layer to Metal on this machine, so "auto" is this shape too and only an
+	// explicit gpu-layers 0 is not.
+	//
+	// The phone's 1280 is not this shape. The batch buffers, graph scratch and
+	// sampler arenas the term stands for are mostly allocated by the CPU-side
+	// sampler and the thin slice of graph that stays on the host, because on
+	// unified memory the network and the whole cache sit on the GPU. Keeping the
+	// phone's figure on a Mac costs it 960 MiB per resident load, spent on memory
+	// the server never asks for - as context in the tuner's ladder, and as prompt
+	// cache in the router's budget.
+	//
+	// The ubatch scaling above is kept as it is rather than re-fit to this shape
+	// (measured +302 at ubatch 2048 against the 1280 the linear law gives), because
+	// over-charging is the safe direction for a reserve.
+	tuneMetalRuntimeOverheadMB = 320
 	// Flash-attention headroom guard: if the chosen f16 full-offload plan
 	// leaves less than 15% of usable VRAM free and a q8_0 plan buys a larger
 	// context, prefer the q8_0 plan.
@@ -787,10 +815,22 @@ const (
 // constant's measurements). ubatch <= 0 charges the default, which is also what
 // llama-server uses when the preset omits --ubatch-size.
 func runtimeOverheadBytes(ubatch int) int64 {
+	return scaleRuntimeOverheadMB(tuneRuntimeOverheadMB, ubatch)
+}
+
+// metalRuntimeOverheadBytes is the same reserve for a load Metal serves, priced
+// at the plan's ubatch with the same scaling law (see tuneMetalRuntimeOverheadMB
+// for the measurements and why the law is kept unrefitted).
+func metalRuntimeOverheadBytes(ubatch int) int64 {
+	return scaleRuntimeOverheadMB(tuneMetalRuntimeOverheadMB, ubatch)
+}
+
+// scaleRuntimeOverheadMB is the ubatch law both reserve shapes share.
+func scaleRuntimeOverheadMB(baseMB int64, ubatch int) int64 {
 	if ubatch <= 0 {
 		ubatch = tuneRuntimeOverheadUBatch
 	}
-	return int64(tuneRuntimeOverheadMB) * int64(ubatch) / tuneRuntimeOverheadUBatch * (1 << 20)
+	return baseMB * int64(ubatch) / tuneRuntimeOverheadUBatch * (1 << 20)
 }
 
 // tuneCtxLadder is the descending context ladder the RAM-bounded plans size
@@ -1136,7 +1176,9 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	}
 
 	// ramReserve: what a load keeps resident beyond weights + KV, priced at the
-	// ubatch the plan emits (the default 512 unless a caller changed it).
+	// ubatch the plan emits (the default 512 unless a caller changed it). The
+	// Metal branch below prices the same term at its own measured, much smaller
+	// figure (metalRuntimeOverheadBytes).
 	ramReserve := float64(runtimeOverheadBytes(cfg.UBatchSize))
 
 	// ramKVPerTok prices the ladder at the pinned q8_0 pair so the cache saving
@@ -1166,10 +1208,10 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	// ramCtxSize picks the largest ladder context whose weights + KV plus the
 	// checkpoint budget and the given reserve fit in usable RAM, falling back to
 	// the smallest ladder entry. The reserve is the memory a load needs that is
-	// neither weights nor KV: runtimeOverheadBytes priced at the plan's own ubatch
-	// — the same term both RAM-bounded plans and the start-time memory guard
-	// charge, measured linear in ubatch and equal on CPU and Metal (see
-	// tuneRuntimeOverheadMB).
+	// neither weights nor KV, priced at the plan's own ubatch: the CPU-only plan
+	// passes runtimeOverheadBytes and the Metal plan metalRuntimeOverheadBytes,
+	// the same two figures the start-time memory guard picks between (see
+	// loadRuntimeOverheadBytes).
 	ramCtxSize := func(reserve float64) int {
 		for _, ctx := range ladder {
 			if w+ramKVPerTok*float64(ctx)+ramCheckpoints(ctx)+reserve <= usableRAM {
@@ -1204,10 +1246,11 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	// the context is bounded by the usable-RAM budget — clamped to the device's
 	// Metal working-set pool above, the ceiling that RAM alone does not see. GPU
 	// and CPU share one physical pool, there is no VRAM budget to merge against,
-	// and the same ramReserve is charged here (measured on an M2: the
-	// idle-to-first-batch RSS step is +518 MiB on Metal and +525 MiB with -ngl 0
-	// at the app's default ubatch 512, so the term does not shrink because the
-	// batch ran on the GPU). FlashAttn deliberately stays false, which means
+	// and the reserve is charged at the Metal measurement — a quarter of the
+	// 1280 MiB the CPU-only plans charge, because with every layer and the whole
+	// cache on the GPU there is no CPU graph left to hold buffers
+	// (metalRuntimeOverheadBytes has the readings). FlashAttn deliberately stays
+	// false, which means
 	// "emit nothing" (see core/preset.go) and leaves the choice to llama-server's
 	// own -fa auto. Measured on an M2 with a 4B Q4_K_M model at -ngl 99, tg128:
 	// auto is never slower than explicit on (31.91 vs 28.69 t/s on b10537, 30.02
@@ -1220,8 +1263,8 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	// plan. Once the user has opted in, ramKVCache/ramCtxSize keep the pair
 	// through a re-tune and price the ladder at 0.53125 the KV footprint, which is
 	// what turns that saving into context: on a 24 GB M2 with a 4B Q4_K_M model
-	// (36 layers, 144 KiB of f16 KV per token) the 65536 rung costs 12.6 GiB of
-	// the RAM budget in f16 (weights + KV + reserve) but only 8.4 GiB with the
+	// (36 layers, 144 KiB of f16 KV per token) the 65536 rung costs 11.6 GiB of
+	// the RAM budget in f16 (weights + KV + reserve) but only 7.4 GiB with the
 	// q8_0 pair. cpu-moe is a CUDA-centric VRAM/RAM split (meaningless on unified
 	// memory), so CPUMoe/NCpuMoe stay off and the bench chain that calibrates the
 	// cpu-moe flip never runs for apple (UsedCPUMoe=false without a bench
@@ -1230,7 +1273,7 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 		cfg.GPULayers = "all"
 		cfg.FlashAttn = false
 		cfg.CacheTypeK, cfg.CacheTypeV = ramKVCache()
-		cfg.CtxSize = ramCtxSize(ramReserve)
+		cfg.CtxSize = ramCtxSize(float64(metalRuntimeOverheadBytes(cfg.UBatchSize)))
 		return cfg
 	}
 

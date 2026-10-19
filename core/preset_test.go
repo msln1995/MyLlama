@@ -953,6 +953,7 @@ func TestGenerateModelsPresetRemovesPreviousTempFile(t *testing.T) {
 // ctx-size at all (which hands the decision to llama-server and the trained
 // context it allocates).
 func TestGenerateModelsPresetFromBoundsUntunedContext(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	pinProbeFreeMemoryGB(t, gibFromMiB(2340))
 	dir := t.TempDir()
 	path := geomGGUF(t, dir, "geom.gguf")

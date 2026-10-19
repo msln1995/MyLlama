@@ -1219,8 +1219,8 @@ func TestTuneModelConfigMetal(t *testing.T) {
 	// usableRAM = min(24, 32*0.90) * 0.85 GiB = 20.4 GiB = 20889.6 MiB
 	hwApple := tuneHardware{GPUVendor: vendorApple, RAMTotalGB: 32, RAMFreeGB: 24, PhysicalCores: 10, LogicalCPUs: 10}
 
-	// Dense 4B fixture: ctx 131072 needs 2765 + 18432 + 1152 = 22349 MiB >
-	// 20889.6 → caps at 65536 (2765 + 9216 + 640 = 12621 MiB, fits).
+	// Dense 4B fixture: ctx 131072 needs 2765 + 18432 + 320 = 21517 MiB >
+	// 20889.6 → caps at 65536 (2765 + 9216 + 320 = 12301 MiB, fits).
 	tm4B := tuneModel{WeightsBytes: 2765 << 20, Layers: 36, KVBytesPerTokPerLayerF16: 4096, TrainCtx: 262144}
 	cfg := tuneModelConfig(hwApple, tm4B)
 	if cfg.GPULayers != "all" || cfg.CtxSize != 65536 {
@@ -1244,14 +1244,13 @@ func TestTuneModelConfigMetal(t *testing.T) {
 		WeightsBytes: 13435 << 20, Layers: 47, KVBytesPerTokPerLayerF16: 1152,
 		TrainCtx: 202752, ExpertBytes: 11995 << 20, DenseBytes: 1440 << 20,
 	}
-	// ctx 131072 costs 13435 + 6768 + 1280 (the runtime reserve at the plan's
-	// ubatch 512) = 21483 MiB > 20889.6, so the Metal plan caps at 65536
-	// (13435 + 3384 + 1280 = 18099 MiB) — the same reserve the CPU-only plan
-	// charges, because on unified memory the batch buffers come out of the same
-	// physical RAM whichever backend runs them.
+	// ctx 131072 costs 13435 + 6768 + 320 (the runtime reserve at the plan's
+	// ubatch 512, priced in the Metal shape) = 20523 MiB ≤ 20889.6, so the Metal
+	// plan keeps the top rung — the same model as a CPU-only load pays 1280 for
+	// its reserve and lands at 21483, which caps it a tier lower.
 	cfg = tuneModelConfig(hwApple, tmGLM)
-	if cfg.GPULayers != "all" || cfg.CtxSize != 65536 {
-		t.Errorf("MoE on apple = gpuLayers %q ctx %d, want all / 65536", cfg.GPULayers, cfg.CtxSize)
+	if cfg.GPULayers != "all" || cfg.CtxSize != 131072 {
+		t.Errorf("MoE on apple = gpuLayers %q ctx %d, want all / 131072", cfg.GPULayers, cfg.CtxSize)
 	}
 	if cfg.CPUMoe || cfg.NCpuMoe != 0 {
 		t.Errorf("MoE on apple must stay on the plain metal plan: %+v", cfg)
@@ -1277,18 +1276,19 @@ func TestTuneModelConfigMetal(t *testing.T) {
 	// yields an 18.36 GiB = 18799.6 MiB budget; over the pool the load answers
 	// /health and then fails every command buffer with
 	// kIOGPUCommandBufferCallbackErrorOutOfMemory forever). A 24 GiB Mac plus a
-	// 13800 MiB weight file with tmGLM's KV geometry: the 65536 rung costs
-	// 13800+3384+1280 = 18464 MiB — inside the RAM budget, outside the pool —
-	// so the pool decides between it and 32768 (13800+1692+1280 = 16772 MiB).
+	// 13800 MiB weight file with tmGLM's KV geometry and a deliberately tight
+	// 17000 MiB pool: the 65536 rung costs 13800+3384+320 = 17504 MiB — inside
+	// the RAM budget, outside the pool — so the pool decides between it and
+	// 32768 (13800+1692+320 = 15812 MiB).
 	tmPool := tuneModel{
 		WeightsBytes: 13800 << 20, Layers: 47, KVBytesPerTokPerLayerF16: 1152,
 		TrainCtx: 202752,
 	}
 	hwPool := tuneHardware{GPUVendor: vendorApple, RAMTotalGB: 24, RAMFreeGB: 24,
-		PhysicalCores: 10, LogicalCPUs: 10, MetalPoolMB: 18186}
+		PhysicalCores: 10, LogicalCPUs: 10, MetalPoolMB: 17000}
 	cfg = tuneModelConfig(hwPool, tmPool)
 	if cfg.CtxSize != 32768 {
-		t.Errorf("metal plan over the working-set pool = ctx %d, want 32768 (the 65536 rung costs 18464 MiB > the 18186 MiB pool)", cfg.CtxSize)
+		t.Errorf("metal plan over the working-set pool = ctx %d, want 32768 (the 65536 rung costs 17504 MiB > the 17000 MiB pool)", cfg.CtxSize)
 	}
 	if cfg.GPULayers != "all" {
 		t.Errorf("pool-clamped plan must still offload: %+v", cfg)
@@ -1341,8 +1341,8 @@ func TestRuntimeOverheadBytesPricedByUBatch(t *testing.T) {
 //
 // The fixture is the measured M2 case: a 4B Q4_K_M model (2.33 GiB, 36 layers,
 // 144 KiB of f16 KV per token) on 24 GB. At 10 GB free (8.5 GiB usable) the
-// 65536 rung costs 12.5 GiB in f16 (weights + KV + the 1.25 GiB reserve) and
-// 8.4 GiB with the q8_0 pair — so the pair is worth 32768 → 65536 on this
+// 65536 rung costs 11.6 GiB in f16 (weights + KV + the 320 MiB Metal reserve)
+// and 7.4 GiB with the q8_0 pair — so the pair is worth 32768 → 65536 on this
 // budget.
 func TestTuneModelConfigPinnedQ8KVConvertsToContext(t *testing.T) {
 	tm := tuneModel{WeightsBytes: 2497281120, Layers: 36, KVBytesPerTokPerLayerF16: 4096, TrainCtx: 262144}
@@ -1423,12 +1423,16 @@ func TestTuneModelConfigPricesTheCarriedUBatch(t *testing.T) {
 		t.Errorf("batch size = %d, want the plan default 2048", cfg.BatchSize)
 	}
 
-	// The Apple Silicon plan shares the budget, so it reacts to ubatch the same
-	// way (no Metal pool figure here, so the RAM budget is the only ceiling).
+	// The Apple Silicon plan shares the same budget but prices the runtime
+	// reserve at the Metal measurement, so it reacts to ubatch with a quarter of
+	// the cost: at 2048 the 131072 rung is 6 GiB of weights + 4 GiB of KV + 1.25
+	// GiB of overhead = 11.25 GiB against the 12.24 GiB budget, and the plan keeps
+	// the top rung the CPU-only shape had to give up. No Metal pool figure here,
+	// so the RAM budget is still the only ceiling.
 	apple := hw
 	apple.GPUVendor = vendorApple
-	if cfg := tuneModelConfig(apple, tm); cfg.CtxSize != 32768 || cfg.UBatchSize != 2048 {
-		t.Errorf("metal plan = ubatch %d ctx %d, want 2048 / 32768", cfg.UBatchSize, cfg.CtxSize)
+	if cfg := tuneModelConfig(apple, tm); cfg.CtxSize != 131072 || cfg.UBatchSize != 2048 {
+		t.Errorf("metal plan = ubatch %d ctx %d, want 2048 / 131072", cfg.UBatchSize, cfg.CtxSize)
 	}
 }
 

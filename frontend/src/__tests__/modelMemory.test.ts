@@ -5,9 +5,11 @@ import {
   checkpointRetentionBytes,
   memorySummaryRows,
   runtimeOverheadBytes,
+  servesFromAppleMetal,
   CTX_CHECKPOINT_CAP,
   KV_BYTES_PER_TOKEN_F16,
   RUNTIME_OVERHEAD_BYTES_AT_512,
+  RUNTIME_OVERHEAD_METAL_BYTES_AT_512,
   HEADROOM_TIGHT_GAP_BYTES,
   type MemoryEstimate,
   type MemorySummaryCopy,
@@ -31,6 +33,10 @@ const BASE = {
   swaWindow: 0,
   ctxCheckpointsOff: false,
   isAndroid: false,
+  // CPU-shaped by default: no Apple GPU serving, so every assertion below keyed
+  // on RUNTIME_OVERHEAD_BYTES_AT_512 prices the reserve the phone/CPU way.
+  gpuLayers: 'auto',
+  appleMetalServing: false,
   totalMemBytes: 16 * GIB,
   freeMemBytes: Math.floor(9.4 * GIB),
 }
@@ -196,6 +202,44 @@ describe('estimateMemory', () => {
     for (const ub of [0, -512, Number.NaN]) {
       expect(estimateMemory({ ...BASE, ubatchSize: ub }).overheadBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512)
     }
+  })
+
+  it('a Metal-served load charges the measured Mac reserve', () => {
+    // The M2 readings behind RUNTIME_OVERHEAD_METAL_BYTES_AT_512: RSS minus
+    // weights minus f16 KV is +149/+186 MiB (4B Q4_K_M, ctx 8192, paired), +185
+    // (same model, ctx 32768) and +160 (0.6B, ctx 8192), against the phone's
+    // 1.1-1.2 GB for the same term. Same μBatch law on both shapes.
+    const metal = { appleMetalServing: true }
+    expect(estimateMemory({ ...BASE, ...metal }).overheadBytes).toBe(RUNTIME_OVERHEAD_METAL_BYTES_AT_512)
+    expect(estimateMemory({ ...BASE, ...metal, ubatchSize: 1024 }).overheadBytes).toBe(
+      2 * RUNTIME_OVERHEAD_METAL_BYTES_AT_512
+    )
+    // Only a Mac with an Apple GPU gets it: the flag is the caller's answer for
+    // darwin + vendor apple, and the layer count must not pin the run to the CPU.
+    expect(estimateMemory({ ...BASE, gpuLayers: '0', appleMetalServing: true }).overheadBytes).toBe(
+      RUNTIME_OVERHEAD_BYTES_AT_512
+    )
+    expect(estimateMemory({ ...BASE, gpuLayers: 'all', appleMetalServing: false }).overheadBytes).toBe(
+      RUNTIME_OVERHEAD_BYTES_AT_512
+    )
+    // An unset gpu-layers emits no -ngl flag, and llama-server's own default on
+    // Apple silicon is full offload, so it is the Metal shape too.
+    expect(estimateMemory({ ...BASE, gpuLayers: '', appleMetalServing: true }).overheadBytes).toBe(
+      RUNTIME_OVERHEAD_METAL_BYTES_AT_512
+    )
+    // The cheaper term is real headroom: the same 4 GB-cheaper plan is what the
+    // backend's router budget hands back as prompt cache.
+    const cpu = estimateMemory({ ...BASE, appleMetalServing: false })
+    const m = estimateMemory({ ...BASE, appleMetalServing: true })
+    expect(cpu.totalBytes - m.totalBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512 - RUNTIME_OVERHEAD_METAL_BYTES_AT_512)
+  })
+
+  it('servesFromAppleMetal requires both the platform flag and an offloaded run', () => {
+    expect(servesFromAppleMetal(true, 'all')).toBe(true)
+    expect(servesFromAppleMetal(true, 'auto')).toBe(true)
+    expect(servesFromAppleMetal(true, '')).toBe(true)
+    expect(servesFromAppleMetal(true, '0')).toBe(false)
+    expect(servesFromAppleMetal(false, 'all')).toBe(false)
   })
 
   it('a scanned model prices KV with its own GGUF geometry, not the constant', () => {

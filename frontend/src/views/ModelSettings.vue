@@ -542,6 +542,11 @@ const modelKVBytesPerToken = ref(0)
 const modelSwaWindow = ref(0)
 const sysTotalBytes = ref(0)
 const sysFreeBytes = ref(0)
+// macOS with an Apple GPU serving: the two signals the backend's memory guard
+// reads to charge a load the Metal-shaped runtime reserve instead of the
+// CPU-only one (core/memfit.go's loadRuntimeOverheadBytes). Captured with the
+// same hardware snapshot as the memory figures.
+const appleMetalServing = ref(false)
 
 const memoryEstimate = computed(() =>
   estimateMemory({
@@ -555,6 +560,8 @@ const memoryEstimate = computed(() =>
     swaWindow: modelSwaWindow.value,
     ctxCheckpointsOff: !!cfg.ctxCheckpointsOff,
     isAndroid: platformState.value.isAndroid,
+    gpuLayers: cfg.gpuLayers,
+    appleMetalServing: appleMetalServing.value,
     totalMemBytes: sysTotalBytes.value,
     freeMemBytes: sysFreeBytes.value,
   })
@@ -952,6 +959,8 @@ onMounted(async () => {
     // Tablet summary estimate inputs: total / free memory in bytes
     sysTotalBytes.value = (Number(info?.memory?.totalGb) || 0) * GIB
     sysFreeBytes.value = (Number(info?.memory?.freeGb) || 0) * GIB
+    const gpus: { vendor?: string }[] = Array.isArray(info?.gpus) ? info.gpus : []
+    appleMetalServing.value = platformState.value.os === 'darwin' && gpus.some((g) => g?.vendor === 'apple')
   } catch {}
   // Best-effort weights term for the tablet memory estimate
   lookupModelTerms()

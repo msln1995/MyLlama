@@ -24,6 +24,24 @@ func pinProbeServingGPU(t *testing.T, target tuneTarget) {
 	t.Cleanup(func() { probeServingGPU = orig })
 }
 
+// pinCPUSHapedReserve charges every load the 1280 MiB-at-512 CPU-only reserve.
+// loadRuntimeOverheadBytes picks the figure from the platform plus the serving
+// GPU probe, so a test that documents CPU arithmetic would otherwise get the
+// Metal figure on an Apple Silicon machine and the Metal one nowhere else.
+func pinCPUSHapedReserve(t *testing.T) {
+	t.Helper()
+	withPlatformGOOS(t, "linux")
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorNone})
+}
+
+// pinMetalShapedReserve is the Apple Silicon twin: a Metal-serving load charges
+// the 320 MiB-at-512 reserve instead.
+func pinMetalShapedReserve(t *testing.T) {
+	t.Helper()
+	withPlatformGOOS(t, "darwin")
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorApple})
+}
+
 // TestAvailableMemoryBytes verifies the probe seam plumbing: the GiB value is
 // converted to bytes, and a probe reporting nothing (0) or a negative value
 // yields 0 so callers treat it as "unknown".
@@ -132,6 +150,7 @@ func writeMemfitSwaGGUF(t *testing.T, dir string) string {
 // TestModelLoadBytes pins the four terms of the planned footprint and how the KV
 // and checkpoint terms react to the model metadata and the configured context.
 func TestModelLoadBytes(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	const (
 		mib     = int64(1 << 20)
 		gib     = int64(1 << 30)
@@ -285,6 +304,88 @@ func TestModelLoadBytes(t *testing.T) {
 // checkpoint the server logged for that model was 11.006 MiB, matching 22 window
 // layers, while this term prices all 26 (13.0 MiB) — the 18% over-charge a
 // start-time budget wants in its error direction.
+// TestLoadRuntimeOverheadBytesShape pins which reserve a load is charged. The
+// Metal figure is only for the load that actually runs on Metal: macOS plus an
+// Apple serving GPU plus a config that did not pin the layers back to the CPU.
+// Everything else pays the CPU-only measurement, including a Mac that asks for
+// -ngl 0 (the CPU graph holds the batch buffers, so so does its RSS step) and a
+// non-macOS host whose GPU probe happens to answer apple — the reserve is a
+// property of the code path the load takes, not of the chip alone.
+func TestLoadRuntimeOverheadBytesShape(t *testing.T) {
+	const mib = int64(1 << 20)
+	cases := []struct {
+		name      string
+		goos      string
+		vendor    string
+		gpuLayers string
+		ubatch    int
+		wantMB    int64
+	}{
+		{"metal auto", "darwin", vendorApple, "auto", 512, 320},
+		{"metal all", "darwin", vendorApple, "all", 512, 320},
+		{"metal partial", "darwin", vendorApple, "12", 512, 320},
+		// An unset value emits no -ngl flag, and llama-server's own default on
+		// Apple silicon is full offload (measured: the RSS grows by the f16 KV
+		// geometry with no flag at all), so it is the Metal shape too.
+		{"metal default", "darwin", vendorApple, "", 512, 320},
+		{"metal explicit cpu", "darwin", vendorApple, "0", 512, 1280},
+		{"mac with a cuda card", "darwin", "nvidia", "all", 512, 1280},
+		{"linux probing apple", "linux", vendorApple, "all", 512, 1280},
+		{"android probing apple", "android", vendorApple, "all", 512, 1280},
+		{"windows cpu only", "windows", vendorNone, "0", 512, 1280},
+		// The ubatch scaling is the same law on both shapes.
+		{"metal at 1024", "darwin", vendorApple, "all", 1024, 640},
+		{"metal at 2048", "darwin", vendorApple, "all", 2048, 1280},
+		{"metal ubatch unset", "darwin", vendorApple, "all", 0, 320},
+		{"cpu at 2048", "linux", vendorNone, "0", 2048, 5120},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := platformGOOS
+			platformGOOS = tt.goos
+			t.Cleanup(func() { platformGOOS = orig })
+			got := loadRuntimeOverheadBytes(ModelConfig{GPULayers: tt.gpuLayers, UBatchSize: tt.ubatch},
+				tuneTarget{Vendor: tt.vendor})
+			if got != tt.wantMB*mib {
+				t.Errorf("loadRuntimeOverheadBytes(%s, %s, gpuLayers %q, ubatch %d) = %d MiB, want %d",
+					tt.goos, tt.vendor, tt.gpuLayers, tt.ubatch, got/mib, tt.wantMB)
+			}
+		})
+	}
+}
+
+// TestMetalReserveBuysContext is the user-visible half of the Metal shape: the
+// same 4 GiB model with a 131072-token window is 960 MiB cheaper to plan on a
+// Mac, which the router's prompt-cache budget hands straight back.
+func TestMetalReserveBuysContext(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMemfitGGUF(t, dir)
+	m := ModelInfo{Name: "metal-model", Path: path, SizeBytes: 4 * (1 << 30)}
+	cfg := ModelConfig{CtxSize: 8192, GPULayers: "all", UBatchSize: 512}
+
+	orig := platformGOOS
+	platformGOOS = "darwin"
+	t.Cleanup(func() { platformGOOS = orig })
+
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorNone})
+	cpu := modelLoadBytes(m, cfg)
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorApple})
+	metal := modelLoadBytes(m, cfg)
+
+	if diff := cpu - metal; diff != (tuneRuntimeOverheadMB-tuneMetalRuntimeOverheadMB)*(1<<20) {
+		t.Errorf("metal load is %d MiB cheaper, want %d (the reserve difference at this ubatch)",
+			diff/(1<<20), (tuneRuntimeOverheadMB - tuneMetalRuntimeOverheadMB))
+	}
+	// The saved reserve is free memory as far as the budget is concerned, so the
+	// router retains more prompt cache with the same model loaded.
+	const avail = int64(6 << 30)
+	cpuCache := promptCacheRAMMiB(8192, cpu, avail)
+	metalCache := promptCacheRAMMiB(8192, metal, avail)
+	if metalCache <= cpuCache {
+		t.Errorf("prompt-cache budget = metal %d MiB, cpu %d MiB: the cheaper load must leave more free", metalCache, cpuCache)
+	}
+}
+
 func TestCtxCheckpointBytes(t *testing.T) {
 	const (
 		perTok   = int64(26 * 1024)
@@ -420,6 +521,7 @@ func TestTunedQ8PlanPassesTheMemoryGuard(t *testing.T) {
 // plan would have reached 131072 — which at ubatch 2048 needs 12.19 GiB, more
 // than the device has.
 func TestTunedUbatchPlanPassesTheMemoryGuard(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	dir := t.TempDir()
 	path := writeMemfitGGUF(t, dir)
 	m := ModelInfo{Name: "phone-model", Path: path, SizeBytes: 4 * (1 << 30)}
@@ -460,12 +562,14 @@ func TestTunedUbatchPlanPassesTheMemoryGuard(t *testing.T) {
 // start guard charges, or the tuner selects a rung the memory decision then
 // refuses (on a desktop that is a warning naming a tier the app just chose).
 //
-// Fixture: 4 GiB of weights, 26 KiB of f16 KV per token, a 512-token window and
-// 8 GiB of RAM, which leaves the tuner 6,266 MiB after its margins. The 32768
-// rung costs 6,208 MiB of weights + cache + reserve — affordable until the
-// 104 MiB checkpoint budget is priced with it, which pushes the plan down to
-// 16384 (5,896 MiB).
+// Metal-shaped fixture and probe (loadRuntimeOverheadBytes' 320 MiB reserve): 4
+// GiB of weights, 26 KiB of f16 KV per token, a 512-token window and 6.1 GiB
+// free of 8, which leaves the tuner 5,309 MiB after its margins. The 32768 rung
+// costs 4,096 + 832 + 320 = 5,248 MiB without checkpoints — affordable — and
+// 5,352 MiB once the 104 MiB budget is priced with it, so the plan drops to
+// 16384 (4,096 + 416 + 320 + 104 = 4,936 MiB).
 func TestTunedSwaPlanPricesCheckpointsInTheLadder(t *testing.T) {
+	pinMetalShapedReserve(t)
 	dir := t.TempDir()
 	path := writeMemfitSwaGGUF(t, dir)
 	m := ModelInfo{Name: "swa-model", Path: path, SizeBytes: 4 * (1 << 30)}
@@ -481,14 +585,14 @@ func TestTunedSwaPlanPricesCheckpointsInTheLadder(t *testing.T) {
 	cfg := tuneModelConfig(tuneHardware{
 		GPUVendor:     vendorApple,
 		RAMTotalGB:    8,
-		RAMFreeGB:     8,
+		RAMFreeGB:     6.1,
 		PhysicalCores: 8,
 	}, tm)
 	if cfg.CtxSize != 16384 {
 		t.Fatalf("tuner plan ctx = %d, want 16384: the checkpoint budget belongs in the ladder price", cfg.CtxSize)
 	}
 
-	pinProbeFreeMemoryGB(t, 6)
+	pinProbeFreeMemoryGB(t, 5)
 	if err := modelLoadFitError(m, cfg); err != nil {
 		t.Errorf("modelLoadFitError(tuned SWA plan) = %v, want nil: the guard must not refuse the plan the tuner emitted", err)
 	}
@@ -503,6 +607,7 @@ func TestTunedSwaPlanPricesCheckpointsInTheLadder(t *testing.T) {
 // probe: the overhead and the context are part of the decision, and a failed
 // probe never blocks a start.
 func TestModelLoadFitError(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	const (
 		gib        = int64(1 << 30)
 		overheadGB = float64(tuneRuntimeOverheadMB) / 1024.0 // 1.25 GiB
@@ -596,6 +701,7 @@ func TestDirectModelConfigFallsBackToAppDefaults(t *testing.T) {
 // the resolver fills the default context, the same device prices the real
 // 2,312 MiB and refuses at one MiB less.
 func TestContextlessStoredConfigIsGuardHonest(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	dir := t.TempDir()
 	path := geomGGUF(t, dir, "geom.gguf")
 	m := ModelInfo{Name: "legacy-model", Path: path, SizeBytes: 1 << 30}
@@ -738,6 +844,7 @@ func mib(n int64) int64 { return n * (1 << 20) }
 // would under-charge it by 56 MiB on this fixture. The probe is pinned so the
 // expectation does not follow the test host's free RAM.
 func TestPlanResidentSet(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	pinProbeFreeMemoryGB(t, 64)
 	dir := t.TempDir()
 	path := geomGGUF(t, dir, "geom.gguf")
@@ -824,6 +931,7 @@ func gibFromMiB(n int64) float64 { return float64(n) / 1024 }
 // at 2368 MiB and the ladder rungs below at 2336 (16384), 2320 (8192), 2312 (4096)
 // and 2308 (2048).
 func TestRouterUntunedCtx(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	dir := t.TempDir()
 	path := geomGGUF(t, dir, "geom.gguf")
 	m := ModelInfo{Name: "untuned", Path: path, SizeBytes: 1 << 30}
@@ -875,6 +983,7 @@ func TestRouterUntunedCtx(t *testing.T) {
 // for every model in the app. Priced at the largest context the machine affords,
 // the same library keeps a cache budget.
 func TestUnconfiguredModelKeepsLibraryPromptCache(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	pinProbeFreeMemoryGB(t, gibFromMiB(2340))
 	path := geomGGUF(t, t.TempDir(), "geom.gguf")
 	m := ModelInfo{Name: "untuned", Path: path, SizeBytes: 1 << 30}
@@ -1000,6 +1109,7 @@ func TestOvercommitWarning(t *testing.T) {
 // (131072 → 5568, 65536 → 3936, 32768 → 3120, 16384 → 2712, 8192 → 2508,
 // 4096 → 2406, 2048 → 2355).
 func TestFittingCtxRung(t *testing.T) {
+	pinCPUSHapedReserve(t)
 	dir := t.TempDir()
 	readable := writeMemfitGGUF(t, dir)
 	unreadable := writeTempGGUF(t, dir, "junk.gguf", make([]byte, 64))
