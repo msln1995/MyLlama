@@ -131,15 +131,49 @@ func ctxCheckpointBytes(tm tuneModel, cfg ModelConfig) int64 {
 // routerModelPlan, which bounds an untuned context first, so nothing that
 // reaches this function is actually unbounded.
 func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
+	total, _ := modelLoadPricing(m, cfg)
+	return total
+}
+
+// modelLoadPricing prices a load the way modelLoadBytes does and also reports the
+// share of that bill a Metal working set has to pin.
+//
+// The two figures differ only on a Mac, and only by hostWeightBytes - the weight
+// copy a partial (or no) offload keeps on the host *in addition* to the copy the
+// weight term already covers. Everything else in the bill is what the offloaded
+// path allocates: the weights llama.cpp hands the device, the cache (measured
+// host-resident RSS growing by exactly the f16 KV geometry at -ngl 99, i.e. the
+// cache is the device's), the checkpoints and the Metal floor. The split is what
+// lets the launch check name the right ceiling: a `-ngl 0` library priced past
+// the pool touches no Metal at all, and a working-set warning about it would be
+// wrong twice over.
+//
+// The weight term itself is not split by the offload line, so a *partial* offload
+// is still billed to the pool in full: the figure over-prices the working set by
+// the blocks the CPU runs instead of under-pricing it, which is the direction a
+// ceiling that only ever shrinks a context or a cache has to take.
+func modelLoadPricing(m ModelInfo, cfg ModelConfig) (total, pinned int64) {
 	mm, ok := readGGUFModelMetrics(m.Path)
 	tm := buildTuneModel(mm, ok, tuneWeightsBytes(m, cfg))
-	total := tm.WeightsBytes
+	total = tm.WeightsBytes
 	if cfg.CtxSize > 0 {
 		kv := tm.KVBytesPerTokPerLayerF16 * float64(tm.Layers) * float64(cfg.CtxSize)
 		total += int64(kv * kvCacheSizeFactor(cfg))
 	}
 	total += ctxCheckpointBytes(tm, cfg)
-	return total + loadRuntimeOverheadBytes(cfg, probeServingGPU(), tm)
+	serving := probeServingGPU()
+	total += loadRuntimeOverheadBytes(cfg, serving, tm)
+	pinned = total
+	if platformGOOS == "darwin" && serving.Vendor == vendorApple {
+		if cpuResidentLayers(cfg.GPULayers, tm.Layers) >= tm.Layers {
+			// Nothing was handed to the device: every layer, the cache and the
+			// compute buffers stay on the CPU, so this load cannot be over pool.
+			pinned = 0
+		} else {
+			pinned -= hostWeightBytes(cfg, tm)
+		}
+	}
+	return total, pinned
 }
 
 // loadRuntimeOverheadBytes is the non-weight, non-KV reserve term of
@@ -326,11 +360,14 @@ func routerLibrary() ([]ModelInfo, map[string]ModelConfig) {
 }
 
 // plannedLoad is one library entry with the plan a router-mode load runs with
-// and the memory that load prices (modelLoadBytes).
+// and the memory that load prices (modelLoadPricing).
 type plannedLoad struct {
 	model ModelInfo
 	cfg   ModelConfig
 	bytes int64
+	// pinned is the share of bytes inside the GPU working set: equal to bytes
+	// everywhere but a Mac with a partial offload (modelLoadPricing).
+	pinned int64
 }
 
 // residentSet is what router mode may hold in memory at the same time.
@@ -340,6 +377,9 @@ type residentSet struct {
 	loads []plannedLoad
 	// total is the sum of loads: the figure a session can drive the machine to.
 	total int64
+	// pinned is the same sum taken in the GPU's share of it - the bill the Metal
+	// working set has to pay, which is where the pool ceiling is checked.
+	pinned int64
 	// heaviest is the single most expensive load, the entry an over-commit
 	// warning names as the one to shrink.
 	heaviest plannedLoad
@@ -387,7 +427,8 @@ func planResidentSet(models []ModelInfo, cfgs map[string]ModelConfig, modelsMax 
 	loads := make([]plannedLoad, 0, len(models))
 	for _, m := range models {
 		c := routerModelPlan(cfgs, m)
-		loads = append(loads, plannedLoad{model: m, cfg: c, bytes: modelLoadBytes(m, c)})
+		total, pinned := modelLoadPricing(m, c)
+		loads = append(loads, plannedLoad{model: m, cfg: c, bytes: total, pinned: pinned})
 	}
 	sort.SliceStable(loads, func(i, j int) bool { return loads[i].bytes > loads[j].bytes })
 	set := residentSet{}
@@ -401,6 +442,7 @@ func planResidentSet(models []ModelInfo, cfgs map[string]ModelConfig, modelsMax 
 	set.loads = loads
 	for _, l := range loads {
 		set.total += l.bytes
+		set.pinned += l.pinned
 	}
 	return set
 }
@@ -409,6 +451,85 @@ func planResidentSet(models []ModelInfo, cfgs map[string]ModelConfig, modelsMax 
 // warning (servingGPUPlan in production) so tests can drive the host-RAM gate
 // without a GPU.
 var probeServingGPU = servingGPUPlan
+
+// probeMetalPoolMB is the GPU working-set seam for the launch-time memory
+// decisions (metalWiredPoolMB in production) so tests can drive the pool clamp
+// without a Metal device.
+var probeMetalPoolMB = metalWiredPoolMB
+
+// metalPoolBytes is the ceiling Metal may pin bytes into for a load served from
+// Apple silicon, 0 when nothing bounds the load that way.
+//
+// The platform has to say so as well as the GPU snapshot, for the same reason
+// loadRuntimeOverheadBytes checks both: only darwin + apple is the shape where
+// the offloaded weights and the cache live in the device's working set, and a
+// snapshot left over from another platform must never clamp a phone's or a Linux
+// box's budget. A probe that cannot answer (0) leaves the host's free memory as
+// the only ceiling, which is what it always was.
+func metalPoolBytes(serving tuneTarget) int64 {
+	if platformGOOS != "darwin" || serving.Vendor != vendorApple {
+		return 0
+	}
+	return int64(probeMetalPoolMB()) * (1 << 20)
+}
+
+// memoryBudgetBytes is the ceiling a plan-shaping decision may size a context
+// against: the host's free memory clamped by the Metal working set when that is
+// the tighter of the two.
+//
+// This is the clamp the auto-tuner has applied to its own plans all along
+// (tuneHardware's MetalPoolMB branch), and the reason the launch path needed it
+// too is that the two figures do not track each other: on a 24 GiB M2 with
+// freshly freed memory the pool is 18,186 MiB while the RAM budget is 18,360 MiB,
+// so a plan can be priced inside the memory the app checks and still be over the
+// device. Measured on that machine with a 378 MiB Qwen3-0.6B Q4_K_M at full
+// offload, bracketing the context: 155,648 tokens load and generate, 159,744
+// tokens loads without an error, passes /health, then fails every command buffer
+// with kIOGPUCommandBufferCallbackErrorOutOfMemory and answers every later
+// request with HTTP 500 "Compute error" until the model is reloaded.
+//
+// The figure is the whole bill only where the caller prices a full offload (the
+// default, and the shape the measurement above ran in); see modelLoadPricing for
+// the share a partial offload puts on the device, which is what the over-commit
+// warning compares to the pool.
+//
+// An unknown availBytes stays unknown: a failed RAM probe says nothing about the
+// machine, and the pool figure alone must not turn a silent start into a plan.
+func memoryBudgetBytes(availBytes, poolBytes int64) int64 {
+	if availBytes <= 0 {
+		return availBytes
+	}
+	if poolBytes > 0 && poolBytes < availBytes {
+		return poolBytes
+	}
+	return availBytes
+}
+
+// memoryLimitFor decides which ceiling a launch-time over-commit check should
+// report for a priced library, and which bill to quote against it.
+//
+// It is not the same question as memoryBudgetBytes'. Clamping one budget to the
+// tighter of the two ceilings would hide the case where the library passes the
+// pool and busts RAM (or the reverse) by comparing the *other* ceiling's bill
+// against it - here each ceiling is checked against the bill that ceiling actually
+// pays: total against free RAM, the GPU-resident share against the pool. When RAM
+// is over-committed that is what gets reported, because it is the larger problem
+// and the sentence describing it is true; the pool is reported only when it is the
+// limit the machine ran into first, which is the state that produces no failure
+// anywhere else (memoryBudgetBytes' measurements).
+//
+// Returns (0, 0, false) when nothing is exceeded. A failed RAM probe (0) silences
+// the RAM half only: the pool figure is a device property, not a free-memory
+// reading, so an over-pool library is still worth saying.
+func memoryLimitFor(availBytes, poolBytes, totalBytes, pinnedBytes int64) (limit, bill int64, poolBounded bool) {
+	if poolBytes > 0 && pinnedBytes > poolBytes && (availBytes <= 0 || pinnedBytes <= availBytes) {
+		return poolBytes, pinnedBytes, true
+	}
+	if availBytes > 0 && totalBytes > availBytes {
+		return availBytes, totalBytes, false
+	}
+	return 0, 0, false
+}
 
 // servingGPUPlan resolves the GPU llama-server will serve on: the same plan
 // target the auto-tuner sizes its contexts against, read from the cached probe
@@ -447,7 +568,7 @@ func loadsStayInHostRAM(serving tuneTarget) bool {
 // printed nothing. Saying which model and both figures is the only way that
 // state is discoverable from the app.
 //
-// "" when the library is empty or unreadable, the probe failed (availBytes <= 0
+// "" when the library is empty or unreadable, the probe failed (limitBytes <= 0
 // proves nothing), or the priced loads fit. suggestCtx is fittingCtxRung's
 // answer for the heaviest model (>0 = the tier to move to, 0 = no tier on the
 // ladder helps), computed by the caller so this stays a pure formatter.
@@ -457,8 +578,16 @@ func loadsStayInHostRAM(serving tuneTarget) bool {
 // are the same load and the sentence stays the single-load one; above 1 it says
 // how many can be resident and names the cap as the other lever, because the
 // number the user can actually type is what makes the line actionable.
-func overcommitWarning(name string, resident int, totalBytes, heaviestBytes, availBytes int64, suggestCtx int) string {
-	if name == "" || availBytes <= 0 || totalBytes <= availBytes {
+//
+// limitBytes is the budget memoryBudgetBytes resolved and poolBounded says which
+// limit it is, because over each one the failure looks different: past free RAM
+// the machine swaps and crawls, past the GPU working set the load reports
+// success and every request after it answers "Compute error" until the service
+// restarts. Quoting the RAM figure for the second state would name the wrong
+// ceiling and describe the wrong symptom - it is the machine's *other* number
+// that ran out.
+func overcommitWarning(name string, resident int, totalBytes, heaviestBytes, limitBytes int64, poolBounded bool, suggestCtx int) string {
+	if name == "" || limitBytes <= 0 || totalBytes <= limitBytes {
 		return ""
 	}
 	advice := tr("请在模型设置里调小它的上下文大小，或用一键调优重新规划。",
@@ -475,14 +604,23 @@ func overcommitWarning(name string, resident int, totalBytes, heaviestBytes, ava
 		advice = tr("把「最大加载模型数」调小，或在模型设置里调小它的上下文大小、用一键调优重新规划。",
 			"Lower the max-loaded-models count, or shrink this model's context in its settings and re-plan it with one-click tuning.")
 	}
-	if resident > 1 {
-		return fmt.Sprintf(tr("最多 %d 个模型会同时驻留，合计要占约 %s（每个模型各自的权重 + 上下文缓存 + 运行开销）；其中 %s 最重，它一项就要占约 %s。而本机当前只有 %s 空闲内存。服务仍会启动、其他模型照常可用，但真加载到这么多时内存放不下会开始交换：请求可能长时间没有响应、整台机器变卡。%s",
-			"up to %d models can stay resident at once, which costs about %s in total (each model's own weights + context cache + runtime overhead); %s is the heaviest and takes about %s by itself. Only %s of memory is free right now. The service still starts and every other model stays usable, but loading that many will overflow into swap: requests may hang for a long time and the whole machine slows down. %s"),
-			resident, formatBytes(totalBytes), name, formatBytes(heaviestBytes), formatBytes(availBytes), advice)
+	limit := fmt.Sprintf(tr("本机当前只有 %s 空闲内存。", "Only %s of memory is free right now. "), formatBytes(limitBytes))
+	spill := tr("服务仍会启动、其他模型照常可用，但真去加载时内存放不下会开始交换：请求可能长时间没有响应、整台机器变卡。",
+		"The service still starts and every other model stays usable, but loading it will overflow into swap: requests may hang for a long time and the whole machine slows down. ")
+	if poolBounded {
+		limit = fmt.Sprintf(tr("而这台机器 GPU 的工作集上限只有 %s：Metal 能钉住的量比空闲内存还少。",
+			"This machine's GPU working set is capped at %s, which is less than the memory that is free. "), formatBytes(limitBytes))
+		spill = tr("超过这个上限，加载照样报「成功」、健康检查也过，之后每个请求却只返回 Compute error，不重载模型就不会恢复。",
+			"Over that ceiling a load still reports success and passes /health, and every request after it answers Compute error until the model is reloaded. ")
 	}
-	return fmt.Sprintf(tr("模型 %s 这次要占约 %s（权重 + 上下文缓存 + 运行开销），而本机当前只有 %s 空闲内存。服务仍会启动、其他模型照常可用，但真正加载它时内存放不下会开始交换：请求可能长时间没有响应、整台机器变卡。%s",
-		"model %s needs about %s for this load (weights + context cache + runtime overhead) but only %s of memory is free right now. The service still starts and every other model stays usable, but loading it will overflow into swap: requests may hang for a long time and the whole machine slows down. %s"),
-		name, formatBytes(totalBytes), formatBytes(availBytes), advice)
+	if resident > 1 {
+		return fmt.Sprintf(tr("最多 %d 个模型会同时驻留，合计要占约 %s（每个模型各自的权重 + 上下文缓存 + 运行开销）；其中 %s 最重，它一项就要占约 %s。%s%s%s",
+			"up to %d models can stay resident at once, which costs about %s in total (each model's own weights + context cache + runtime overhead); %s is the heaviest and takes about %s by itself. %s%s%s"),
+			resident, formatBytes(totalBytes), name, formatBytes(heaviestBytes), limit, spill, advice)
+	}
+	return fmt.Sprintf(tr("模型 %s 这次要占约 %s（权重 + 上下文缓存 + 运行开销）。%s%s%s",
+		"model %s needs about %s for this load (weights + context cache + runtime overhead). %s%s%s"),
+		name, formatBytes(totalBytes), limit, spill, advice)
 }
 
 // routerModelPlan resolves the config a router-mode load runs m with: the stored
@@ -535,19 +673,21 @@ func routerModelPlan(cfgs map[string]ModelConfig, m ModelInfo) ModelConfig {
 // 980 MiB.
 //
 // The rule keeps the model's own context whenever the app's load price fits the
-// memory available now - never above tuneCtxMax, the ceiling every tuned plan is
-// sized against, so an untuned 256k model cannot end up holding a bigger window
-// than the tuned one would - and otherwise takes the largest rung of the tuner's
-// ladder that fits, down to the ladder's floor. Unreadable metadata or a failed
-// memory probe land on the settings page default, the same fallback the rest of
-// this file uses.
+// memory the machine may actually spend (memoryBudgetBytes - free RAM, or the
+// Metal working set where that is the tighter ceiling; an over-pool entry does
+// not fail to load, it wedges the server) - never above tuneCtxMax, the ceiling
+// every tuned plan is sized against, so an untuned 256k model cannot end up
+// holding a bigger window than the tuned one would - and otherwise takes the
+// largest rung of the tuner's ladder that fits, down to the ladder's floor.
+// Unreadable metadata or a failed memory probe land on the settings page default,
+// the same fallback the rest of this file uses.
 func routerUntunedCtx(m ModelInfo) int {
 	fallback := defaultModelConfig()
 	mm, ok := readGGUFModelMetrics(m.Path)
 	if !ok || mm.ContextLength <= 0 {
 		return fallback.CtxSize
 	}
-	avail := availableMemoryBytes()
+	avail := memoryBudgetBytes(availableMemoryBytes(), metalPoolBytes(probeServingGPU()))
 	if avail <= 0 {
 		return fallback.CtxSize
 	}

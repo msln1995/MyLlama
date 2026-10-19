@@ -1350,6 +1350,66 @@ func TestBuildServerCommandRouterWarnsOnOvercommit(t *testing.T) {
 	}
 }
 
+// TestBuildServerCommandRouterWarnsOnOverPool is the Mac half of the same report:
+// free RAM is not the only ceiling a Metal-serving machine has. Measured on a
+// 24 GiB M2 with a 378 MiB model at -ngl 99: 155,648 tokens of context load and
+// generate, 159,744 load without an error and pass /health, then answer every
+// later request with HTTP 500 "Compute error" - so a library over the device's
+// working set has to say so, naming the working set and the failure it produces.
+//
+// The clamp reads the load's GPU-resident share, not its whole bill: the same
+// library pinned to the CPU (gpu-layers 0) asks Metal for nothing, and a
+// working-set warning about it would name the wrong ceiling.
+func TestBuildServerCommandRouterWarnsOnOverPool(t *testing.T) {
+	withPlatformGOOS(t, "darwin")
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorApple})
+	dir := pinDirectModelDir(t)
+	routerModelDir(t, dir, "pool-author", "pool-heavy-model")
+	modelConfigsMu.Lock()
+	cachedModelConfigs["pool-heavy-model"] = ModelConfig{CtxSize: 131072, UBatchSize: 512}
+	modelConfigsMu.Unlock()
+	// Metal-shaped price: 1024 MiB weights + 256 MiB KV at ctx 131072 + the 320
+	// MiB floor = 1600 MiB. The machine has twice that free, the device 100 less.
+	pinProbeFreeMemoryGB(t, 4)
+	pinProbeMetalPoolMB(t, 1500)
+
+	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 8192}
+	if _, _, err := buildServerCommand(cfg, "/tmp/preset.ini", nil); err != nil {
+		t.Fatal(err)
+	}
+	var warned []string
+	for _, line := range serverLogsCopy() {
+		if strings.HasPrefix(line, "[WARN]") && strings.Contains(line, "pool-heavy-model") {
+			warned = append(warned, line)
+		}
+	}
+	if len(warned) != 1 {
+		t.Fatalf("over-pool warnings = %q, want exactly one naming the entry", warned)
+	}
+	if !strings.Contains(warned[0], "Compute error") {
+		t.Errorf("the over-pool warning does not describe the wedge it prevents: %q", warned[0])
+	}
+	if strings.Contains(warned[0], "空闲内存") || strings.Contains(warned[0], "memory is free") {
+		t.Errorf("the over-pool warning quotes free RAM as the limit: %q", warned[0])
+	}
+
+	// Pinned to the CPU the same load cannot be over the pool, and stays quiet.
+	serverLogsMu.Lock()
+	serverLogs = serverLogs[:0]
+	serverLogsMu.Unlock()
+	modelConfigsMu.Lock()
+	cachedModelConfigs["pool-heavy-model"] = ModelConfig{CtxSize: 131072, UBatchSize: 512, GPULayers: "0"}
+	modelConfigsMu.Unlock()
+	if _, _, err := buildServerCommand(cfg, "/tmp/preset.ini", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range serverLogsCopy() {
+		if strings.Contains(line, "pool-heavy-model") {
+			t.Errorf("a host-only load was warned about its GPU working set: %q", line)
+		}
+	}
+}
+
 // TestBuildServerCommandRouterPricesResidentSet is the cap>1 half of the router
 // memory accounting: --models-max is a count, not a memory bound, so raising it
 // raises the bill by one whole load per extra slot. Measured with b11720 on a

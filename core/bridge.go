@@ -478,20 +478,39 @@ func buildServerCommand(cfg ServerConfig, presetPath string, d *directModel) (st
 	models, cfgs := routerLibrary()
 	set := planResidentSet(models, cfgs, cfg.MaxModels)
 	freeMem := availableMemoryBytes()
-	if len(set.loads) > 0 && freeMem > 0 && set.total > freeMem && loadsStayInHostRAM(probeServingGPU()) {
+	serving := probeServingGPU()
+	// Free RAM is not the only ceiling on a Mac: Metal may pin less than the
+	// machine has free, and a load over that working set never reports the
+	// problem - it wedges the service (memoryLimitFor for the measurements). The
+	// library's GPU-resident share is the bill that ceiling pays, its full price
+	// the one the machine pays, so each gets checked against its own limit.
+	pool := metalPoolBytes(serving)
+	limit, bill, poolBounded := memoryLimitFor(freeMem, pool, set.total, set.pinned)
+	if len(set.loads) > 0 && limit > 0 && loadsStayInHostRAM(serving) {
+		heaviestBill := set.heaviest.bytes
+		if poolBounded {
+			heaviestBill = set.heaviest.pinned
+		}
 		// The advice resizes the heaviest model with the rest of the resident set
 		// still on the bill: the tier it suggests has to fit the memory they leave
-		// over, not the whole machine.
-		rest := set.total - set.heaviest.bytes
-		suggest := fittingCtxRung(set.heaviest.model, set.heaviest.cfg, freeMem-rest)
-		addServerLog("[WARN] " + overcommitWarning(set.heaviest.model.Name, len(set.loads), set.total, set.heaviest.bytes, freeMem, suggest))
+		// over, not the whole machine. The tier is priced at the full bill against
+		// a pool limit, which is the conservative direction - a partial offload
+		// keeps some of those bytes out of the working set, so the tier it names
+		// fits the pool with room to spare.
+		rest := bill - heaviestBill
+		suggest := fittingCtxRung(set.heaviest.model, set.heaviest.cfg, limit-rest)
+		addServerLog("[WARN] " + overcommitWarning(set.heaviest.model.Name, len(set.loads), bill, heaviestBill, limit, poolBounded, suggest))
 	}
 	if cfg.CacheRAM > 0 {
 		// Router mode loads models lazily, so the memory the prompt cache may
 		// grow into during the session is bounded against the loads that can be
 		// resident together rather than against whatever is loaded at launch (see
 		// planResidentSet and promptCacheRAMMiB). As in direct mode the bounded
-		// figure always reaches argv, 0 included.
+		// figure always reaches argv, 0 included. This one stays on free RAM and
+		// not on the pool-clamped budget: the retained prompt cache is a host-side
+		// copy of the slot state (promptCacheRAMMiB's RSS measurements), so the
+		// working-set ceiling does not bound it - the loads it is billed against
+		// are the same full-price figures either way.
 		cacheRAM := promptCacheRAMMiB(cfg.CacheRAM, set.total, freeMem)
 		if cacheRAM != cfg.CacheRAM {
 			addServerLog(fmt.Sprintf("[INFO] prompt cache budget %d -> %d MiB, the memory the models that can be resident at once leave free", cfg.CacheRAM, cacheRAM))

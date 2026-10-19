@@ -24,6 +24,15 @@ func pinProbeServingGPU(t *testing.T, target tuneTarget) {
 	t.Cleanup(func() { probeServingGPU = orig })
 }
 
+// pinProbeMetalPoolMB pins the GPU working-set seam (MiB) so the pool clamp is
+// driven without a Metal device; 0 means "the probe cannot answer".
+func pinProbeMetalPoolMB(t *testing.T, poolMiB int) {
+	t.Helper()
+	orig := probeMetalPoolMB
+	probeMetalPoolMB = func() int { return poolMiB }
+	t.Cleanup(func() { probeMetalPoolMB = orig })
+}
+
 // pinCPUSHapedReserve charges every load the 1280 MiB-at-512 CPU-only reserve.
 // loadRuntimeOverheadBytes picks the figure from the platform plus the serving
 // GPU probe, so a test that documents CPU arithmetic would otherwise get the
@@ -38,10 +47,13 @@ func pinCPUSHapedReserve(t *testing.T) {
 // the 320 MiB-at-512 floor instead. Every plan these tests price is the tuner's
 // full offload (or an unset gpu-layers), so no host-resident weight copy is
 // added on top of the floor - see TestLoadRuntimeOverheadBytesShape for that term.
+// The working-set pool is pinned off: these tests price a load's size, and the
+// pool only ever *shrinks* the budget a launch-time decision plans against.
 func pinMetalShapedReserve(t *testing.T) {
 	t.Helper()
 	withPlatformGOOS(t, "darwin")
 	pinProbeServingGPU(t, tuneTarget{Vendor: vendorApple})
+	pinProbeMetalPoolMB(t, 0)
 }
 
 // TestAvailableMemoryBytes verifies the probe seam plumbing: the GiB value is
@@ -1209,6 +1221,43 @@ func TestRouterUntunedCtx(t *testing.T) {
 	}
 }
 
+// TestRouterUntunedCtxStopsAtThePool pins the second ceiling on the context an
+// unconfigured model gets: free RAM the machine may spend is not what Metal may
+// pin, and an untuned entry sized to RAM alone is the wedge the tuner has always
+// clamped its own plans away from (memoryBudgetBytes' measurements).
+//
+// geomGGUF trains at 32768 and costs 2 KiB of f16 KV per token; priced with the
+// Metal floor its rungs are 1024 + ctx x 2 KiB + 320 MiB.
+func TestRouterUntunedCtxStopsAtThePool(t *testing.T) {
+	pinMetalShapedReserve(t)
+	dir := t.TempDir()
+	path := geomGGUF(t, dir, "geom.gguf")
+	m := ModelInfo{Name: "untuned", Path: path, SizeBytes: 1 << 30}
+	price := func(ctx int) int64 {
+		c := defaultModelConfig()
+		c.CtxSize = ctx
+		return modelLoadBytes(m, c)
+	}
+
+	// RAM can pay for the trained window; the device cannot.
+	pinProbeFreeMemoryGB(t, gibFromMiB(price(32768)/(1<<20)+1))
+	pinProbeMetalPoolMB(t, int(price(16384)/(1<<20))+1)
+	if got := routerUntunedCtx(m); got != 16384 {
+		t.Errorf("untuned ctx with the pool below the trained price = %d, want 16384", got)
+	}
+	// The same machine with no pool answer keeps the trained window: 0 from the
+	// probe means "unknown", not "the device is out of memory".
+	pinProbeMetalPoolMB(t, 0)
+	if got := routerUntunedCtx(m); got != 32768 {
+		t.Errorf("untuned ctx with no pool figure = %d, want the trained 32768", got)
+	}
+	// A wider pool than the trained price does not shrink anything either.
+	pinProbeMetalPoolMB(t, int(price(32768)/(1<<20))+1)
+	if got := routerUntunedCtx(m); got != 32768 {
+		t.Errorf("untuned ctx with pool above the trained price = %d, want 32768", got)
+	}
+}
+
 // TestUnconfiguredModelKeepsLibraryPromptCache is the regression for the harm the
 // bounded context removes: with the untuned entry left without ctx-size, its
 // trained context priced above the machine's memory made the library's heaviest
@@ -1267,6 +1316,11 @@ func TestLoadsStayInHostRAM(t *testing.T) {
 // tier the caller resolved, when one exists. With more than one load able to be
 // resident it also says how many and quotes the heaviest one's own share, so the
 // line names both the total the session can reach and the model to shrink.
+//
+// The pool-bound rows are the same check reporting the other ceiling: over the
+// GPU working set the load does not thrash, it wedges, so the line has to name
+// the working set and say what actually happens ("Compute error" is in both
+// languages' wording; the rest of the sentence is tr()-resolved).
 func TestOvercommitWarning(t *testing.T) {
 	const gib = int64(1 << 30)
 	tests := []struct {
@@ -1275,24 +1329,27 @@ func TestOvercommitWarning(t *testing.T) {
 		resident  int
 		need      int64
 		heaviest  int64
-		avail     int64
+		limit     int64
+		pool      bool
 		suggest   int
 		want      bool
 		wantTier  bool
 		wantCount bool
 	}{
-		{"fits", "m", 1, 3 * gib, 3 * gib, 5 * gib, 0, false, false, false},
-		{"exactly at the limit fits", "m", 1, 4 * gib, 4 * gib, 4 * gib, 0, false, false, false},
-		{"failed probe says nothing", "m", 2, 20 * gib, 12 * gib, 0, 16384, false, false, false},
-		{"empty library says nothing", "", 1, 20 * gib, 20 * gib, gib, 16384, false, false, false},
-		{"over-committed warns", "qwen-4b", 1, 4*gib + 1, 4*gib + 1, 4 * gib, 0, true, false, false},
-		{"over-committed warns with the tier", "qwen-4b", 1, 4*gib + 1, 4*gib + 1, 4 * gib, 32768, true, true, false},
-		{"the resident set over-commits", "qwen-4b", 3, 11 * gib, 4 * gib, 8 * gib, 0, true, false, true},
-		{"a resident set with a tier that fits", "qwen-4b", 2, 9 * gib, 5 * gib, 8 * gib, 16384, true, true, true},
+		{"fits", "m", 1, 3 * gib, 3 * gib, 5 * gib, false, 0, false, false, false},
+		{"exactly at the limit fits", "m", 1, 4 * gib, 4 * gib, 4 * gib, false, 0, false, false, false},
+		{"failed probe says nothing", "m", 2, 20 * gib, 12 * gib, 0, false, 16384, false, false, false},
+		{"empty library says nothing", "", 1, 20 * gib, 20 * gib, gib, false, 16384, false, false, false},
+		{"over-committed warns", "qwen-4b", 1, 4*gib + 1, 4*gib + 1, 4 * gib, false, 0, true, false, false},
+		{"over-committed warns with the tier", "qwen-4b", 1, 4*gib + 1, 4*gib + 1, 4 * gib, false, 32768, true, true, false},
+		{"the resident set over-commits", "qwen-4b", 3, 11 * gib, 4 * gib, 8 * gib, false, 0, true, false, true},
+		{"a resident set with a tier that fits", "qwen-4b", 2, 9 * gib, 5 * gib, 8 * gib, false, 16384, true, true, true},
+		{"a load over the working set warns", "qwen-4b", 1, 19 * gib, 19 * gib, 18 * gib, true, 0, true, false, false},
+		{"a resident set over the working set warns", "qwen-4b", 2, 21 * gib, 12 * gib, 18 * gib, true, 16384, true, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := overcommitWarning(tt.model, tt.resident, tt.need, tt.heaviest, tt.avail, tt.suggest)
+			got := overcommitWarning(tt.model, tt.resident, tt.need, tt.heaviest, tt.limit, tt.pool, tt.suggest)
 			if tt.want && got == "" {
 				t.Error("overcommitWarning = \"\", want a warning")
 			}
@@ -1302,7 +1359,7 @@ func TestOvercommitWarning(t *testing.T) {
 			if !tt.want {
 				return
 			}
-			frags := []string{tt.model, formatBytes(tt.need), formatBytes(tt.avail)}
+			frags := []string{tt.model, formatBytes(tt.need), formatBytes(tt.limit)}
 			if tt.resident > 1 {
 				// The heaviest load's own figure is the one the advice is about;
 				// printing only the total would hide which model to open.
@@ -1312,6 +1369,11 @@ func TestOvercommitWarning(t *testing.T) {
 				if !strings.Contains(got, frag) {
 					t.Errorf("warning %q does not carry %q", got, frag)
 				}
+			}
+			// Which ceiling bound it decides which failure the line describes;
+			// asserted on a phrase that survives both languages.
+			if tt.pool != strings.Contains(got, "Compute error") {
+				t.Errorf("warning %q poolBounded mismatch (want pool wording: %v)", got, tt.pool)
 			}
 			// Asserted by digits: the advice sentence is tr()-resolved.
 			if tt.wantTier && !strings.Contains(got, strconv.Itoa(tt.suggest)) {
@@ -1324,6 +1386,150 @@ func TestOvercommitWarning(t *testing.T) {
 				t.Errorf("warning %q does not say how many models can be resident", got)
 			}
 		})
+	}
+}
+
+// TestMemoryBudgetBytes pins the clamp that keeps a Mac plan inside the device's
+// working set: RAM bounds the plan unless the pool is the tighter figure, and a
+// probe that cannot answer (0) leaves RAM alone. A failed RAM probe stays a
+// failed probe - the pool figure must not turn "we know nothing" into an opinion.
+func TestMemoryBudgetBytes(t *testing.T) {
+	const mib = int64(1 << 20)
+	tests := []struct {
+		name  string
+		avail int64
+		pool  int64
+		want  int64
+	}{
+		{"free RAM bounds when the pool answers wider", 8 * mib, 18186 * mib, 8 * mib},
+		{"the pool bounds over freshly freed memory", 18360 * mib, 18186 * mib, 18186 * mib},
+		{"a pool of exactly the free memory changes nothing", 18186 * mib, 18186 * mib, 18186 * mib},
+		{"no pool answer leaves RAM", 8 * mib, 0, 8 * mib},
+		{"a failed RAM probe stays unknown", 0, 18186 * mib, 0},
+		{"negative RAM stays unknown", -mib, 18186 * mib, -mib},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := memoryBudgetBytes(tt.avail, tt.pool); got != tt.want {
+				t.Errorf("memoryBudgetBytes(%d, %d) = %d, want %d", tt.avail, tt.pool, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMemoryLimitFor pins the two-ceiling check the over-commit warning reads:
+// each ceiling is compared against the bill that ceiling pays, and RAM wins the
+// wording when both are over — the machine crawling is the larger problem and the
+// free-memory sentence is the one that is true then.
+func TestMemoryLimitFor(t *testing.T) {
+	const gib = int64(1 << 30)
+	tests := []struct {
+		name    string
+		avail   int64
+		pool    int64
+		total   int64
+		pinned  int64
+		limit   int64
+		bill    int64
+		bounded bool
+	}{
+		{"a library inside both is quiet", 20 * gib, 18 * gib, 10 * gib, 10 * gib, 0, 0, false},
+		{"over RAM reports RAM with the full bill", 8 * gib, 18 * gib, 12 * gib, 12 * gib, 8 * gib, 12 * gib, false},
+		{"over the pool only reports the pool with its own bill", 20 * gib, 18 * gib, 19 * gib, 19 * gib, 18 * gib, 19 * gib, true},
+		{"over both still reports RAM", 17 * gib, 18 * gib, 19 * gib, 19 * gib, 17 * gib, 19 * gib, false},
+		{"a host-only load cannot be over the pool", 20 * gib, 18 * gib, 25 * gib, 0, 20 * gib, 25 * gib, false},
+		{"no pool answer leaves only RAM", 8 * gib, 0, 12 * gib, 12 * gib, 8 * gib, 12 * gib, false},
+		{"a failed RAM probe leaves the pool as the one figure that answers", 0, 18 * gib, 19 * gib, 19 * gib, 18 * gib, 19 * gib, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			limit, bill, bounded := memoryLimitFor(tt.avail, tt.pool, tt.total, tt.pinned)
+			if limit != tt.limit || bill != tt.bill || bounded != tt.bounded {
+				t.Errorf("memoryLimitFor(avail %d, pool %d, total %d, pinned %d) = (%d, %d, %v), want (%d, %d, %v)",
+					tt.avail, tt.pool, tt.total, tt.pinned, limit, bill, bounded, tt.limit, tt.bill, tt.bounded)
+			}
+		})
+	}
+}
+
+// TestMetalPoolBytes pins the platform gate on the working-set figure: only a Mac
+// serving from Apple silicon has a pool to respect, and a probe that cannot answer
+// leaves no clamp. The GPU snapshot alone is not enough - a stale vendorApple entry
+// must never clamp another platform's budget.
+func TestMetalPoolBytes(t *testing.T) {
+	pinProbeMetalPoolMB(t, 18186)
+	apple := tuneTarget{Vendor: vendorApple}
+	tests := []struct {
+		name  string
+		goos  string
+		gpu   tuneTarget
+		pool  int
+		wantB int64
+	}{
+		{"Mac serving Metal", "darwin", apple, 18186, 18186 * (1 << 20)},
+		{"Mac serving no GPU", "darwin", tuneTarget{Vendor: vendorNone}, 18186, 0},
+		{"Linux with an Apple snapshot left over", "linux", apple, 18186, 0},
+		{"Android with an Apple snapshot left over", "android", apple, 18186, 0},
+		{"Mac whose probe did not answer", "darwin", apple, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withPlatformGOOS(t, tt.goos)
+			pinProbeServingGPU(t, tt.gpu)
+			pinProbeMetalPoolMB(t, tt.pool)
+			if got := metalPoolBytes(tt.gpu); got != tt.wantB {
+				t.Errorf("metalPoolBytes() = %d bytes, want %d", got, tt.wantB)
+			}
+		})
+	}
+}
+
+// TestModelLoadPricingSplitsTheHostCopy pins what the pool check is allowed to
+// bill: the host-only weight copy a Mac partial offload carries (hostWeightBytes)
+// is never in the working set, and a plan that offloads no layer at all asks the
+// device for nothing.
+func TestModelLoadPricingSplitsTheHostCopy(t *testing.T) {
+	withPlatformGOOS(t, "darwin")
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorApple})
+	pinProbeMetalPoolMB(t, 0)
+	dir := t.TempDir()
+	m := ModelInfo{Name: "memfit-model", Path: writeMemfitGGUF(t, dir), SizeBytes: 1 << 30}
+
+	// Full offload (the tuner's own shape): the whole bill is the device's.
+	total, pinned := modelLoadPricing(m, ModelConfig{CtxSize: 4096})
+	if pinned != total {
+		t.Errorf("full offload pinned = %d, want the whole bill %d", pinned, total)
+	}
+
+	// The fixture has no mmproj, so a host cut line of every layer is a host copy
+	// of the whole file: the weight term already covers one copy of it.
+	total0, pinned0 := modelLoadPricing(m, ModelConfig{CtxSize: 4096, GPULayers: "0"})
+	if pinned0 != 0 {
+		t.Errorf("-ngl 0 pinned = %d, want 0: nothing was handed to Metal", pinned0)
+	}
+	if total0 != total+m.SizeBytes {
+		t.Errorf("-ngl 0 total = %d, want %d (the same bill plus a host copy of the weights)", total0, total+m.SizeBytes)
+	}
+
+	// A partial offload keeps only the layers behind its cut line out of the pool
+	// bill: the bill that stays is the whole weight term plus the cache and the
+	// floor, because modelLoadBytes does not split the file by the offload line.
+	// That over-prices the working set by the blocks the CPU runs, which is the
+	// direction a launch-time ceiling has to take - it must not hide an over-pool
+	// load - and it is why a `0` cut line is answered by the branch above instead.
+	metrics, ok := readGGUFModelMetrics(m.Path)
+	if !ok || metrics.BlockCount <= 1 {
+		t.Fatalf("fixture block count = %d, want more than one layer to split", metrics.BlockCount)
+	}
+	layers := metrics.BlockCount
+	hostLayers := layers / 2
+	partialTotal, partialPinned := modelLoadPricing(m, ModelConfig{CtxSize: 4096, GPULayers: strconv.Itoa(layers - hostLayers)})
+	if want := m.SizeBytes * int64(hostLayers) / int64(layers); partialTotal-partialPinned != want {
+		t.Errorf("partial offload dropped %d bytes from its %d bill, want the host share of %d (%d of %d layers)",
+			partialTotal-partialPinned, partialTotal, want, hostLayers, layers)
+	}
+	if partialPinned >= partialTotal || partialPinned <= 0 {
+		t.Errorf("partial offload pinned = %d of total %d, want part of the bill", partialPinned, partialTotal)
 	}
 }
 
