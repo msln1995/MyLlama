@@ -640,17 +640,20 @@
           <a
             v-else-if="isPhone"
             class="row-tail updates-link"
-            href="https://github.com/CodeNeow/MyLlama/releases"
+            href="https://github.com/msln1995/MyLlama/releases"
             @click="handleLinkClick"
           >{{ t('settings.updateReleasesLink') }} <span aria-hidden="true">↗</span></a>
         </div>
+        <!-- Fork clarification note: this build is from an independent fork with
+             significant optimizations, not the upstream official version -->
+        <p class="row-foot update-fork-note">{{ t('settings.updateForkNote') }}</p>
         <!-- Android (all form factors): Releases link as a footnote row — the
              in-app modal handles the actual install path, so the link is
              supplementary, not the primary discovery mechanism. -->
         <p v-if="isAndroid" class="row-foot update-hint">
           <a
             class="hint-link"
-            href="https://github.com/CodeNeow/MyLlama/releases"
+            href="https://github.com/msln1995/MyLlama/releases"
             @click="handleLinkClick"
           >{{ t('settings.updateReleasesLink') }}</a>
         </p>
@@ -661,7 +664,7 @@
           {{ t('settings.updateNotSupported') }}
           <a
             class="hint-link"
-            href="https://github.com/CodeNeow/MyLlama/releases"
+            href="https://github.com/msln1995/MyLlama/releases"
             @click="handleLinkClick"
           >{{ t('settings.updateReleasesLink') }}</a>
         </p>
@@ -682,7 +685,7 @@
         </div>
         <div class="about-row">
           <span class="about-label">{{ t('settings.repo') }}</span>
-          <span class="about-value about-mono">https://github.com/CodeNeow/MyLlama</span>
+          <span class="about-value about-mono">https://github.com/msln1995/MyLlama</span>
         </div>
       </div>
       <!-- Phone (frame ⑯): the three rows consolidate into ONE row — label,
@@ -693,11 +696,11 @@
           <span class="row-ic ic-about" v-html="ICON_INFO"></span>
           <div class="row-text">
             <span class="row-title">{{ t('settings.about') }}</span>
-            <span class="row-sub">v{{ appVersion || '—' }} · GPL-3.0 · CodeNeow/MyLlama</span>
+            <span class="row-sub">v{{ appVersion || '—' }} · GPL-3.0 · msln1995/MyLlama</span>
           </div>
           <a
             class="row-tail about-link"
-            href="https://github.com/CodeNeow/MyLlama"
+            href="https://github.com/msln1995/MyLlama"
             :aria-label="t('settings.repo')"
             @click="handleLinkClick"
           >›</a>
@@ -2272,6 +2275,12 @@ async function manualCheck() {
 /* Non-Windows updates hint (link mode): full-width footnote under the row */
 .update-hint {
   text-align: left;
+}
+
+/* Fork clarification note: muted style to distinguish from official version */
+.update-fork-note {
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 .hint-link {

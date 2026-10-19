@@ -34,14 +34,16 @@ var currentVersion = strings.TrimSpace(string(versionFile))
 // name, the current version and the repository URL so recipients can
 // attribute the traffic to this project.
 func appUserAgent() string {
-	return "MyLlama/" + currentVersion + " (+https://github.com/CodeNeow/MyLlama)"
+	return "MyLlama/" + currentVersion + " (+https://github.com/msln1995/MyLlama)"
 }
 
-// updateRepoAPI points to this repository's latest release API. The URL is
+// updateRepoAPI points to this fork's latest release API. The URL is
 // received by CheckForUpdateAt to support test injection of a local httptest
 // server. Declared as a var so tests can replace the package-level variable to
 // simulate the network (same style as configFile / renameFile).
-var updateRepoAPI = "https://api.github.com/repos/CodeNeow/MyLlama/releases/latest"
+// This fork (msln1995/MyLlama) diverges from the upstream (CodeNeow/MyLlama)
+// with significant optimizations and platform-specific fixes.
+var updateRepoAPI = "https://api.github.com/repos/msln1995/MyLlama/releases/latest"
 
 // compareVersions compares two version strings like v1.2.3 (leading v / V
 // ignored). Returns -1 when a < b, 0 when equal, 1 when a > b; unparseable
