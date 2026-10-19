@@ -82,7 +82,8 @@ adb forward tcp:18080 tcp:8080 >/dev/null
   while true; do
     adb forward tcp:18080 tcp:8080 >/dev/null 2>&1
     adb shell "ps -A -o RSS,NAME | grep llama-server | head -1; grep MemAvailable /proc/meminfo;
-      cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq /sys/devices/system/cpu/cpu4/cpufreq/scaling_cur_freq /sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq /sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq" \
+      printf 'cur0=%s cur4=%s cur7=%s max4=%s' \$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq) \$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_cur_freq) \$(cat /sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq) \$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq);
+      printf ' temp=%s' \$(dumpsys battery | grep temperature | tr -cd '0-9'); echo" \
       | tr -s ' \n' ' '
     echo
     # One line per tick: "<tid> <utime+stime jiffies> <last-run cpu>;" for every
@@ -105,11 +106,40 @@ sleep 5
 # The placement analyzer pairs samples within this run only, so start clean.
 rm -f "$OUT/$LABEL-threads.txt"
 python3 - "$LABEL" "$OUT/$LABEL-work.txt" <<'PY'
-import json, random, string, sys, time, urllib.error, urllib.request
+import json, random, re, string, subprocess, sys, time, urllib.error, urllib.request
 
 BASE = "http://127.0.0.1:18080"
 label, outfile = sys.argv[1], sys.argv[2]
 out = open(outfile, "w", buffering=1)
+
+
+def probe():
+    # Server RSS and battery temperature at each round boundary, so memory and
+    # heat can be compared at the same request index. Comparing them at the same
+    # wall-clock fraction instead biases the median: a throttled arm simply
+    # spends longer in the later, larger-RSS part of the run.
+    try:
+        p = subprocess.run(["adb", "shell",
+                            "grep VmRSS /proc/$(pidof llama-server)/status; "
+                            "dumpsys battery | grep temperature; "
+                            "cat /sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq "
+                            "/sys/devices/system/cpu/cpu7/cpufreq/scaling_max_freq"],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    rss = re.search(r"VmRSS:\s+(\d+)", p.stdout)
+    temp = re.search(r"temperature:\s*(\d+)", p.stdout)
+    if not rss:
+        return ""
+    bit = f" rss={int(rss.group(1)) // 1024}MiB"
+    if temp:
+        bit += f" temp={int(temp.group(1)) / 10:.1f}C"
+    # The clock the *next* round starts in, which is what the sag actually does
+    # to a round; the whole-run median of it hides the collapse (see 2026-10-19).
+    big = re.findall(r"^\s*(\d{6,8})\s*$", p.stdout, re.M)
+    if big:
+        bit += f" cpu7={int(big[0]) // 1000}MHz(max {int(big[1]) // 1000})"
+    return bit
 
 
 def filler(n_words, seed):
@@ -151,14 +181,14 @@ for i in range(3):
     nonce = "".join(random.choices(string.ascii_lowercase, k=10))
     msgs = [{"role": "user", "content": f"[{nonce}] {filler(900, 1000 + i * 977)}\n\nThree short bullets."}]
     pp, tg, dt = chat(msgs, 128)
-    out.write(f"distinct {i}: pp={pp} tg={tg} t={dt:.1f}s\n")
+    out.write(f"distinct {i}: pp={pp} tg={tg} t={dt:.1f}s{probe()}\n")
 
 # Phase 2: one growing conversation - the same prefix is re-sent every turn,
 # which is what a chat app does and what the prompt cache is for.
 msgs = [{"role": "user", "content": filler(900, 4242) + "\n\nGive me a one-line summary."}]
 for turn in range(4):
     pp, tg, dt = chat(msgs, 64)
-    out.write(f"grow {turn}: pp={pp} tg={tg} t={dt:.1f}s\n")
+    out.write(f"grow {turn}: pp={pp} tg={tg} t={dt:.1f}s{probe()}\n")
     msgs.append({"role": "assistant", "content": "ok " * 40})
     msgs.append({"role": "user", "content": f"turn {turn}: name three details.\n\nfiller: " + filler(120, turn)})
 out.write("# done\n")
@@ -173,9 +203,10 @@ adb shell "cat $LOG" > "$OUT/$LABEL-srv.log" 2>/dev/null
 echo "--- $LABEL RSS samples (MiB) / min avail / cpufreq ceiling / core placement"
 python3 - "$OUT/$LABEL-sample.txt" "$OUT/$LABEL-threads.txt" <<'PY'
 import os
+import re
 import sys
 
-rss, avail, cur0, cur4, cur7, max4 = [], [], [], [], [], []
+rss, avail, cur0, cur4, cur7, max4, temp = [], [], [], [], [], [], []
 for line in open(sys.argv[1]):
     parts = line.split()
     if len(parts) < 4 or not parts[0].isdigit():
@@ -184,19 +215,36 @@ for line in open(sys.argv[1]):
     for i, word in enumerate(parts):
         if word.startswith("MemAvailable") and i + 1 < len(parts):
             avail.append(int(parts[i + 1]) // 1024)
-    # Trailing MHz readings (cur per cluster, then the big-cluster max); absent
-    # in samples taken before the probe existed.
-    tail = [int(w) for w in parts[-4:] if w.isdigit() and int(w) > 100000]
-    if len(tail) == 4:
-        cur0.append(tail[0] // 1000), cur4.append(tail[1] // 1000)
-        cur7.append(tail[2] // 1000), max4.append(tail[3] // 1000)
+    # cpufreq readings, labelled from 2026-10-19 on; before that the same four
+    # values were the trailing bare numbers (cur per cluster, then big-cluster
+    # max). Temps only exist in the labelled form.
+    lab = dict(re.findall(r"(cur0|cur4|cur7|max4|temp)=(\d+)", line))
+    if lab:
+        for key, sink in (("cur0", cur0), ("cur4", cur4), ("cur7", cur7), ("max4", max4)):
+            if key in lab:
+                sink.append(int(lab[key]) // 1000)
+        if "temp" in lab:
+            temp.append(int(lab["temp"]) / 10.0)
+    else:
+        tail = [int(w) for w in parts[-4:] if w.isdigit() and int(w) > 100000]
+        if len(tail) == 4:
+            cur0.append(tail[0] // 1000)
+            cur4.append(tail[1] // 1000)
+            cur7.append(tail[2] // 1000)
+            max4.append(tail[3] // 1000)
 if rss:
     line = (f"peak_rss_MiB={max(rss)} last_rss_MiB={rss[-1]} "
             f"min_avail_MiB={min(avail) if avail else -1} n={len(rss)}")
     if cur7:
         med = lambda xs: sorted(xs)[len(xs) // 2]
+        half = len(cur7) // 2
         line += (f" cpuMHz med(cur0/cur4/cur7)={med(cur0)}/{med(cur4)}/{med(cur7)}"
-                 f" min_big={min(cur7)} ceiling_big={med(max4)}")
+                 f" cur7 1st/2nd half={med(cur7[:half])}/{med(cur7[half:])}"
+                 f" ceiling_big={med(max4)}")
+        # The whole-run medians matched exactly for the pair whose decode speeds
+        # differed by 1.4x, so the split-half numbers are the ones to compare.
+        if temp:
+            line += f" temp={min(temp):.1f}-{max(temp):.1f}C med={med(temp):.1f}"
     print(line)
 
 # CPU-time-weighted placement: each thread's runtime delta between two ticks is
