@@ -106,7 +106,7 @@ adb shell am start -W -n com.wails.app/com.wails.app.MainActivity
 - [ ] 侧载安装,启动器图标为品牌图,应用名正确
 - [ ] 首启动:JNI 存储锚点生效(下载不再报 read-only)
 - [ ] 运行环境:llama.cpp android-arm64 下载、可执行(llama-server 启动成功)
-- [ ] 模型:通过 HF 下载小模型到外部存储,列表可见
+- [ ] 模型:通过 HF 下载小模型,列表可见(优先应用专属外部存储;建不出该目录的机型会静默回落到应用私有目录——vivo / Android 13 实测如此,卸载即丢)
 - [ ] 聊天:加载模型 → 流式回复 → 停止服务释放内存
 - [ ] 模型参数设置页:不显示 Flash Attention / cpu-moe / n-cpu-moe / GPU 层数;加载方式无 `dio` 选项
 - [ ] 布局:手机单列无横向溢出;平板(如有)双列与侧边导航轨

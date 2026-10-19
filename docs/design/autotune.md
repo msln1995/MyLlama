@@ -287,10 +287,33 @@ llama-server --host 127.0.0.1 --port 8080 --alias Qwen3-4B-Instruct -m <internal
 反而不如 8192 组（3,989 / 3,806）。整机余量受温控和其他进程摆布，不是可比的量；同机同负载下可比的
 是那个进程自己的 RSS 中位数。
 
-顺带记一条重装时会踩的事实：旧版把模型和 llama.cpp 都放在应用私有目录
-（`/data/user/<n>/<pkg>/files/…`），卸载即删；HEAD 的新默认则把模型挪到应用专属**外部**存储
-（`androidModelsBase`，shell 可直接写入，几 GB 的权重不必重新下载），运行时仍留在内部目录（SELinux
-不允许在外部/FUSE 挂载上执行）。
+应用自己的那条链路也走了一遍：HEAD 构建（debug 签名，b11717 与旧版同一引擎）装上后，对**同一个
+形状**（4B Q4_K_M、ctx 8192、threads 4、batch 2048 / ubatch 512、`--gpu-layers 0`）真的发出
+
+```
+llama-server … --ctx-size 8192 … --cache-ram 1150
+```
+
+8192 被收成了 1150（同一条 `promptCacheRAMMiB`，只是这一刻的余量比独立复测那两组更少，所以数更小）。
+整段负载跑下来 RSS 只在 4,985–5,206 MiB 之间动（中位 5,109），而独立那两组 `--cache-ram 8192` 会
+一路顶到 5,977——收口买到的正是这条带子的上沿。和旧版应用对表只能看方向、不能看绝对值，因为旧版当时
+加载的是 Q5_K_M（权重档位比 Q4_K_M 高一截）：旧版中位 5,751 / 峰 5,864、整机余量低谷 2,553 MiB、
+负载总时长 663s 且最后一轮卡到 148s；这次的中位 5,109、低谷 2,926 MiB、总时长 516s、最慢的缓存命中轮
+38s。引擎同版本（b11717）、参数形状同形状，变的只有这条预算和权重档位这两项。
+
+顺带一句：这次装的是 gradle 直接产出的 debuggable 变体（`build/android/app/build/outputs/apk/debug/`，
+与 `build/bin` 那个包同一份代码、同一把 debug 签名，只是带 `debuggable` 标志），为的是能用 `run-as`
+以应用自己的 uid 去看它的私有目录和试着建外部存储路径——下面的坑就是这么现的形。
+
+还有一个**未收口的坑**，就在这次重装里现的形：`androidModelsBase` 想把模型放到应用专属外部存储
+（`/storage/emulated/0/Android/data/<pkg>/files/LLM-Models`，shell 可直接写入，几 GB 的权重不必重下），
+靠的是从 JNI 的内部 files 目录**推**路径。这台 vivo / Android 13 上推出来的路径存在但应用建不了它：
+装完后 `/storage/emulated/0/Android/data/<pkg>` 一直没有被创建，用 `run-as` 拿应用自己的 uid 去
+`mkdir` 也是 `Permission denied`（连 `/storage/emulated` 都进不去）。于是 `os.MkdirAll` 失败，
+`androidModelsBase` 按设计静默回落到内部目录——功能上没事（内部与外部是同一块物理盘），代价是
+**那条外部路径从没在这类真机上验证过**，而且模型一旦落在 `/data/user/<n>/<pkg>/files` 里，卸载即删、
+shell 也塞不进去，重装必然要重下一遍权重。真要吃到外部存储的便利，得走 Java 侧
+`Context.getExternalFilesDir()` 让系统来建这个目录，而不是在 Go 里拼路径。
 
 ## 实测 RAM 带宽校准（`core/benchbw.go`）
 
