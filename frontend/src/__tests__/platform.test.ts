@@ -16,11 +16,13 @@ import {
   accelBuildKey,
   showMultiGpuPanel,
   showGpuOffloadParam,
+  warnsMoeCpuSplit,
   loadModeOptions,
   type OsId,
   type PlatformState,
 } from '../lib/platform'
 import { MOBILE_MAX, TABLET_MAX } from '../lib/layout'
+import { messages } from '../lib/i18n'
 
 describe('parseOs', () => {
   it.each<[string | null | undefined, OsId]>([
@@ -245,6 +247,31 @@ describe('hardware-capability render gates', () => {
     ['ios', 'arm64', false],
   ])('showGpuOffloadParam: %s arch=%j -> %s', (os, arch, expected) => {
     expect(showGpuOffloadParam(buildPlatformState(os, 1920, arch))).toBe(expected)
+  })
+
+  // The MoE expert split is a discrete-VRAM trick. Measured on an M2 with
+  // OLMoE-1B-7B Q4_0 (3456 MiB of experts): dirty memory 575 -> 4035 MB and
+  // decode 94.43 -> 28.94 t/s (prefill 1065.74 -> 227.97) with -ngl 99
+  // --cpu-moe, so the page must not tell a Mac user that VRAM shortage is the
+  // reason to turn it on.
+  it.each<[OsId, string, boolean]>([
+    ['windows', '', false], // CUDA: experts really do leave the VRAM budget
+    ['linux', 'arm64', false], // Vulkan/ROCm: same
+    ['darwin', 'arm64', true], // unified memory: costs RAM *and* speed
+    ['darwin', 'amd64', false], // the CPU-only macOS release has no Metal split to warn about
+    ['android', 'arm64', false], // the controls do not even render there
+  ])('warnsMoeCpuSplit: %s arch=%j -> %s', (os, arch, expected) => {
+    expect(warnsMoeCpuSplit(buildPlatformState(os, 1920, arch))).toBe(expected)
+  })
+
+  it('both languages carry the Apple silicon MoE copy', () => {
+    // The settings page picks these keys by platform, so a missing one renders
+    // the raw key on a Mac rather than a sentence.
+    for (const locale of ['zh', 'en'] as const) {
+      for (const key of ['cpuMoeSubMac', 'cpuMoeHintMac', 'nCpuMoeHintMac']) {
+        expect(messages[locale][`modelSettings.${key}`]).toBeTruthy()
+      }
+    }
   })
 })
 

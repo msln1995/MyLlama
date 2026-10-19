@@ -662,6 +662,12 @@ export const messages: Record<Locale, Record<string, string>> = {
     'modelSettings.nCpuMoe': 'MoE CPU 层数',
     'modelSettings.nCpuMoePlaceholder': '0 不启用',
     'modelSettings.nCpuMoeHint': '前 N 层 MoE 专家留 CPU,0 不启用;显存不足时逐步加大',
+    // Apple silicon wording for the same two controls: measured on an M2, the
+    // split neither frees memory nor speeds anything up there (see
+    // platform.ts's warnsMoeCpuSplit for the numbers).
+    'modelSettings.cpuMoeSubMac': 'Mac 上不省内存',
+    'modelSettings.cpuMoeHintMac': '在 Apple Silicon 的统一内存上,这个开关既不省内存也不提速:实测 OLMoE-1B-7B(专家池 3456 MiB)在 M2 上把脏内存从 575 MB 抬到 4035 MB(专家权重被多复制了一份),解码从 94.4 t/s 掉到 28.9 t/s、prefill 从 1066 t/s 掉到 228 t/s。Mac 上真正腾出内存的是上下文大小和 q8_0 KV 缓存',
+    'modelSettings.nCpuMoeHintMac': '在 Mac 上同理:前 N 层专家留 CPU 腾不出内存(全留在 CPU 的层本来就不额外花钱),只按被搬下 Metal 的那几层扣速度',
     'modelSettings.groupMemory': '内存 / 加载',
     'modelSettings.cacheTypeK': 'KV 缓存 K 类型',
     // design draft frame ⑫ pselect option labels (both tiers)
@@ -1493,6 +1499,12 @@ export const messages: Record<Locale, Record<string, string>> = {
     'modelSettings.nCpuMoe': 'MoE CPU Layers',
     'modelSettings.nCpuMoePlaceholder': '0 Disabled',
     'modelSettings.nCpuMoeHint': 'Keep the first N MoE expert layers on CPU; 0 disables; increase when VRAM is low',
+    // Apple silicon wording for the same two controls: measured on an M2, the
+    // split neither frees memory nor speeds anything up there (see
+    // platform.ts's warnsMoeCpuSplit for the numbers).
+    'modelSettings.cpuMoeSubMac': 'No saving on a Mac',
+    'modelSettings.cpuMoeHintMac': 'On Apple silicon\'s unified memory this switch frees neither memory nor speed: measured with OLMoE-1B-7B (a 3456 MiB expert pool) on an M2 it took dirty memory from 575 MB to 4035 MB - a second copy of the expert weights - and decode fell from 94.4 to 28.9 t/s, prefill from 1066 to 228 t/s. On a Mac the levers that really free memory are the context size and the q8_0 KV cache',
+    'modelSettings.nCpuMoeHintMac': 'Same on a Mac: keeping the first N layers\' experts on the CPU frees no memory (blocks already on the host cost nothing extra) and only costs speed for the blocks it moves off Metal',
     'modelSettings.groupMemory': 'Memory / Loading',
     'modelSettings.cacheTypeK': 'KV Cache K Type',
     // design draft frame ⑫ pselect option labels (both tiers)

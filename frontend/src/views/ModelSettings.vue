@@ -185,21 +185,21 @@
               <div class="toggle-row">
                 <span class="toggle-text">
                   cpu-moe
-                  <span class="toggle-sub">{{ t('modelSettings.cpuMoeSub') }}</span>
+                  <span class="toggle-sub">{{ t(cpuMoeSubKey) }}</span>
                 </span>
                 <label class="switch">
                   <input type="checkbox" v-model="cfg.cpuMoe" aria-label="cpu-moe" />
                   <span class="slider"></span>
                 </label>
               </div>
-              <p class="param-hint">{{ t('modelSettings.cpuMoeHint') }}</p>
+              <p class="param-hint">{{ t(cpuMoeHintKey) }}</p>
             </div>
             <div v-if="showOffload" class="param param-frow">
               <label class="param-field">
                 <span class="param-label">{{ t('modelSettings.nCpuMoe') }}</span>
                 <input v-model.number="cfg.nCpuMoe" type="number" min="0" step="1" class="param-input" :placeholder="t('modelSettings.nCpuMoePlaceholder')" />
               </label>
-              <p class="param-hint">{{ t('modelSettings.nCpuMoeHint') }}</p>
+              <p class="param-hint">{{ t(nCpuMoeHintKey) }}</p>
             </div>
           </div>
         </div>
@@ -390,7 +390,7 @@ import { getModelConfig, saveModelConfig, getServerStatus, tuneModelConfig, benc
 import { t } from '../lib/i18n'
 import { tunedSummaryParams, tunedToastKey } from '../lib/modelTune'
 import { estimateMemory, memorySummaryRows, type MemorySummaryCopy } from '../lib/modelMemory'
-import { showGpuOffloadParam, showMultiGpuPanel, loadModeOptions as buildLoadModeOptions, usePlatform } from '../lib/platform'
+import { showGpuOffloadParam, showMultiGpuPanel, warnsMoeCpuSplit, loadModeOptions as buildLoadModeOptions, usePlatform } from '../lib/platform'
 import ThemedSelect, { type SelectOption } from '../components/ThemedSelect.vue'
 
 // ─── ModelConfig interface (persisted per-model inference params shape) ───────
@@ -517,6 +517,13 @@ function clearBenchTimer() {
 const platformState = usePlatform()
 const showMultiGpu = computed(() => showMultiGpuPanel(platformState.value))
 const showOffload = computed(() => showGpuOffloadParam(platformState.value))
+// On Apple silicon the MoE expert split is a memory *and* speed loss (the CUDA
+// framing in the default copy would invite the worst action there), so the two
+// controls switch to the measured warning text. See platform.ts.
+const moeSplitWarning = computed(() => warnsMoeCpuSplit(platformState.value))
+const cpuMoeSubKey = computed(() => (moeSplitWarning.value ? 'modelSettings.cpuMoeSubMac' : 'modelSettings.cpuMoeSub'))
+const cpuMoeHintKey = computed(() => (moeSplitWarning.value ? 'modelSettings.cpuMoeHintMac' : 'modelSettings.cpuMoeHint'))
+const nCpuMoeHintKey = computed(() => (moeSplitWarning.value ? 'modelSettings.nCpuMoeHintMac' : 'modelSettings.nCpuMoeHint'))
 
 // ─── Tablet tracks (design draft frames ⑪⑫) ──────────────────────────────────
 // Track A (portrait tablet band, 768..1099): the live memory summary sunk to

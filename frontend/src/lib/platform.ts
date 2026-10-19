@@ -303,6 +303,24 @@ export function showGpuOffloadParam(state: PlatformState): boolean {
   return state.os === 'darwin' && state.arch === 'arm64'
 }
 
+/**
+ * Whether the MoE expert split needs the Apple silicon warning copy.
+ *
+ * cpu-moe / n-cpu-moe are a discrete-VRAM trick: on a CUDA box the experts move
+ * out of the VRAM budget and into the much larger RAM one. Under unified memory
+ * there is no second pool to move into, and measured on an M2 with
+ * OLMoE-1B-7B Q4_0 (16 blocks, 3456 MiB of experts) the split loses on both
+ * axes: `-ngl 99` held 575 MB of dirty memory against 4035 MB with the experts
+ * on the CPU (a second copy of the pool, priced by core/memfit.go), and
+ * llama-bench read 94.43 ± 4.75 t/s decode / 1065.74 ± 8.74 t/s prefill against
+ * 28.94 ± 1.87 / 227.97 ± 6.82, because the CPU decodes the same DRAM Metal
+ * does. The control stays offered (a hand-set config is still priced honestly)
+ * and the plan generator never emits it on Apple silicon.
+ */
+export function warnsMoeCpuSplit(state: PlatformState): boolean {
+  return state.os === 'darwin' && state.arch === 'arm64'
+}
+
 /** Minimal option shape (structurally compatible with ThemedSelect's SelectOption). */
 export interface ParamOption {
   value: string
