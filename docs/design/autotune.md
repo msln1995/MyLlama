@@ -254,6 +254,44 @@ RAM 预算（`min(free, 0.90 total) x 0.85` 那条）是 **18,360 MiB**——比
 已知多计（同向，安全）：权重项不按卸载切分线拆，所以部分卸载的 `pinned` 仍记整份权重——它只会
 让告警更早响、让建议档位更小，不会放行一条真越界的加载。
 
+## 安卓真机：prompt 缓存收口的代价（`core/bridge.go` + `scripts/android_plan_ab.sh`）
+
+`promptCacheRAMMiB` 把 `--cache-ram` 压到「这次加载之后余量的一半」，这个数在桌面是推算，在
+vivo X60 曲屏版（Exynos 1080、Android 13、MemTotal 11,559,000 kB）上是量出来的。对照的是**已装的
+那一版**：0.5.3（tag `fa82191`，2026-09-17）落后 main 58 个提交，没有这条收口，它自己的启动命令行
+（`ps -A -o ARGS`，加载 Qwen3-4B-Q5_K_M、上下文 8192）就是
+
+```
+llama-server --host 127.0.0.1 --port 8080 --alias Qwen3-4B-Instruct -m <internal>/LLM-Models/Qwen/Qwen3-4B-GGUF/Qwen3-4B-Q5_K_M.gguf
+  --ctx-size 8192 --batch-size 2048 --ubatch-size 512 --threads 4 --ctx-checkpoints 0 --gpu-layers 0
+  --cont-batching --no-webui --cache-ram 8192
+```
+
+那一刻 `llama-server` RSS 5,501 MiB、应用自身 286 MiB、WebView sandbox 46 MiB，`MemAvailable` 只剩
+3,748 MiB——总内存的三分之一。这就是收口要治的那个数字。
+
+配对复测走独立二进制的同一套参数形状（`scripts/android_plan_ab.sh`：3 个无共同前缀的 ~1,360 token
+请求 + 一段逐轮增长的 4 轮对话，各轮取 64 token；同一个 4B Q4_K_M、同一个 ctx 8192，只换
+`--cache-ram`；每组跑两次，因为单次读数在这台机器上没有意义——同一个 arm 复测总时长 446s vs 590s）：
+
+| `--cache-ram` | RSS 中位数 (MiB) | RSS 峰值 (MiB) | 负载总时长 | 缓存命中轮 grow1/2/3 |
+| --- | --- | --- | --- | --- |
+| 8192（旧版实拿值） | 5,334 / 4,934 | 5,977 / 5,976 | 446 / 590 s | 31/30/39 · 38/39/41 s |
+| 1351（这条收口对同一个形状算出的值） | 4,696 / 4,596 | 5,550 / 5,725 | 481 / 498 s | 29/30/32 · 24/26/27 s |
+
+中位数少约 600 MiB（≈11%），而**缓存命中的那些轮一次都没有变慢**——整批最快的读数
+（24/26/27s）恰恰出自收口那一组。少掉的只是那段没人复用的缓存驻留，代价落在提示词重算上，而这段
+负载的重算成本本来就相同（各 `grow` 轮的前缀复用率一致）。这台机器上「留一半」因此不是保守，是白捡。
+
+混淆项说清楚：1351 的两组跑在会话后段、机身更热，它们的 `MemAvailable` 低谷（3,945 / 3,537 MiB）
+反而不如 8192 组（3,989 / 3,806）。整机余量受温控和其他进程摆布，不是可比的量；同机同负载下可比的
+是那个进程自己的 RSS 中位数。
+
+顺带记一条重装时会踩的事实：旧版把模型和 llama.cpp 都放在应用私有目录
+（`/data/user/<n>/<pkg>/files/…`），卸载即删；HEAD 的新默认则把模型挪到应用专属**外部**存储
+（`androidModelsBase`，shell 可直接写入，几 GB 的权重不必重新下载），运行时仍留在内部目录（SELinux
+不允许在外部/FUSE 挂载上执行）。
+
 ## 实测 RAM 带宽校准（`core/benchbw.go`）
 
 动机：cpu-moe 的解码速度受 DRAM 读带宽限制，静态规则分不清 12 GB/s 单通道 DDR4 笔记本和
