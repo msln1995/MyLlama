@@ -2,6 +2,62 @@
 
 更新日志的**权威来源**（见 `AGENTS.md`「版本发布」）：发版时先在此新增版本条目（含日期），`git tag` 注解消息与 GitHub Release 正文均从该条目复制，保持一致。自 v0.3.3 起条目为概括式双语（中文在上）；v0.3.0 之前的逐提交条目已随对应 tag 与 Release 的清理移除（见文末「历史版本」）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [v0.6.0] - 2026-10-19
+
+## 中文
+
+v0.6.0 是基于真机实测的大规模性能优化版本，在 vivo X60（Exynos 1080 / 11 GB RAM）和 M2 Mac 上完成了 65 项测量与调优，显著提升了端侧推理的稳定性和速度。
+
+**🌟 本版亮点**
+
+- **Android 内存计价与守卫** — 启动前精确计算模型总 footprint（权重 + KV 缓存 + 上下文检查点 + 运行时开销），超预算直接拦截并给出可操作的上下文建议，不再闪退。KV 缓存按真实量化类型计价（f16/q8_0/q4_0 等），守护与调参器共用同一公式，不再互相打架。
+- **Android prompt cache 优化** — 实测发现 50% 的 headroom 钳位在 ctx 16384 时让 replay 慢 5× 但不省内存，Android 端份额提升至 90%，prompt cache 命中时 replay 快 3-5×。
+- **Android 线程数修复** — 未调优模型原本默认 8 worker（全部核），内存吃紧时与系统回收抢核导致卡顿；现在按性能核数封顶（4 线程），实测解码速度稳定在 3.4-3.9 tok/s。
+- **macOS Metal 支持** — Mac 端（Apple Silicon）现在走 Metal 后端，全 offload 时推理速度显著快于 CPU-only；内存计价按 Metal working set（权重 + KV + 320 MiB 运行时保留）而非系统 RAM，守护更精确。部分 offload 和 `--cpu-moe` 的 Mac 负载也按真实驻留字节计价。
+- **前台服务保活** — Android 端 llama-server 生命周期绑定 `dataSync` 前台服务，切后台/息屏不再被系统冻结（代码已落地，待新 APK 真机复验）。
+- **上下文检查点计价** — 滑动窗口模型的上下文检查点 retention 现在按真实 KV 几何计价，不再免费；默认 cap 从 32 降至 8（收益饱和点），省内存但不影响对话性能。
+- **路由器模式内存守护** — 多模型场景下按可能同时驻留的模型集合（`modelsMax` 个最重的）计价，而非只算最重的单个，防止路由器模式下的隐性超卖。
+
+**📊 实测数据（vivo X60）**
+
+- 内存守卫：4B Q4_K_M + ctx 8192 + threads 4 → RSS 5.0-5.2 GB，不闪退（旧版默认参数会闪退）
+- Prompt cache：ctx 16384 + 10 条 1200-token prompt 重放 → 不钳位 16s/轮，钳位 77s/轮（5× 差异）
+- 线程数：4 线程 3.82/3.46/3.89 tok/s vs 8 worker 0.35 tok/s（内存吃紧时差 10×）
+- 频率协变量：运行内大核上限从 2808 降到 2080 MHz，单轮慢 15%——全程中位数会骗人，必须按轮次窗口对齐
+
+**🔧 工程质量**
+
+- 测量 harness 固化：`scripts/android_plan_ab.sh` 支持反序对照、轮次边界探针、协变量记录
+- 设计文档：`docs/design/autotune.md` 记录全部实测数据、撤回的错误结论、协变量纪律
+- GGUF 解析器修复：正确读取 KV 几何（`head_count_kv` / `head_dim`），不再失步
+
+## English
+
+v0.6.0 is a major performance optimization release based on extensive on-device measurement — 65 measurements and tuning iterations on the vivo X60 (Exynos 1080 / 11 GB RAM) and M2 Mac, significantly improving on-device inference stability and speed.
+
+**🌟 Highlights**
+
+- **Android memory pricing and guard** — start-time footprint calculation (weights + KV cache + context checkpoints + runtime overhead) now refuses over-budget loads with actionable context suggestions instead of crashing. KV cache priced by real quantization type (f16/q8_0/q4_0), guard and tuner share the same formula.
+- **Android prompt cache optimization** — measurement showed the 50% headroom clamp at ctx 16384 made replay 5× slower without saving RSS; Android share raised to 90%, prompt cache hits now give 3-5× replay speedup.
+- **Android thread count fix** — untuned models defaulted to 8 workers (all cores), competing with system reclaim under memory pressure; now capped at performance core count (4 threads), decode stable at 3.4-3.9 tok/s.
+- **macOS Metal support** — Apple Silicon Macs now use the Metal backend; full offload significantly faster than CPU-only. Memory pricing based on Metal working set (weights + KV + 320 MiB runtime reserve), not system RAM. Partial offload and `--cpu-moe` Mac loads priced by actual resident bytes.
+- **Foreground service keepalive** — Android llama-server lifecycle bound to `dataSync` foreground service, no longer frozen when backgrounded/screen-off (code landed, pending on-device verification with new APK).
+- **Context checkpoint pricing** — sliding-window model context checkpoint retention now priced by real KV geometry, no longer free; default cap reduced from 32 to 8 (saturation point), saves memory without affecting chat performance.
+- **Router mode memory guard** — multi-model scenario priced by the set of possibly-resident models (`modelsMax` heaviest), not just the single heaviest, preventing implicit overcommit in router mode.
+
+**📊 Measurement data (vivo X60)**
+
+- Memory guard: 4B Q4_K_M + ctx 8192 + threads 4 → RSS 5.0-5.2 GB, no crash (old defaults crashed)
+- Prompt cache: ctx 16384 + 10 × 1200-token prompt replay → unclamped 16s/round, clamped 77s/round (5× difference)
+- Thread count: 4 threads 3.82/3.46/3.89 tok/s vs 8 workers 0.35 tok/s (10× difference under memory pressure)
+- Frequency covariate: in-run big-core ceiling dropped from 2808 to 2080 MHz, single round 15% slower — whole-session medians lie, must align by round window
+
+**🔧 Engineering quality**
+
+- Measurement harness solidified: `scripts/android_plan_ab.sh` supports counterbalanced ordering, round-boundary probes, covariate recording
+- Design docs: `docs/design/autotune.md` records all measurement data, retracted conclusions, covariate discipline
+- GGUF parser fix: correct KV geometry extraction (`head_count_kv` / `head_dim`), no longer desyncs
+
 ## [v0.5.3] - 2026-09-17
 
 ## 中文
