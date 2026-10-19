@@ -35,7 +35,9 @@ func pinCPUSHapedReserve(t *testing.T) {
 }
 
 // pinMetalShapedReserve is the Apple Silicon twin: a Metal-serving load charges
-// the 320 MiB-at-512 reserve instead.
+// the 320 MiB-at-512 floor instead. Every plan these tests price is the tuner's
+// full offload (or an unset gpu-layers), so no host-resident weight copy is
+// added on top of the floor - see TestLoadRuntimeOverheadBytesShape for that term.
 func pinMetalShapedReserve(t *testing.T) {
 	t.Helper()
 	withPlatformGOOS(t, "darwin")
@@ -298,14 +300,14 @@ func TestModelLoadBytes(t *testing.T) {
 	}
 }
 
-// TestLoadRuntimeOverheadBytesShape pins which reserve a load is charged. The
-// Metal figure is only for the load that actually runs all of its layers on
-// Metal: macOS, an Apple serving GPU and a gpu-layers setting that reaches the
-// model's block count. Everything else pays the CPU-only measurement, including
-// a partial offload (the CPU graph holds the batch buffers for the layers it
-// still computes, so its RSS step grows with them), a Mac that asks for -ngl 0,
-// and a non-macOS host whose GPU probe happens to answer apple — the reserve is
-// a property of the code path the load takes, not of the chip alone.
+// TestLoadRuntimeOverheadBytesShape pins how the reserve is priced per shape:
+// the Metal floor alone for the load that runs every layer on Metal, plus one
+// more copy of the weights of the layers the host still computes, and the
+// CPU-only measurement on any other platform - a Mac-shaped reserve must never
+// be reachable from linux, android or windows, and a Mac with a CUDA card in the
+// probe pays the CPU figure too. The floor and the copy are both measured on the
+// M2 (see loadRuntimeOverheadBytes / cpuResidentLayers); the 3600-MiB-over-36
+// layers fixture below puts them at 100 MiB per host-resident block.
 func TestLoadRuntimeOverheadBytesShape(t *testing.T) {
 	const mib = int64(1 << 20)
 	cases := []struct {
@@ -314,56 +316,72 @@ func TestLoadRuntimeOverheadBytesShape(t *testing.T) {
 		vendor    string
 		gpuLayers string
 		layers    int
+		weightsMB int64
 		ubatch    int
 		wantMB    int64
 	}{
-		{"metal auto", "darwin", vendorApple, "auto", 36, 512, 320},
-		{"metal all", "darwin", vendorApple, "all", 36, 512, 320},
+		{"metal auto", "darwin", vendorApple, "auto", 36, 3600, 512, 320},
+		{"metal all", "darwin", vendorApple, "all", 36, 3600, 512, 320},
 		// An unset value emits no -ngl flag, and llama-server's own default on
 		// Apple silicon is full offload (measured: the RSS grows by the f16 KV
-		// geometry with no flag at all), so it is the Metal shape too.
-		{"metal default", "darwin", vendorApple, "", 36, 512, 320},
-		// The measured layer-by-layer step: 9 of 36 layers left on the CPU costs
-		// +727 MiB over the offloaded run, 18 of them +1232 MiB.
-		{"metal exact layer count", "darwin", vendorApple, "36", 36, 512, 320},
-		{"metal over-count", "darwin", vendorApple, "99", 36, 512, 320},
-		{"partial 27 of 36", "darwin", vendorApple, "27", 36, 512, 1280},
-		{"partial 18 of 36", "darwin", vendorApple, "18", 36, 512, 1280},
-		{"metal explicit cpu", "darwin", vendorApple, "0", 36, 512, 1280},
-		// A number cannot be compared against a model whose geometry was never
-		// read; the guard's 32-layer fallback decides, so "unknown" is not a free
-		// pass to the cheaper figure.
-		{"number, 32-layer fallback", "darwin", vendorApple, "20", 32, 512, 1280},
-		{"garbage setting", "darwin", vendorApple, "half", 36, 512, 1280},
-		{"mac with a cuda card", "darwin", "nvidia", "all", 36, 512, 1280},
-		{"linux probing apple", "linux", vendorApple, "all", 36, 512, 1280},
-		{"android probing apple", "android", vendorApple, "all", 36, 512, 1280},
-		{"windows cpu only", "windows", vendorNone, "0", 36, 512, 1280},
-		// The ubatch scaling is the same law on both shapes.
-		{"metal at 1024", "darwin", vendorApple, "all", 36, 1024, 640},
-		{"metal at 2048", "darwin", vendorApple, "all", 36, 2048, 1280},
-		{"metal ubatch unset", "darwin", vendorApple, "all", 36, 0, 320},
-		{"cpu at 2048", "linux", vendorNone, "0", 36, 2048, 5120},
+		// geometry with no flag at all), so it is the floor alone too.
+		{"metal default", "darwin", vendorApple, "", 36, 3600, 512, 320},
+		{"metal exact layer count", "darwin", vendorApple, "36", 36, 3600, 512, 320},
+		{"metal over-count", "darwin", vendorApple, "99", 36, 3600, 512, 320},
+		// Measured dirty memory over the offloaded run: 9 of 36 blocks left on
+		// the host cost +608 MiB and 18 of them +1092 MiB on the 4B Q4_K_M
+		// (66.1 MiB of weights per block), i.e. the weight copy, not a flat
+		// reserve. The 1 GiB the CPU-only figure omitted is what made -ngl 0
+		// under-price by three quarters of the model.
+		{"one block on the host", "darwin", vendorApple, "35", 36, 3600, 512, 420},
+		{"nine blocks on the host", "darwin", vendorApple, "27", 36, 3600, 512, 1220},
+		{"eighteen blocks on the host", "darwin", vendorApple, "18", 36, 3600, 512, 2120},
+		{"metal explicit cpu", "darwin", vendorApple, "0", 36, 3600, 512, 3920},
+		// A model whose header could not be read arrives with the tuner's
+		// 32-layer fallback, so "unknown geometry" prices the fallback split
+		// rather than the floor.
+		{"number, 32-layer fallback", "darwin", vendorApple, "20", 32, 3200, 512, 1520},
+		// An unparseable or negative setting is the worst case: every block on
+		// the host.
+		{"garbage setting", "darwin", vendorApple, "half", 36, 3600, 512, 3920},
+		{"negative setting", "darwin", vendorApple, "-1", 36, 3600, 512, 3920},
+		// The grammar the frontend mirror parses with is Atoi's, not Number()'s:
+		// a signed integer counts, a padded or fractional one is the worst case
+		// (preset.go refuses such a value before the server ever sees it).
+		{"signed full offload", "darwin", vendorApple, "+36", 36, 3600, 512, 320},
+		{"padded number", "darwin", vendorApple, " 36 ", 36, 3600, 512, 3920},
+		{"fractional number", "darwin", vendorApple, "12.5", 36, 3600, 512, 3920},
+		{"mac with a cuda card", "darwin", "nvidia", "all", 36, 3600, 512, 1280},
+		{"linux probing apple", "linux", vendorApple, "0", 36, 3600, 512, 1280},
+		{"android probing apple", "android", vendorApple, "all", 36, 3600, 512, 1280},
+		{"windows cpu only", "windows", vendorNone, "0", 36, 3600, 512, 1280},
+		// The ubatch scaling prices the floor on both shapes; the weight copy is
+		// a property of the model, not of the batch size.
+		{"metal at 1024", "darwin", vendorApple, "all", 36, 3600, 1024, 640},
+		{"metal split at 1024", "darwin", vendorApple, "0", 36, 3600, 1024, 4240},
+		{"metal ubatch unset", "darwin", vendorApple, "all", 36, 3600, 0, 320},
+		{"cpu at 2048", "linux", vendorNone, "0", 36, 3600, 2048, 5120},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			orig := platformGOOS
 			platformGOOS = tt.goos
 			t.Cleanup(func() { platformGOOS = orig })
+			tm := tuneModel{Layers: tt.layers, WeightsBytes: tt.weightsMB * mib}
 			got := loadRuntimeOverheadBytes(ModelConfig{GPULayers: tt.gpuLayers, UBatchSize: tt.ubatch},
-				tuneTarget{Vendor: tt.vendor}, tt.layers)
+				tuneTarget{Vendor: tt.vendor}, tm)
 			if got != tt.wantMB*mib {
-				t.Errorf("loadRuntimeOverheadBytes(%s, %s, gpuLayers %q, layers %d, ubatch %d) = %d MiB, want %d",
-					tt.goos, tt.vendor, tt.gpuLayers, tt.layers, tt.ubatch, got/mib, tt.wantMB)
+				t.Errorf("loadRuntimeOverheadBytes(%s, %s, gpuLayers %q, %d layers of %d MiB, ubatch %d) = %d MiB, want %d",
+					tt.goos, tt.vendor, tt.gpuLayers, tt.layers, tt.weightsMB, tt.ubatch, got/mib, tt.wantMB)
 			}
 		})
 	}
 }
 
 // TestMetalReserveBuysContext is the user-visible half of the Metal shape: the
-// same 4 GiB model at ctx 8192 is 960 MiB cheaper to plan on a Mac, which the
-// router's prompt-cache budget hands straight back — and only while the plan
-// offloads every one of the fixture's 36 layers.
+// same 4 GiB model at ctx 8192 is 960 MiB cheaper to plan on a Mac when the plan
+// offloads every one of the fixture's 36 layers - and the reserve grows again
+// with each block left on the host, past the CPU-only figure.
 func TestMetalReserveBuysContext(t *testing.T) {
 	dir := t.TempDir()
 	path := writeMemfitGGUF(t, dir)
@@ -383,17 +401,31 @@ func TestMetalReserveBuysContext(t *testing.T) {
 		t.Errorf("metal load is %d MiB cheaper, want %d (the reserve difference at this ubatch)",
 			diff/(1<<20), (tuneRuntimeOverheadMB - tuneMetalRuntimeOverheadMB))
 	}
-	// A split that leaves any layer on the CPU is not the Metal shape: measured on
-	// the M2 with this model's 36-layer Q4_K_M, -ngl 27 cost +727 MiB and -ngl 18
-	// +1232 MiB over the offloaded run, i.e. above the CPU figure entirely.
-	for _, gpuLayers := range []string{"0", "27", "18", "35"} {
-		split := modelLoadBytes(m, ModelConfig{CtxSize: 8192, GPULayers: gpuLayers, UBatchSize: 512})
-		if split != cpu {
-			t.Errorf("-ngl %s load = %d MiB, want the CPU-shaped %d",
-				gpuLayers, split/(1<<20), cpu/(1<<20))
+	// Each host-resident block is charged again as weight bytes: this fixture's
+	// 4 GiB over 36 layers is a quarter of the model at -ngl 27, a half at -ngl
+	// 18 and the whole model at -ngl 0, which is what the phys_footprint sweep
+	// measured. The flat CPU figure was not just wrong for these plans, it was
+	// too small - the -ngl 0 load holds a second copy of the file, which is
+	// 3136 MiB more than the CPU-only reserve admits.
+	for _, tt := range []struct {
+		gpuLayers string
+		wantMB    int64
+	}{
+		{"27", 1024},
+		{"18", 2048},
+		{"0", 4096},
+	} {
+		split := modelLoadBytes(m, ModelConfig{CtxSize: 8192, GPULayers: tt.gpuLayers, UBatchSize: 512})
+		if want := metal + tt.wantMB*(1<<20); split != want {
+			t.Errorf("-ngl %s load = %d MiB, want %d (the Metal floor plus %d MiB of host weights)",
+				tt.gpuLayers, split/(1<<20), want/(1<<20), tt.wantMB)
+		}
+		if tt.gpuLayers == "0" && split <= cpu {
+			t.Errorf("-ngl 0 load = %d MiB, must exceed the CPU-only figure %d",
+				split/(1<<20), cpu/(1<<20))
 		}
 	}
-	// Covering the block count exactly is the Metal shape, over-counting too.
+	// Covering the block count exactly is the Metal floor alone, over-counting too.
 	for _, gpuLayers := range []string{"36", "99", "auto", ""} {
 		offloaded := modelLoadBytes(m, ModelConfig{CtxSize: 8192, GPULayers: gpuLayers, UBatchSize: 512})
 		if offloaded != metal {
@@ -506,6 +538,10 @@ func TestPromptCacheRAMMiB(t *testing.T) {
 // 4 + 3.1875 + 1.25 = 8.4375 GiB; that same window priced at f16 needs 11.25
 // GiB, which is more than the device has.
 func TestTunedQ8PlanPassesTheMemoryGuard(t *testing.T) {
+	// The fixture is a phone-class memory picture (Android platform, 12 GiB), so
+	// the probe has to agree with it: without this pin the same plan priced on an
+	// Apple Silicon dev machine would take the Metal reserve and refuse itself.
+	pinCPUSHapedReserve(t)
 	dir := t.TempDir()
 	path := writeMemfitGGUF(t, dir)
 	const fourGib = int64(4) * (1 << 30)

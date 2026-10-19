@@ -5,7 +5,7 @@ import {
   checkpointRetentionBytes,
   memorySummaryRows,
   runtimeOverheadBytes,
-  servesFromAppleMetal,
+  cpuResidentLayers,
   CTX_CHECKPOINT_CAP,
   KV_BYTES_PER_TOKEN_F16,
   RUNTIME_OVERHEAD_BYTES_AT_512,
@@ -36,8 +36,8 @@ const BASE = {
   // CPU-shaped by default: no Apple GPU serving, so every assertion below keyed
   // on RUNTIME_OVERHEAD_BYTES_AT_512 prices the reserve the phone/CPU way.
   gpuLayers: 'auto',
-  // 0 = the scan published no block count; the reserve-shape helper then assumes
-  // the backend's own fallback layer count.
+  // 0 = the scan published no block count; the reserve helper then assumes the
+  // backend's own fallback layer count.
   modelLayers: 0,
   appleMetalServing: false,
   totalMemBytes: 16 * GIB,
@@ -207,65 +207,70 @@ describe('estimateMemory', () => {
     }
   })
 
-  it('a Metal-served load charges the measured Mac reserve', () => {
+  it('a Metal-served load charges the measured floor plus the host weight copy', () => {
     // The M2 readings behind RUNTIME_OVERHEAD_METAL_BYTES_AT_512: RSS minus
     // weights minus f16 KV is +149/+186 MiB (4B Q4_K_M, ctx 8192, paired), +185
     // (same model, ctx 32768) and +160 (0.6B, ctx 8192), against the phone's
     // 1.1-1.2 GB for the same term. Same μBatch law on both shapes.
-    const metal = { appleMetalServing: true }
-    expect(estimateMemory({ ...BASE, ...metal }).overheadBytes).toBe(RUNTIME_OVERHEAD_METAL_BYTES_AT_512)
-    expect(estimateMemory({ ...BASE, ...metal, ubatchSize: 1024 }).overheadBytes).toBe(
-      2 * RUNTIME_OVERHEAD_METAL_BYTES_AT_512
-    )
-    // Only a Mac with an Apple GPU gets it: the flag is the caller's answer for
-    // darwin + vendor apple, and the layer count must not leave any layer on the
-    // CPU.
-    expect(estimateMemory({ ...BASE, gpuLayers: '0', appleMetalServing: true }).overheadBytes).toBe(
+    const MIB = 1024 * 1024
+    // 3600 MiB over 36 blocks prices the split at exactly 100 MiB per block.
+    const mac = { ...BASE, appleMetalServing: true, modelSizeBytes: 3600 * MIB, modelLayers: 36 }
+    expect(estimateMemory(mac).overheadBytes).toBe(320 * MIB)
+    expect(estimateMemory({ ...mac, gpuLayers: '' }).overheadBytes).toBe(320 * MIB)
+    expect(estimateMemory({ ...mac, gpuLayers: '36' }).overheadBytes).toBe(320 * MIB)
+    expect(estimateMemory({ ...mac, gpuLayers: '99' }).overheadBytes).toBe(320 * MIB)
+    // Every block left on the host is charged again as weight bytes: measured as
+    // phys_footprint, the 36-layer 4B Q4_K_M grew its dirty memory by 608 MiB
+    // with 9 blocks on the CPU, 1092 with 18 and 2401 with all of them, i.e. its
+    // own per-block weight. The flat CPU figure this replaced under-priced the
+    // worst case by three quarters of the model.
+    expect(estimateMemory({ ...mac, gpuLayers: '27' }).overheadBytes).toBe(1220 * MIB)
+    expect(estimateMemory({ ...mac, gpuLayers: '18' }).overheadBytes).toBe(2120 * MIB)
+    expect(estimateMemory({ ...mac, gpuLayers: '0' }).overheadBytes).toBe(3920 * MIB)
+    // Unparseable setting: priced as the worst case, every block on the host.
+    expect(estimateMemory({ ...mac, gpuLayers: 'half' }).overheadBytes).toBe(3920 * MIB)
+    // The μBatch scaling touches the floor, not the weight copy.
+    expect(estimateMemory({ ...mac, gpuLayers: '0', ubatchSize: 1024 }).overheadBytes).toBe((640 + 3600) * MIB)
+    // Only a Mac with an Apple GPU gets this reserve at all: the flag is the
+    // caller's answer for darwin + vendor apple.
+    expect(estimateMemory({ ...mac, gpuLayers: 'all', appleMetalServing: false }).overheadBytes).toBe(
       RUNTIME_OVERHEAD_BYTES_AT_512
     )
-    expect(estimateMemory({ ...BASE, gpuLayers: 'all', appleMetalServing: false }).overheadBytes).toBe(
-      RUNTIME_OVERHEAD_BYTES_AT_512
+    // An unscanned model is priced with the backend's fallback block count (32),
+    // never with a silent "unknown means the cheaper figure".
+    expect(estimateMemory({ ...BASE, appleMetalServing: true, modelSizeBytes: 3600 * MIB, gpuLayers: '20' }).overheadBytes).toBe(
+      (320 + 1350) * MIB
     )
-    // An unset gpu-layers emits no -ngl flag, and llama-server's own default on
-    // Apple silicon is full offload, so it is the Metal shape too.
-    expect(estimateMemory({ ...BASE, gpuLayers: '', appleMetalServing: true }).overheadBytes).toBe(
-      RUNTIME_OVERHEAD_METAL_BYTES_AT_512
-    )
-    // A partial offload is not: the same 36-layer model with 27 layers on the GPU
-    // measured +727 MiB of RSS beyond weights + KV (9 left on the CPU cost ~63
-    // MiB each on top of the offloaded run's +141), so it pays the CPU figure.
-    expect(estimateMemory({ ...BASE, gpuLayers: '27', modelLayers: 36, appleMetalServing: true }).overheadBytes).toBe(
-      RUNTIME_OVERHEAD_BYTES_AT_512
-    )
-    expect(estimateMemory({ ...BASE, gpuLayers: '36', modelLayers: 36, appleMetalServing: true }).overheadBytes).toBe(
-      RUNTIME_OVERHEAD_METAL_BYTES_AT_512
-    )
-    // The cheaper term is real headroom: the same 4 GB-cheaper plan is what the
-    // backend's router budget hands back as prompt cache.
-    const cpu = estimateMemory({ ...BASE, appleMetalServing: false })
-    const m = estimateMemory({ ...BASE, appleMetalServing: true })
+    // The floor alone is real headroom: the cheaper plan is what the backend's
+    // router budget hands back as prompt cache.
+    const cpu = estimateMemory({ ...mac, appleMetalServing: false })
+    const m = estimateMemory({ ...mac, appleMetalServing: true })
     expect(cpu.totalBytes - m.totalBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512 - RUNTIME_OVERHEAD_METAL_BYTES_AT_512)
   })
 
-  it('servesFromAppleMetal requires the platform flag and every layer offloaded', () => {
-    expect(servesFromAppleMetal(true, 'all', 36)).toBe(true)
-    expect(servesFromAppleMetal(true, 'auto', 36)).toBe(true)
-    expect(servesFromAppleMetal(true, '', 36)).toBe(true)
-    expect(servesFromAppleMetal(true, '0', 36)).toBe(false)
-    expect(servesFromAppleMetal(false, 'all', 36)).toBe(false)
+  it('cpuResidentLayers counts the blocks a gpu-layers setting leaves on the host', () => {
+    expect(cpuResidentLayers('all', 36)).toBe(0)
+    expect(cpuResidentLayers('auto', 36)).toBe(0)
+    expect(cpuResidentLayers('', 36)).toBe(0)
     // A number only reaches full offload when it covers the model's blocks.
-    expect(servesFromAppleMetal(true, '99', 36)).toBe(true)
-    expect(servesFromAppleMetal(true, '50', 36)).toBe(true)
-    expect(servesFromAppleMetal(true, '35', 36)).toBe(false)
-    expect(servesFromAppleMetal(true, '30', 36)).toBe(false)
-    // An unscanned model is priced with the backend's fallback count (32), never
-    // with a silent "unknown means Metal" - so 30 of an unknown model is partial.
-    expect(servesFromAppleMetal(true, '30', 0)).toBe(false)
-    expect(servesFromAppleMetal(true, '32', 0)).toBe(true)
-    expect(servesFromAppleMetal(true, '32', Number.NaN)).toBe(true)
-    // A non-numeric setting is not full offload either.
-    expect(servesFromAppleMetal(true, 'half', 36)).toBe(false)
-    expect(servesFromAppleMetal(true, ' 36 ', 36)).toBe(true)
+    expect(cpuResidentLayers('99', 36)).toBe(0)
+    expect(cpuResidentLayers('36', 36)).toBe(0)
+    expect(cpuResidentLayers('+36', 36)).toBe(0)
+    expect(cpuResidentLayers('35', 36)).toBe(1)
+    expect(cpuResidentLayers('30', 36)).toBe(6)
+    expect(cpuResidentLayers('0', 36)).toBe(36)
+    // An unscanned model is priced with the backend's fallback count (32).
+    expect(cpuResidentLayers('30', 0)).toBe(2)
+    expect(cpuResidentLayers('32', 0)).toBe(0)
+    expect(cpuResidentLayers('0', Number.NaN)).toBe(32)
+    // Anything the backend's integer parse would refuse is the worst case: every
+    // block on the host. Padded and fractional spellings are among them - the
+    // preset writer refuses such a value outright, so this only keeps the two
+    // sides pricing the same string the same way.
+    expect(cpuResidentLayers('half', 36)).toBe(36)
+    expect(cpuResidentLayers('-1', 36)).toBe(36)
+    expect(cpuResidentLayers('12.5', 36)).toBe(36)
+    expect(cpuResidentLayers(' 36 ', 36)).toBe(36)
   })
 
   it('a scanned model prices KV with its own GGUF geometry, not the constant', () => {

@@ -51,13 +51,15 @@ export const KV_BYTES_PER_TOKEN_F16 = 128 * 1024
 export const RUNTIME_OVERHEAD_BYTES_AT_512 = 1280 * 1024 * 1024
 
 /**
- * The same reserve for a load Apple's Metal backend serves: measured on an M2
- * as RSS minus weights minus the f16 KV geometry — +149 and +186 MiB for a 4B
- * Q4_K_M at ctx 8192 (paired runs), +185 at ctx 32768, +160 for a 0.6B at
- * ctx 8192, +302 at μBatch 2048 — rounded up to 320 (1.7x the largest reading).
- * With every layer and the whole cache on the GPU there is no CPU graph left to
- * hold buffers, which is why a Mac gets a quarter of the phone's figure. The
- * frontend mirror of core/autotune.go's `tuneMetalRuntimeOverheadMB`.
+ * The floor of the same reserve for a load Apple's Metal backend serves:
+ * measured on an M2 as RSS minus weights minus the f16 KV geometry — +149 and
+ * +186 MiB for a 4B Q4_K_M at ctx 8192 (paired runs), +185 at ctx 32768, +160
+ * for a 0.6B at ctx 8192, +302 at μBatch 2048 — rounded up to 320 (1.7x the
+ * largest reading). With every layer and the whole cache on the GPU there is no
+ * CPU graph left to hold buffers, which is why a Mac starts from a quarter of
+ * the phone's figure. A config that leaves blocks on the host pays this floor
+ * plus one more copy of those blocks' weights (see {@link cpuResidentLayers}).
+ * The frontend mirror of core/autotune.go's `tuneMetalRuntimeOverheadMB`.
  */
 export const RUNTIME_OVERHEAD_METAL_BYTES_AT_512 = 320 * 1024 * 1024
 
@@ -68,7 +70,7 @@ export const OVERHEAD_REFERENCE_UBATCH = 512
  * Layer count the backend assumes for a model whose GGUF header could not be
  * read (core/autotune.go's tuneLayerCount). The frontend prices a load with the
  * scanned model's own count and uses this only when the scan reported none, so
- * the two sides still decide the reserve shape identically.
+ * the two sides still size the host-resident split identically.
  */
 export const TUNE_FALLBACK_LAYERS = 32
 
@@ -125,22 +127,20 @@ export interface MemoryEstimateInput {
   isAndroid: boolean
   /**
    * The configured GPU layer count as written ('' / 'auto' / 'all' = offload
-   * every layer, a number = that many). Read together with appleMetalServing and
-   * modelLayers: the reserve follows the layers the host still computes.
+   * every layer, a number = that many). On a Mac it decides how many blocks the
+   * host still computes, i.e. the weight copy added to the reserve floor.
    */
   gpuLayers: string
   /**
    * Model's block count from the scan (0 = unknown, which falls back to
    * {@link TUNE_FALLBACK_LAYERS}, the same figure the backend guard assumes).
-   * A numeric gpu-layers is compared against it to tell full offload from a
-   * partial one.
+   * The host-resident split is measured against it.
    */
   modelLayers: number
   /**
    * macOS with an Apple GPU serving, the platform half of what the backend guard
-   * reads for the Metal-shaped reserve (core/memfit.go's
-   * loadRuntimeOverheadBytes). False everywhere else, so the reserve stays the
-   * phone/CPU measurement.
+   * reads for the Metal reserve (core/memfit.go's loadRuntimeOverheadBytes).
+   * False everywhere else, so the reserve stays the phone/CPU measurement.
    */
   appleMetalServing: boolean
   /** Total system memory in bytes (0 = probe unavailable). */
@@ -213,15 +213,12 @@ export function kvCacheTypeFactor(cacheType: string): number {
 }
 
 /**
- * Runtime reserve for a given μBatch size, in bytes: the constant is priced at
- * the app's default 512 and the term is linear through the origin (see
+ * Runtime reserve (batch compute buffers, graph scratch, sampler arenas) for a
+ * given μBatch size, in bytes: the constant is priced at the app's default 512
+ * and the term is linear through the origin (see
  * {@link RUNTIME_OVERHEAD_BYTES_AT_512} for the measurements). A missing or
  * non-positive μBatch charges the default, which is also what llama-server
  * runs when the form has no value yet.
- *
- * `metal` switches to the Apple-silicon measurement of the same term. The
- * caller decides with {@link servesFromAppleMetal} — the platform, the serving
- * GPU, and whether the config leaves any layer on the CPU.
  */
 export function runtimeOverheadBytes(ubatchSize: number, metal = false): number {
   const base = metal ? RUNTIME_OVERHEAD_METAL_BYTES_AT_512 : RUNTIME_OVERHEAD_BYTES_AT_512
@@ -229,29 +226,60 @@ export function runtimeOverheadBytes(ubatchSize: number, metal = false): number 
   return Math.round((base * ubatch) / OVERHEAD_REFERENCE_UBATCH)
 }
 
+/** How many blocks the model has for the split math: the scanned count, or the
+ * backend guard's fallback for a model whose header it could not read. */
+function splitLayerCount(modelLayers: number): number {
+  return Number.isFinite(modelLayers) && modelLayers > 0 ? Math.floor(modelLayers) : TUNE_FALLBACK_LAYERS
+}
+
 /**
- * Whether a load is priced in the Metal shape: `appleMetalServing` is the
- * caller's answer for macOS with an Apple GPU serving (the two signals the
- * backend reads — see core/memfit.go's loadRuntimeOverheadBytes), and the
- * config has to leave no layer on the CPU. The reserve is not a property of the
- * chip but of the layers the host still computes: on the M2 with a 36-layer 4B
- * Q4_K_M, full offload added +141 MiB to RSS, -ngl 27 (9 layers on the CPU)
- * +727, -ngl 18 +1232 and -ngl 0 +2504 — ~63 MiB per CPU-resident layer, so
- * anything short of full offload pays the CPU-only figure.
+ * Blocks a gpu-layers setting leaves on the host — the count that sizes the
+ * second weight copy an Apple Silicon load pays (see {@link reserveBytes}).
+ * '' / 'auto' / 'all' leave nothing (the first two emit no -ngl flag, whose
+ * server-side default on Apple silicon is full offload); a number counts what
+ * it does not reach, and an unreadable setting is priced as the worst case.
+ * The frontend mirror of core/memfit.go's cpuResidentLayers.
  *
- * '' / 'auto' / 'all' are the full-offload spellings (the first two emit no
- * -ngl flag, whose server-side default here is full offload). A number counts
- * only against a known layer count; a model the scan could not price falls back
- * to the backend guard's own 32-layer figure, never to a silent "unknown means
- * Metal".
+ * Measured as phys_footprint (the dirty, non-reclaimable half) on the M2 at
+ * ctx 8192: the 36-layer 4B Q4_K_M (66.1 MiB of weights per block) grew its
+ * dirty memory by 608 MiB with 9 blocks on the CPU, 1092 with 18 and 2401 with
+ * all 36; the 28-layer 0.6B (13.5 per block) by 134 with 14 and 371 with all
+ * 28. The file's mapped pages stay swappable and unchanged, so this is llama.cpp
+ * holding the host-side tensors, not the page cache.
  */
-export function servesFromAppleMetal(appleMetalServing: boolean, gpuLayers: string, modelLayers: number): boolean {
-  if (!appleMetalServing) return false
-  const value = (gpuLayers || '').trim()
-  if (value === '' || value === 'auto' || value === 'all') return true
-  const layers = Number.isFinite(modelLayers) && modelLayers > 0 ? Math.floor(modelLayers) : TUNE_FALLBACK_LAYERS
+export function cpuResidentLayers(gpuLayers: string, modelLayers: number): number {
+  const layers = splitLayerCount(modelLayers)
+  const value = gpuLayers || ''
+  if (value === '' || value === 'auto' || value === 'all') return 0
+  // The same grammar the backend's strconv.Atoi accepts (an optional sign and
+  // digits, no surrounding whitespace - preset.go refuses such a value outright),
+  // so a setting the server would not get is still priced the same way here.
+  if (!/^[+-]?\d+$/.test(value)) return layers
   const n = Number(value)
-  return Number.isInteger(n) && n >= layers
+  if (n < 0) return layers
+  if (n >= layers) return 0
+  return layers - n
+}
+
+/**
+ * The reserve term for one load: the phone-measured CPU figure everywhere, and
+ * on a Mac serving from Metal the measured floor plus one more copy of the
+ * weights the host still computes. The two signals the backend reads for the
+ * Metal half are the caller's `appleMetalServing` and the config's own
+ * gpu-layers (core/memfit.go's loadRuntimeOverheadBytes).
+ */
+export function reserveBytes(
+  appleMetalServing: boolean,
+  gpuLayers: string,
+  modelLayers: number,
+  weightsBytes: number,
+  ubatchSize: number
+): number {
+  if (!appleMetalServing) return runtimeOverheadBytes(ubatchSize)
+  const cpu = cpuResidentLayers(gpuLayers, modelLayers)
+  const floor = runtimeOverheadBytes(ubatchSize, true)
+  if (cpu <= 0) return floor
+  return Math.round(floor + (weightsBytes * cpu) / splitLayerCount(modelLayers))
 }
 
 /**
@@ -321,10 +349,7 @@ export function estimateMemory(input: MemoryEstimateInput): MemoryEstimate {
   // without a subject, and the rows keyed off the total drop instead.
   const overheadBytes =
     weightsBytes > 0 || kvBytes > 0
-      ? runtimeOverheadBytes(
-          input.ubatchSize,
-          servesFromAppleMetal(input.appleMetalServing, input.gpuLayers, input.modelLayers)
-        )
+      ? reserveBytes(input.appleMetalServing, input.gpuLayers, input.modelLayers, weightsBytes, input.ubatchSize)
       : 0
   const totalBytes = weightsBytes + kvBytes + checkpointBytes + overheadBytes
   const availableBytes = input.freeMemBytes > 0 ? input.freeMemBytes : input.totalMemBytes > 0 ? input.totalMemBytes : 0

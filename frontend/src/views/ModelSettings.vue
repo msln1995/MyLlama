@@ -632,10 +632,10 @@ async function lookupModelTerms() {
     // nothing to checkpoint (core/memfit.go's ctxCheckpointBytes charges it 0).
     const window = Number(found?.swaWindow)
     modelSwaWindow.value = window > 0 ? window : 0
-    // The block count decides whether a numeric gpu-layers offloads everything,
-    // which is what picks the reserve shape on a Mac (core/memfit.go's
-    // offloadsEveryLayer). 0 = never scanned; the estimate then assumes the
-    // backend's own fallback count, so both sides price the same load the same.
+    // The block count sizes the host-resident weight copy that a Mac load with a
+    // partial offload is charged for (core/memfit.go's cpuResidentLayers).
+    // 0 = never scanned; the estimate then assumes the backend's own fallback
+    // count, so both sides price the same load the same.
     const layers = Number(found?.layers)
     modelLayers.value = layers > 0 ? layers : 0
   } catch {

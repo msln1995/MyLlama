@@ -523,8 +523,8 @@ func kvCacheLayers(m modelMetrics) int {
 
 // tuneLayerCount is the model's block count with the same unreadable-header
 // fallback buildTuneModel uses (32), so a client pricing a load reads the layer
-// count the tuner did. It is what decides the reserve shape of a partial
-// offload on Apple silicon (core/memfit.go's offloadsEveryLayer).
+// count the tuner did. It divides the host-resident weight copy a partial
+// offload on Apple silicon is priced with (core/memfit.go's cpuResidentLayers).
 func tuneLayerCount(m modelMetrics, ok bool) int {
 	if !ok {
 		return 32
@@ -778,10 +778,23 @@ const (
 	// context-independent like the phone's figure) and +160 for a 0.6B Q4_K_M at
 	// ctx 8192. Rounded up to 320 here: 1.7x the largest reading.
 	//
-	// The same shape is what an unpinned config gets: the same 4B loaded with no
-	// -ngl flag at all came out +141 (ctx 4096) - llama.cpp's own default offloads
-	// every layer to Metal on this machine, so "auto" is this shape too and only an
-	// explicit gpu-layers 0 is not.
+	// This is the floor of a Mac load, not its whole reserve. A layer the host
+	// still computes costs its weight bytes again: measured with phys_footprint (the
+	// dirty, non-reclaimable half) on the same machine at ctx 8192 / ubatch 512, the
+	// 36-layer 4B Q4_K_M grew +608 MiB with 9 layers on the host, +1092 with 18 and
+	// +2401 with all 36 - against 66.1 MiB of weights per layer - and the 28-layer
+	// 0.6B Q4_K_M grew +134 with 14 and +371 with all 28, against 13.5 per layer.
+	// The mapped file stayed swappable and unchanged, so this is a real second copy
+	// and core/memfit.go's cpuResidentLayers prices it as that share of the weight
+	// term. It is also why a Mac pinned to -ngl 0 needs more than the phone figure:
+	// there the same term came out 1.19 GB beyond weights + KV, which fits buffers
+	// alone - whether Android avoids the second copy by keeping the host tensors as
+	// mapped pages is inferred from that, not measured (the phone was never walked
+	// through a footprint split).
+	//
+	// Full offload is what an unpinned config gets: the same 4B loaded with no -ngl
+	// flag at all came out +141 (ctx 4096) - llama.cpp's own default offloads every
+	// layer to Metal on this machine, so "auto" is the floor alone.
 	//
 	// The phone's 1280 is not this shape. The batch buffers, graph scratch and
 	// sampler arenas the term stands for are mostly allocated by the CPU-side
@@ -1221,7 +1234,9 @@ func tuneModelConfigPlan(hw tuneHardware, m tuneModel) ModelConfig {
 	// the smallest ladder entry. The reserve is the memory a load needs that is
 	// neither weights nor KV, priced at the plan's own ubatch: the CPU-only plan
 	// passes runtimeOverheadBytes and the Metal plan metalRuntimeOverheadBytes,
-	// the same two figures the start-time memory guard picks between (see
+	// which is the whole of what a Metal plan costs because the tuner offloads
+	// every layer on Apple silicon. A user who splits the layers by hand pays that
+	// floor plus one more copy of the host-side layers (core/memfit.go's
 	// loadRuntimeOverheadBytes).
 	ramCtxSize := func(reserve float64) int {
 		for _, ctx := range ladder {

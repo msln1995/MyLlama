@@ -318,11 +318,11 @@ func TestScanModelsDirCarriesKVGeometry(t *testing.T) {
 	if windows["with-geometry"] != 0 {
 		t.Errorf("hybrid model SwaWindow = %d, want 0: no window means no checkpoints to price", windows["with-geometry"])
 	}
-	// The block count is the third published figure: it decides whether a
-	// numeric gpu-layers offloads every layer, and so which runtime reserve a Mac
-	// load is priced at (core/memfit.go's offloadsEveryLayer). The metadata-less
-	// model carries the tuner's 32-layer fallback, not 0 - the shape decision has
-	// to be made, never deferred to "unknown means the cheaper figure".
+	// The block count is the third published figure: it sizes the host-resident
+	// weight copy that a Mac load with a partial offload is charged for
+	// (core/memfit.go's cpuResidentLayers). The metadata-less model carries the
+	// tuner's 32-layer fallback, not 0 - the price has to be computed, never
+	// deferred to "unknown means the cheaper figure".
 	if layers["with-geometry"] != 36 || layers["sliding-window"] != 26 {
 		t.Errorf("published Layers = %d / %d, want 36 / 26",
 			layers["with-geometry"], layers["sliding-window"])

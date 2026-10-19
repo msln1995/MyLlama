@@ -139,13 +139,13 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 		total += int64(kv * kvCacheSizeFactor(cfg))
 	}
 	total += ctxCheckpointBytes(tm, cfg)
-	return total + loadRuntimeOverheadBytes(cfg, probeServingGPU(), tm.Layers)
+	return total + loadRuntimeOverheadBytes(cfg, probeServingGPU(), tm)
 }
 
 // loadRuntimeOverheadBytes is the non-weight, non-KV reserve term of
-// modelLoadBytes, taken in the shape the load actually runs: the Metal
-// measurement when llama-server serves this on Apple silicon's unified GPU with
-// every layer offloaded, the CPU-only (phone-measured) figure otherwise.
+// modelLoadBytes, taken in the shape the load actually runs: the CPU-only
+// (phone-measured) figure everywhere, the Apple silicon one on a Mac serving from
+// Metal.
 //
 // The serving GPU is the same cached probe the over-commit warning next to it
 // reads (probeServingGPU, one detection chain per process), so the two memory
@@ -154,42 +154,51 @@ func modelLoadBytes(m ModelInfo, cfg ModelConfig) int64 {
 // darwin + apple is the only way this shape exists, and a snapshot left over from
 // another platform can never reprice a phone's load.
 //
-// An unpinned config is the Metal shape too, not a guess at it: llama-server's own
-// default offloads every layer on Apple silicon, measured as the same residual
-// this term prices (+141 MiB beyond weights + f16 KV for a 4B Q4_K_M at ctx 4096,
-// against +2585 MiB of RSS with -ngl 0, most of which is the model's own file
-// pages - and those the available-memory probe this term is compared against
-// counts as reclaimable). What that residual tracks is the layers the host still
-// computes, so the shape follows offloadsEveryLayer rather than the mere absence
-// of a -ngl 0.
-func loadRuntimeOverheadBytes(cfg ModelConfig, serving tuneTarget, layers int) int64 {
-	if platformGOOS == "darwin" && serving.Vendor == vendorApple && offloadsEveryLayer(cfg.GPULayers, layers) {
-		return metalRuntimeOverheadBytes(cfg.UBatchSize)
+// On a Mac the term is the measured Metal floor plus one more copy of the layers
+// the host still computes - see metalRuntimeOverheadBytes for the floor and
+// cpuResidentLayers for the copy. An unpinned config is the floor alone, not a
+// guess at it: llama-server's own default offloads every layer on Apple silicon
+// (measured: no -ngl flag at all leaves +141 MiB beyond weights + f16 KV, against
+// +2504 MiB of RSS with -ngl 0).
+func loadRuntimeOverheadBytes(cfg ModelConfig, serving tuneTarget, tm tuneModel) int64 {
+	if platformGOOS != "darwin" || serving.Vendor != vendorApple {
+		return runtimeOverheadBytes(cfg.UBatchSize)
 	}
-	return runtimeOverheadBytes(cfg.UBatchSize)
+	reserve := metalRuntimeOverheadBytes(cfg.UBatchSize)
+	if cpu := cpuResidentLayers(cfg.GPULayers, tm.Layers); cpu > 0 {
+		reserve += tm.WeightsBytes * int64(cpu) / int64(tm.Layers)
+	}
+	return reserve
 }
 
-// offloadsEveryLayer reports whether a gpu-layers setting leaves no layer on the
-// CPU, which is what decides the reserve shape on Apple silicon. The term is not a
-// property of the chip - it tracks the layers the host still computes, measured on
-// the M2 with a 36-layer 4B Q4_K_M at ctx 8192 and ubatch 512 (paired runs):
-// -ngl 99 +141/+142, -ngl 27 (9 layers on the CPU) +727/+728, -ngl 18 +1232/+1234,
-// -ngl 0 +2504. Roughly 63 MiB per CPU-resident layer on top of the ~140 the GPU
-// run keeps, so anything short of full offload pays the CPU figure; that
-// over-charges a 30-of-36 layer split by a few hundred MiB, which is the safe
-// direction for a reserve.
+// cpuResidentLayers counts the blocks a gpu-layers setting leaves on the host.
+// It is what sizes the second copy a Mac load pays: measured with phys_footprint
+// (the dirty, non-reclaimable half) on the M2 at ctx 8192 and ubatch 512, every
+// CPU-resident layer adds its own weight bytes again - the 36-layer 4B Q4_K_M
+// (2381 MiB of weights, 66.1 MiB per layer) grew its dirty memory by 608 MiB with
+// 9 layers on the CPU, 1092 with 18 and 2401 with all 36, and the 28-layer 0.6B
+// (378 MiB, 13.5 per layer) by 134 with 14 and 371 with all 28. The mapped file
+// pages stay swappable and unchanged (~2400 MiB), so this is llama.cpp holding the
+// host-side tensors in its own buffers, not the file cache.
 //
-// "" / "auto" / "all" are the full-offload spellings (the first two emit no -ngl
-// flag, whose server-side default is full offload here). A number counts only when
-// the model's layer count is known and it reaches it - so an unreadable header's
-// fallback count (32) decides, never a silent "unknown means Metal".
-func offloadsEveryLayer(gpuLayers string, layers int) bool {
+// "" / "auto" / "all" leave nothing on the host (the first two emit no -ngl flag,
+// whose server-side default here is full offload). A number counts what it does
+// not reach; an unreadable setting is priced as the worst case, and a model whose
+// header could not be read arrives with buildTuneModel's 32-layer fallback rather
+// than as "unknown, assume Metal".
+func cpuResidentLayers(gpuLayers string, layers int) int {
 	switch gpuLayers {
 	case "", "auto", "all":
-		return true
+		return 0
 	}
 	n, err := strconv.Atoi(gpuLayers)
-	return err == nil && layers > 0 && n >= layers
+	if err != nil || n < 0 {
+		return layers
+	}
+	if n >= layers {
+		return 0
+	}
+	return layers - n
 }
 
 // fittingCtxRung is the advice half of the memory check: the largest tier of the

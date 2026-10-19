@@ -819,10 +819,9 @@ export class ModelInfo {
     /**
      * Layers is the model's block count, the same figure the auto-tuner uses (an
      * unreadable header lands on its 32-layer fallback; 0 means "not scanned").
-     * It decides which runtime reserve a Mac load is priced at — the Metal
-     * measurement only once every layer is offloaded, the CPU measurement from
-     * there down (core/memfit.go's offloadsEveryLayer, with the measured layer by
-     * layer step) — so the model-settings estimate needs it to mirror the guard.
+     * It is the denominator of the host-resident weight copy a Mac load pays on
+     * top of its runtime reserve (core/memfit.go's cpuResidentLayers), so the
+     * model-settings estimate needs it to mirror the guard.
      */
     "layers": number;
 
