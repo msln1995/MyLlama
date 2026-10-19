@@ -228,6 +228,32 @@ big → small-a → small-b → small-c，RSS 取所有 llama-server 进程之�
 的门槛同一个数）的独显机器直接闭嘴。GPU 判定取服务真正用的那块卡（`tunePlanTarget` + 持久化的
 `DeviceID`，读缓存的探测快照，不为启动额外起探针），而且只在已经判定超卖之后才读它。
 
+## 第二道上限：GPU 工作集（`core/memfit.go` + `core/metalpool_darwin.m`）
+
+Mac 上「空闲内存」不是唯一的天花板。Metal 一个进程能钉住的最大工作集是设备的
+`recommendedMaxWorkingSetSize`，这台 24 GiB 的 M2 实测报 **18,186 MiB**；而内存刚空出来时应用的
+RAM 预算（`min(free, 0.90 total) x 0.85` 那条）是 **18,360 MiB**——比工作集还宽 174 MiB。两个数不
+跟彼此走，所以一条价在 RAM 里的加载完全可以越过设备。调优器早就把工作集收进自己的预算
+（`tuneHardware.MetalPoolMB`），启动路径此前没有，这一节把它补上。
+
+越过工作集的后果**不是换页**，是静默卡死。同一台 M2 上用一个 378 MiB 的 Qwen3-0.6B Q4_K_M
+`-ngl 99` 括号法实测上下文档位：
+
+| ctx | 加载 | `/health` | 之后的请求 |
+| --- | --- | --- | --- |
+| 155,648 | 成功 | 通过 | 正常生成 |
+| 159,744 | **不报错** | **通过** | 每个 command buffer 失败 `kIOGPUCommandBufferCallbackErrorOutOfMemory`，每个请求 HTTP 500 `Compute error`，不重载模型不恢复 |
+
+因此启动检查现在比**两个**数，各比各的账：合计价 vs 空闲 RAM，GPU 常驻份额 vs 工作集。
+份额由 `modelLoadPricing` 的第二个返回值给出——整份价减去 `hostWeightBytes`（部分卸载留在宿主
+的那份权重副本），`-ngl 0` 时直接为 0：那种加载向 Metal 要的东西是零，拿工作集提醒它是双重错位。
+两道都过时报 RAM 那条（问题更大，且那句话在这种机器上成立），只越过工作集时报工作集，并把后果
+写进那一行——因为症状和换页完全不同。没调优模型的上下文兜底（`routerUntunedCtx`）改用
+`memoryBudgetBytes` 收口后的预算；prompt 缓存预算刻意**不**收口，它保留的是宿主侧副本。
+
+已知多计（同向，安全）：权重项不按卸载切分线拆，所以部分卸载的 `pinned` 仍记整份权重——它只会
+让告警更早响、让建议档位更小，不会放行一条真越界的加载。
+
 ## 实测 RAM 带宽校准（`core/benchbw.go`）
 
 动机：cpu-moe 的解码速度受 DRAM 读带宽限制，静态规则分不清 12 GB/s 单通道 DDR4 笔记本和
