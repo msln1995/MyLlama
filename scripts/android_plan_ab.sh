@@ -31,6 +31,11 @@ CACHERAM=${3:?}
 MODEL=${4:-/storage/emulated/0/Download/Qwen3-4B-Q4_K_M.gguf}
 BIN=${5:-/data/local/tmp/llama}
 OUT=${OUT:-/tmp/plan-ab}
+# WORKLOAD=short (default: 3 cold prompts + a growing conversation) or
+# overflow (10 distinct ~1.2k-token prompts replayed once) - see the workload
+# block below for why only the second one can make --cache-ram bind.
+WORKLOAD=${WORKLOAD:-short}
+export WORKLOAD
 LOG=/data/local/tmp/srv-$LABEL.log
 mkdir -p "$OUT"
 
@@ -106,7 +111,7 @@ sleep 5
 # The placement analyzer pairs samples within this run only, so start clean.
 rm -f "$OUT/$LABEL-threads.txt"
 python3 - "$LABEL" "$OUT/$LABEL-work.txt" <<'PY'
-import json, random, re, string, subprocess, sys, time, urllib.error, urllib.request
+import json, os, random, re, string, subprocess, sys, time, urllib.error, urllib.request
 
 BASE = "http://127.0.0.1:18080"
 label, outfile = sys.argv[1], sys.argv[2]
@@ -175,6 +180,27 @@ def chat(messages, max_tokens):
 
 
 out.write(f"# {label}\n")
+if os.environ.get("WORKLOAD") == "overflow":
+    # The short workload never retains enough state to reach a clamp budget
+    # (peak 2,090 tokens x 144 KiB/token is under 1,351 MiB), so it cannot say
+    # anything about --cache-ram. This one sends 10 distinct ~1,200-token
+    # prompts, then replays the same 10 in the same order: retention demand is
+    # ~1.7 GiB, so a 1,351 MiB budget must evict and the replay measures what
+    # that eviction costs in re-prefill. Probes land on every round boundary,
+    # so memory and clock are compared at the same request index, not at the
+    # same wall-clock fraction (a throttled arm spends longer in the fat part).
+    prompts = []
+    for i in range(10):
+        nonce = "".join(random.choices(string.ascii_lowercase, k=10))
+        prompts.append([{"role": "user",
+                         "content": f"[{nonce}] {filler(800, 5000 + i * 911)}\n\nThree short bullets."}])
+    for tag in ("cold", "replay"):
+        for i, msgs in enumerate(prompts):
+            pp, tg, dt = chat(msgs, 64)
+            out.write(f"{tag} {i}: pp={pp} tg={tg} t={dt:.1f}s{probe()}\n")
+    out.write("# done\n")
+    sys.exit(0)
+
 # Phase 1: distinct prompts with no shared prefix - worst case for the cache,
 # this is where an over-large --cache-ram shows up as RAM pressure.
 for i in range(3):
