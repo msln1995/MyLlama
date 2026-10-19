@@ -727,23 +727,25 @@ func geomGGUF(t *testing.T, dir, name string) string {
 // mib is the MiB multiplier the load estimates are asserted in.
 func mib(n int64) int64 { return n * (1 << 20) }
 
-// TestMaxModelLoadBytes prices every entry of a library and keeps the heaviest,
-// which is what the router-mode prompt-cache budget is bounded against (models
-// load lazily, so the launch-time resident set proves nothing). The case that
-// matters is the untuned model: the writer resolves its context through
-// routerUntunedCtx, and on a machine that can pay for the trained 32768-token
-// context pricing it at the settings page's 4096 default would under-charge it by
-// 56 MiB on this fixture. The probe is pinned so the expectation does not follow
-// the test host's free RAM.
-func TestMaxModelLoadBytes(t *testing.T) {
+// TestPlanResidentSet prices what router mode may hold in memory at the same
+// time: the modelsMax heaviest entries of the library, summed. Models load
+// lazily, so the launch-time resident set proves nothing, and the cap is a count
+// rather than a memory bound — measured with b11720 on a 24 GiB M2, two models
+// really are resident at once (RSS 3,211 -> 3,663 MiB across worker processes
+// before the third request evicted the biggest). The case that matters for the
+// untuned model is the one the preset writer resolves: the writer emits
+// routerUntunedCtx's number, so pricing it at the settings page's 4096 default
+// would under-charge it by 56 MiB on this fixture. The probe is pinned so the
+// expectation does not follow the test host's free RAM.
+func TestPlanResidentSet(t *testing.T) {
 	pinProbeFreeMemoryGB(t, 64)
 	dir := t.TempDir()
 	path := geomGGUF(t, dir, "geom.gguf")
 	weights := int64(1 << 30) // 1024 MiB
 	overhead := mib(1280)     // runtimeOverheadBytes at the default ubatch
 
-	if got := maxModelLoadBytes(nil, nil); got != 0 {
-		t.Errorf("empty library = %d, want 0", got)
+	if got := planResidentSet(nil, nil, 4); got.total != 0 || len(got.loads) != 0 || got.heaviest.model.Name != "" || got.heaviest.cfg.CtxSize != 0 {
+		t.Errorf("empty library = %+v, want a zero set", got)
 	}
 
 	untuned := ModelInfo{Name: "untuned", Path: path, SizeBytes: weights}
@@ -756,27 +758,58 @@ func TestMaxModelLoadBytes(t *testing.T) {
 	}
 	// The untuned entry must be priced at the trained context (64 MiB of KV),
 	// not at the app's 4096 default.
-	if got := maxModelLoadBytes([]ModelInfo{untuned}, nil); got != weights+mib(64)+overhead {
+	if got := planResidentSet([]ModelInfo{untuned}, nil, 1).total; got != weights+mib(64)+overhead {
 		t.Errorf("untuned model = %d MiB, want %d (trained ctx 32768)", got/(1<<20), (weights+mib(64)+overhead)/(1<<20))
 	}
-	// Heaviest of the three shapes wins, and a stored config can be heavier than
-	// the trained-context fallback. The same call names the model it belongs to
-	// and the plan it was priced with, which is what the over-commit warning has
-	// to quote and re-price a fitting tier against.
+
+	// Three entries, three prices: the stored 131072-token config is heaviest
+	// (1024 weights + 256 KV + 1280 overhead = 2560 MiB), then the
+	// trained-context fallback (2368), then the stored 4096 plan (2312).
 	big := ModelInfo{Name: "big", Path: path, SizeBytes: weights}
 	cfgs["big"] = ModelConfig{CtxSize: 131072, UBatchSize: 512}
-	heavy, heavyPlan, got := heaviestPlannedLoad([]ModelInfo{tuned, untuned, big}, cfgs)
-	if got != weights+mib(256)+overhead {
-		t.Errorf("heaviest = %d MiB, want %d (stored ctx 131072)", got/(1<<20), (weights+mib(256)+overhead)/(1<<20))
+	library := []ModelInfo{tuned, untuned, big}
+	const (
+		bigPrice     = int64(2560)
+		untunedPrice = int64(2368)
+		tunedPrice   = int64(2312)
+	)
+
+	// At the app's default cap of one model the set is exactly the single
+	// heaviest load, the figure these decisions used before the cap existed.
+	one := planResidentSet(library, cfgs, 1)
+	if one.total != mib(bigPrice) || len(one.loads) != 1 {
+		t.Errorf("cap 1 total = %d MiB over %d loads, want %d over 1", one.total/(1<<20), len(one.loads), bigPrice)
 	}
-	if heavy.Name != "big" {
-		t.Errorf("heaviest model = %q, want the stored 131072-token entry", heavy.Name)
+	// The same call names the model it belongs to and the plan it was priced
+	// with, which is what the over-commit warning has to quote and re-price a
+	// fitting tier against.
+	if one.heaviest.model.Name != "big" {
+		t.Errorf("heaviest model = %q, want the stored 131072-token entry", one.heaviest.model.Name)
 	}
-	if heavyPlan.CtxSize != 131072 || heavyPlan.UBatchSize != 512 {
-		t.Errorf("heaviest plan = %+v, want the stored ctx 131072 at ubatch 512", heavyPlan)
+	if one.heaviest.cfg.CtxSize != 131072 || one.heaviest.cfg.UBatchSize != 512 {
+		t.Errorf("heaviest plan = %+v, want the stored ctx 131072 at ubatch 512", one.heaviest.cfg)
 	}
-	if h, p, got := heaviestPlannedLoad(nil, nil); got != 0 || h.Name != "" || p.CtxSize != 0 {
-		t.Errorf("empty library = %q/%+v/%d, want no model, no plan and 0", h.Name, p, got)
+
+	// Raising the cap raises the bill by the next-heaviest load, heaviest first.
+	two := planResidentSet(library, cfgs, 2)
+	if two.total != mib(bigPrice+untunedPrice) {
+		t.Errorf("cap 2 total = %d MiB, want %d (the two heaviest summed)", two.total/(1<<20), bigPrice+untunedPrice)
+	}
+	if len(two.loads) != 2 || two.loads[0].model.Name != "big" || two.loads[1].model.Name != "untuned" {
+		t.Errorf("cap 2 loads = %+v, want big then untuned", two.loads)
+	}
+	all := planResidentSet(library, cfgs, 3)
+	if all.total != mib(bigPrice+untunedPrice+tunedPrice) {
+		t.Errorf("cap 3 total = %d MiB, want %d", all.total/(1<<20), bigPrice+untunedPrice+tunedPrice)
+	}
+	// A cap wider than the library cannot bill models that are not there.
+	wide := planResidentSet(library, cfgs, 8)
+	if wide.total != all.total || len(wide.loads) != 3 {
+		t.Errorf("cap 8 = %d MiB over %d loads, want the same %d MiB over 3", wide.total/(1<<20), len(wide.loads), all.total/(1<<20))
+	}
+	// The clamp the app's own call site applies is the planner's too.
+	if clamp := planResidentSet(library, cfgs, 0); clamp.total != one.total || len(clamp.loads) != 1 {
+		t.Errorf("cap 0 = %+v, want the single heaviest load", clamp.loads)
 	}
 }
 
@@ -846,7 +879,7 @@ func TestUnconfiguredModelKeepsLibraryPromptCache(t *testing.T) {
 	path := geomGGUF(t, t.TempDir(), "geom.gguf")
 	m := ModelInfo{Name: "untuned", Path: path, SizeBytes: 1 << 30}
 
-	heavy := maxModelLoadBytes([]ModelInfo{m}, nil)
+	heavy := planResidentSet([]ModelInfo{m}, nil, 1).total
 	if want := mib(1024 + 32 + 1280); heavy != want {
 		t.Errorf("heaviest = %d MiB, want %d (bounded ctx 16384)", heavy/(1<<20), want/(1<<20))
 	}
@@ -889,28 +922,35 @@ func TestLoadsStayInHostRAM(t *testing.T) {
 // library that fits (including exactly at the limit), for a failed probe and for
 // an unreadable library, and otherwise quotes the model plus both figures - the
 // state it describes otherwise leaves no diagnostic anywhere - plus the context
-// tier the caller resolved, when one exists.
+// tier the caller resolved, when one exists. With more than one load able to be
+// resident it also says how many and quotes the heaviest one's own share, so the
+// line names both the total the session can reach and the model to shrink.
 func TestOvercommitWarning(t *testing.T) {
 	const gib = int64(1 << 30)
 	tests := []struct {
-		name     string
-		model    string
-		need     int64
-		avail    int64
-		suggest  int
-		want     bool
-		wantTier bool
+		name      string
+		model     string
+		resident  int
+		need      int64
+		heaviest  int64
+		avail     int64
+		suggest   int
+		want      bool
+		wantTier  bool
+		wantCount bool
 	}{
-		{"fits", "m", 3 * gib, 5 * gib, 0, false, false},
-		{"exactly at the limit fits", "m", 4 * gib, 4 * gib, 0, false, false},
-		{"failed probe says nothing", "m", 20 * gib, 0, 16384, false, false},
-		{"empty library says nothing", "", 20 * gib, gib, 16384, false, false},
-		{"over-committed warns", "qwen-4b", 4*gib + 1, 4 * gib, 0, true, false},
-		{"over-committed warns with the tier", "qwen-4b", 4*gib + 1, 4 * gib, 32768, true, true},
+		{"fits", "m", 1, 3 * gib, 3 * gib, 5 * gib, 0, false, false, false},
+		{"exactly at the limit fits", "m", 1, 4 * gib, 4 * gib, 4 * gib, 0, false, false, false},
+		{"failed probe says nothing", "m", 2, 20 * gib, 12 * gib, 0, 16384, false, false, false},
+		{"empty library says nothing", "", 1, 20 * gib, 20 * gib, gib, 16384, false, false, false},
+		{"over-committed warns", "qwen-4b", 1, 4*gib + 1, 4*gib + 1, 4 * gib, 0, true, false, false},
+		{"over-committed warns with the tier", "qwen-4b", 1, 4*gib + 1, 4*gib + 1, 4 * gib, 32768, true, true, false},
+		{"the resident set over-commits", "qwen-4b", 3, 11 * gib, 4 * gib, 8 * gib, 0, true, false, true},
+		{"a resident set with a tier that fits", "qwen-4b", 2, 9 * gib, 5 * gib, 8 * gib, 16384, true, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := overcommitWarning(tt.model, tt.need, tt.avail, tt.suggest)
+			got := overcommitWarning(tt.model, tt.resident, tt.need, tt.heaviest, tt.avail, tt.suggest)
 			if tt.want && got == "" {
 				t.Error("overcommitWarning = \"\", want a warning")
 			}
@@ -920,7 +960,13 @@ func TestOvercommitWarning(t *testing.T) {
 			if !tt.want {
 				return
 			}
-			for _, frag := range []string{"qwen-4b", formatBytes(tt.need), formatBytes(tt.avail)} {
+			frags := []string{tt.model, formatBytes(tt.need), formatBytes(tt.avail)}
+			if tt.resident > 1 {
+				// The heaviest load's own figure is the one the advice is about;
+				// printing only the total would hide which model to open.
+				frags = append(frags, formatBytes(tt.heaviest))
+			}
+			for _, frag := range frags {
 				if !strings.Contains(got, frag) {
 					t.Errorf("warning %q does not carry %q", got, frag)
 				}
@@ -931,6 +977,9 @@ func TestOvercommitWarning(t *testing.T) {
 			}
 			if !tt.wantTier && tt.suggest > 0 && strings.Contains(got, strconv.Itoa(tt.suggest)) {
 				t.Errorf("warning %q quotes a tier the caller did not resolve", got)
+			}
+			if tt.wantCount && !strings.Contains(got, strconv.Itoa(tt.resident)) {
+				t.Errorf("warning %q does not say how many models can be resident", got)
 			}
 		})
 	}

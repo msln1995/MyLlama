@@ -1347,6 +1347,64 @@ func TestBuildServerCommandRouterWarnsOnOvercommit(t *testing.T) {
 	}
 }
 
+// TestBuildServerCommandRouterPricesResidentSet is the cap>1 half of the router
+// memory accounting: --models-max is a count, not a memory bound, so raising it
+// raises the bill by one whole load per extra slot. Measured with b11720 on a
+// 24 GiB M2 (--models-max 2, requests addressed big -> small-a -> small-b ->
+// small-c): RSS across the worker processes walked 109 -> 3,211 -> 3,663 ->
+// 1,013 -> 1,010 MiB, two loads resident at once before the next request evicted
+// the least recently used one.
+//
+// Same library, same machine, only the setting differs: at cap 1 this host holds
+// one load and still leaves room for a cache; at cap 2 the two loads together
+// exceed the free memory, so the launch has to say so and disable retention
+// rather than price the session against a single model.
+func TestBuildServerCommandRouterPricesResidentSet(t *testing.T) {
+	dir := pinDirectModelDir(t)
+	routerModelDir(t, dir, "resident-author", "resident-a")
+	routerModelDir(t, dir, "resident-author", "resident-b")
+	pinProbeFreeMemoryGB(t, 4) // 4096 MiB free at launch
+	pinProbeServingGPU(t, tuneTarget{Vendor: vendorNone})
+
+	// Each untuned entry is priced at its trained context: 1024 weights + 64 KV
+	// + 1280 overhead = 2368 MiB, so one of them fits (a 864 MiB cache) and two
+	// do not (4736 MiB demanded against 4096 free).
+	cfg := ServerConfig{AccessMode: accessLocal, Host: "127.0.0.1", Port: 8080, MaxModels: 1, CacheRAM: 8192}
+	_, args, err := buildServerCommand(cfg, "/tmp/preset.ini", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := argValue(args, "--cache-ram"); !ok || v != "864" {
+		t.Errorf("--cache-ram at cap 1 = %q (present %v), want 864: %v", v, ok, args)
+	}
+
+	serverLogsMu.Lock()
+	serverLogs = serverLogs[:0]
+	serverLogsMu.Unlock()
+	cfg.MaxModels = 2
+	_, args, err = buildServerCommand(cfg, "/tmp/preset.ini", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := argValue(args, "--cache-ram"); !ok || v != "0" {
+		t.Errorf("--cache-ram at cap 2 = %q (present %v), want 0: the two resident loads together leave no headroom: %v", v, ok, args)
+	}
+	var warned []string
+	for _, line := range serverLogsCopy() {
+		if strings.HasPrefix(line, "[WARN]") && strings.Contains(line, formatBytes(mib(4736))) {
+			warned = append(warned, line)
+		}
+	}
+	if len(warned) != 1 {
+		t.Fatalf("resident-set over-commit warnings = %q, want one quoting the summed load", warned)
+	}
+	// The line has to stay actionable: it names an entry and quotes that entry's
+	// own share alongside the total the session can reach.
+	if !strings.Contains(warned[0], "resident-") || !strings.Contains(warned[0], formatBytes(mib(2368))) {
+		t.Errorf("warning %q does not name a model and its own load", warned[0])
+	}
+}
+
 // TestBuildServerCommandAndroidCacheRAMZeroDisables covers the same pass-through
 // on the direct-mode branch: with no headroom the bounded budget is emitted as
 // --cache-ram 0 instead of being dropped.

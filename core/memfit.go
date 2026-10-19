@@ -1,6 +1,9 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // ─── Memory fit pre-check (direct mode) ───────────────────────────
 // Android has no swap and runs a low-memory killer: when a load asks for more
@@ -194,14 +197,51 @@ func routerLibrary() ([]ModelInfo, map[string]ModelConfig) {
 	return models, cfgs
 }
 
-// heaviestPlannedLoad is the largest load a router-mode server may bring up
-// during its lifetime, together with the model it belongs to. Models load lazily
-// on their first request, so the start-time prompt-cache budget cannot be priced
-// against what is resident at launch (nothing) - it has to assume the heaviest
-// entry in the library gets loaded at some point in the session.
+// plannedLoad is one library entry with the plan a router-mode load runs with
+// and the memory that load prices (modelLoadBytes).
+type plannedLoad struct {
+	model ModelInfo
+	cfg   ModelConfig
+	bytes int64
+}
+
+// residentSet is what router mode may hold in memory at the same time.
+type residentSet struct {
+	// loads are the entries that can be resident together, heaviest first,
+	// capped at the server's max-loaded-models count.
+	loads []plannedLoad
+	// total is the sum of loads: the figure a session can drive the machine to.
+	total int64
+	// heaviest is the single most expensive load, the entry an over-commit
+	// warning names as the one to shrink.
+	heaviest plannedLoad
+}
+
+// planResidentSet prices the loads a router-mode server may keep resident at
+// once: the modelsMax heaviest entries in the library.
 //
-// The whole load is charged against host RAM, KV cache included. That is not a
-// conservative guess on the platforms this tuner plans for: on Apple unified
+// Models load lazily on their first request, so a start-time decision cannot
+// price against what is resident at launch (nothing) - it has to assume the
+// expensive entries get loaded at some point in the session. The cap is a count
+// rather than a memory bound, and the loads really do stack. Measured with
+// llama.cpp b11720 on a 24 GiB M2 (a four-id --models-preset, --cache-ram 0,
+// one worker process per loaded model): with --models-max 2 and the requests
+// addressed big -> small-a -> small-b -> small-c, RSS across all llama-server
+// processes walked
+//
+//	109 MiB (nothing loaded) -> 3,211 (big) -> 3,663 (big + small-a)
+//	-> 1,013 (small-a + small-b, big evicted) -> 1,010 (small-b + small-c)
+//
+// — two loads resident at once, the next request evicting the least recently
+// used one, so a session's peak is the sum of the modelsMax most expensive
+// loads, never the heaviest of them alone. Pricing only the heaviest is what
+// this file used to do, which understated the bill by one whole load per extra
+// slot whenever the user raised the app's "max loaded models" setting above its
+// default of 1 (the app's own docs describe that setting as the number of
+// models resident in memory at the same time).
+//
+// Each load is charged against host RAM in full, KV cache included. That is not
+// a conservative guess on the platforms these decisions serve: on Apple unified
 // memory the offloaded KV is host memory, measured as a flat 112.0 KiB per token
 // (RSS 1,371 -> 4,060 MiB between ctx 8192 and ctx 32768 with -ngl 99 and the
 // cache disabled, for a model whose f16 KV geometry is 112 KiB/token). Only a
@@ -209,26 +249,32 @@ func routerLibrary() ([]ModelInfo, map[string]ModelConfig) {
 // direction for a bound that only ever shrinks a budget - it is not safe for a
 // warning, which is why overcommitWarning asks first.
 //
-// (zero values, 0) for an empty or unreadable library. The model and its plan
-// come back with the figure because the over-commit warning advises that one
-// model, and advising it needs the plan the price was computed from.
-func heaviestPlannedLoad(models []ModelInfo, cfgs map[string]ModelConfig) (ModelInfo, ModelConfig, int64) {
-	var heavy ModelInfo
-	var plan ModelConfig
-	var heaviest int64
+// modelsMax <= 1 (the app's default) yields the single heaviest entry, exactly
+// the figure these decisions used. An empty or unreadable library yields a
+// zero set.
+func planResidentSet(models []ModelInfo, cfgs map[string]ModelConfig, modelsMax int) residentSet {
+	if modelsMax < 1 {
+		modelsMax = 1
+	}
+	loads := make([]plannedLoad, 0, len(models))
 	for _, m := range models {
 		c := routerModelPlan(cfgs, m)
-		if n := modelLoadBytes(m, c); n > heaviest {
-			heaviest, heavy, plan = n, m, c
-		}
+		loads = append(loads, plannedLoad{model: m, cfg: c, bytes: modelLoadBytes(m, c)})
 	}
-	return heavy, plan, heaviest
-}
-
-// maxModelLoadBytes is heaviestPlannedLoad's byte figure alone.
-func maxModelLoadBytes(models []ModelInfo, cfgs map[string]ModelConfig) int64 {
-	_, _, n := heaviestPlannedLoad(models, cfgs)
-	return n
+	sort.SliceStable(loads, func(i, j int) bool { return loads[i].bytes > loads[j].bytes })
+	set := residentSet{}
+	if len(loads) == 0 {
+		return set
+	}
+	set.heaviest = loads[0]
+	if len(loads) > modelsMax {
+		loads = loads[:modelsMax]
+	}
+	set.loads = loads
+	for _, l := range loads {
+		set.total += l.bytes
+	}
+	return set
 }
 
 // probeServingGPU is the serving-GPU seam for the router-mode over-commit
@@ -274,11 +320,17 @@ func loadsStayInHostRAM(serving tuneTarget) bool {
 // state is discoverable from the app.
 //
 // "" when the library is empty or unreadable, the probe failed (availBytes <= 0
-// proves nothing), or the heaviest load fits. suggestCtx is fittingCtxRung's
-// answer for that model (>0 = the tier to move to, 0 = no tier on the ladder
-// helps), computed by the caller so this stays a pure formatter.
-func overcommitWarning(name string, needBytes, availBytes int64, suggestCtx int) string {
-	if name == "" || availBytes <= 0 || needBytes <= availBytes {
+// proves nothing), or the priced loads fit. suggestCtx is fittingCtxRung's
+// answer for the heaviest model (>0 = the tier to move to, 0 = no tier on the
+// ladder helps), computed by the caller so this stays a pure formatter.
+//
+// resident is how many loads totalBytes prices (planResidentSet's set size) and
+// heaviestBytes is that one model's own share of them. At resident == 1 the two
+// are the same load and the sentence stays the single-load one; above 1 it says
+// how many can be resident and names the cap as the other lever, because the
+// number the user can actually type is what makes the line actionable.
+func overcommitWarning(name string, resident int, totalBytes, heaviestBytes, availBytes int64, suggestCtx int) string {
+	if name == "" || availBytes <= 0 || totalBytes <= availBytes {
 		return ""
 	}
 	advice := tr("请在模型设置里调小它的上下文大小，或用一键调优重新规划。",
@@ -287,9 +339,22 @@ func overcommitWarning(name string, needBytes, availBytes int64, suggestCtx int)
 		advice = fmt.Sprintf(tr("把它的上下文大小调到 %d 就放得下，或者用一键调优重新规划。",
 			"Set its context size to %d and it fits, or run one-click tuning to re-plan it."), suggestCtx)
 	}
+	// The tier above is priced with the other resident loads still in memory
+	// (the caller hands fittingCtxRung the headroom they leave over), so when a
+	// tier exists it really is the number that fixes this. When none does, the
+	// cap is the lever left to pull.
+	if resident > 1 && suggestCtx <= 0 {
+		advice = tr("把「最大加载模型数」调小，或在模型设置里调小它的上下文大小、用一键调优重新规划。",
+			"Lower the max-loaded-models count, or shrink this model's context in its settings and re-plan it with one-click tuning.")
+	}
+	if resident > 1 {
+		return fmt.Sprintf(tr("最多 %d 个模型会同时驻留，合计要占约 %s（每个模型各自的权重 + 上下文缓存 + 运行开销）；其中 %s 最重，它一项就要占约 %s。而本机当前只有 %s 空闲内存。服务仍会启动、其他模型照常可用，但真加载到这么多时内存放不下会开始交换：请求可能长时间没有响应、整台机器变卡。%s",
+			"up to %d models can stay resident at once, which costs about %s in total (each model's own weights + context cache + runtime overhead); %s is the heaviest and takes about %s by itself. Only %s of memory is free right now. The service still starts and every other model stays usable, but loading that many will overflow into swap: requests may hang for a long time and the whole machine slows down. %s"),
+			resident, formatBytes(totalBytes), name, formatBytes(heaviestBytes), formatBytes(availBytes), advice)
+	}
 	return fmt.Sprintf(tr("模型 %s 这次要占约 %s（权重 + 上下文缓存 + 运行开销），而本机当前只有 %s 空闲内存。服务仍会启动、其他模型照常可用，但真正加载它时内存放不下会开始交换：请求可能长时间没有响应、整台机器变卡。%s",
 		"model %s needs about %s for this load (weights + context cache + runtime overhead) but only %s of memory is free right now. The service still starts and every other model stays usable, but loading it will overflow into swap: requests may hang for a long time and the whole machine slows down. %s"),
-		name, formatBytes(needBytes), formatBytes(availBytes), advice)
+		name, formatBytes(totalBytes), formatBytes(availBytes), advice)
 }
 
 // routerModelPlan resolves the config a router-mode load runs m with: the stored
@@ -331,8 +396,9 @@ func routerModelPlan(cfgs map[string]ModelConfig, m ModelInfo) ModelConfig {
 // already priced past the machine.
 //
 // That over-allocation is the smaller half of the harm. The library's
-// prompt-cache budget is sized against the heaviest planned load
-// (heaviestPlannedLoad), and until this bound existed that load was priced at the
+// prompt-cache budget is sized against the loads that can be resident at once
+// (planResidentSet, at the app's default cap of one model the heaviest planned
+// load), and until this bound existed that load was priced at the
 // model's trained context, so one unconfigured model was by itself enough to push
 // the headroom negative and turn prompt caching off for every model in the app,
 // in every session: on this M2 (7,925 MiB available at the time of the runs

@@ -469,22 +469,32 @@ func buildServerCommand(cfg ServerConfig, presetPath string, d *directModel) (st
 		"--no-webui",
 	}
 	// One pricing pass over the library feeds both launch-time memory
-	// decisions: the over-commit warning and the prompt-cache budget.
-	heavyModel, heavyPlan, heaviestNeed := heaviestPlannedLoad(routerLibrary())
+	// decisions: the over-commit warning and the prompt-cache budget. The
+	// library's peak is not its heaviest entry but the loads the server can hold
+	// at the same time, so the bill is the heaviest loads summed up to the
+	// --models-max cap above (see planResidentSet for the measurement); at the
+	// default cap of 1 that is exactly the single heaviest load these decisions
+	// used before.
+	models, cfgs := routerLibrary()
+	set := planResidentSet(models, cfgs, cfg.MaxModels)
 	freeMem := availableMemoryBytes()
-	if heavyModel.Name != "" && freeMem > 0 && heaviestNeed > freeMem && loadsStayInHostRAM(probeServingGPU()) {
-		suggest := fittingCtxRung(heavyModel, heavyPlan, freeMem)
-		addServerLog("[WARN] " + overcommitWarning(heavyModel.Name, heaviestNeed, freeMem, suggest))
+	if len(set.loads) > 0 && freeMem > 0 && set.total > freeMem && loadsStayInHostRAM(probeServingGPU()) {
+		// The advice resizes the heaviest model with the rest of the resident set
+		// still on the bill: the tier it suggests has to fit the memory they leave
+		// over, not the whole machine.
+		rest := set.total - set.heaviest.bytes
+		suggest := fittingCtxRung(set.heaviest.model, set.heaviest.cfg, freeMem-rest)
+		addServerLog("[WARN] " + overcommitWarning(set.heaviest.model.Name, len(set.loads), set.total, set.heaviest.bytes, freeMem, suggest))
 	}
 	if cfg.CacheRAM > 0 {
 		// Router mode loads models lazily, so the memory the prompt cache may
-		// grow into during the session is bounded against the heaviest entry in
-		// the library rather than against whatever is resident at launch (see
-		// heaviestPlannedLoad and promptCacheRAMMiB). As in direct mode the
-		// bounded figure always reaches argv, 0 included.
-		cacheRAM := promptCacheRAMMiB(cfg.CacheRAM, heaviestNeed, freeMem)
+		// grow into during the session is bounded against the loads that can be
+		// resident together rather than against whatever is loaded at launch (see
+		// planResidentSet and promptCacheRAMMiB). As in direct mode the bounded
+		// figure always reaches argv, 0 included.
+		cacheRAM := promptCacheRAMMiB(cfg.CacheRAM, set.total, freeMem)
 		if cacheRAM != cfg.CacheRAM {
-			addServerLog(fmt.Sprintf("[INFO] prompt cache budget %d -> %d MiB, the memory the heaviest configured model leaves free", cfg.CacheRAM, cacheRAM))
+			addServerLog(fmt.Sprintf("[INFO] prompt cache budget %d -> %d MiB, the memory the models that can be resident at once leave free", cfg.CacheRAM, cacheRAM))
 		}
 		args = append(args, "--cache-ram", strconv.Itoa(cacheRAM))
 	}
