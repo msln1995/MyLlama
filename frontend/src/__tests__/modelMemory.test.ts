@@ -314,6 +314,13 @@ describe('estimateMemory', () => {
     expect(estimateMemory({ ...macMoE, gpuLayers: '27' }).overheadBytes).toBe((320 + 900 + 2025) * MIB)
     expect(estimateMemory({ ...macMoE, gpuLayers: '0' }).overheadBytes).toBe((320 + 3600) * MIB)
     expect(estimateMemory({ ...macMoE, cpuMoe: false, nCpuMoe: 8 }).overheadBytes).toBe((320 + 600) * MIB)
+    // Which blocks overlap is measured: -ngl offloads the *last* blocks,
+    // --n-cpu-moe pins the *first* ones, so a span inside the host's leading
+    // blocks moves nothing (the M2 read 1704 MB against 1706 for -ngl 12 with
+    // --n-cpu-moe 4) and only the blocks past the cut line are copied.
+    expect(estimateMemory({ ...macMoE, cpuMoe: false, nCpuMoe: 9, gpuLayers: '27' }).overheadBytes).toBe((320 + 900) * MIB)
+    expect(estimateMemory({ ...macMoE, cpuMoe: false, nCpuMoe: 12, gpuLayers: '27' }).overheadBytes).toBe((320 + 900 + 225) * MIB)
+    expect(estimateMemory({ ...macMoE, cpuMoe: false, nCpuMoe: 12, gpuLayers: '0' }).overheadBytes).toBe((320 + 3600) * MIB)
     // A dense model has no pool to move, and a non-Mac pays the CPU figure.
     expect(estimateMemory({ ...macMoE, expertBytes: 0 }).overheadBytes).toBe(320 * MIB)
     expect(estimateMemory({ ...macMoE, appleMetalServing: false }).overheadBytes).toBe(RUNTIME_OVERHEAD_BYTES_AT_512)

@@ -328,8 +328,11 @@ function intDiv(bytes: number, layers: number): number {
  * The expert copy is measured, not inferred: OLMoE-1B-7B Q4_0 (3456 MiB of
  * experts over 16 blocks) on the M2 at ctx 4096 went from 575 MB of dirty memory
  * with -ngl 99 to 4035 MB with -ngl 99 --cpu-moe, paired runs agreeing within
- * 2 MB. Blocks the host already runs are counted once, so a partial offload plus
- * --cpu-moe does not pay for the same bytes twice.
+ * 2 MB. Which blocks overlap is measured too: -ngl offloads the *last* blocks and
+ * --n-cpu-moe pins the *first* ones, so --n-cpu-moe 4 at -ngl 12 read 1704 MB
+ * against 1706 without the flag and --n-cpu-moe 12 at -ngl 8 added 650 MB - four
+ * blocks of experts, not eight. Only the pinned blocks past the host cut line
+ * move bytes, so a partial offload plus --cpu-moe never pays twice.
  */
 export function reserveBytes(input: ReserveInput): number {
   if (!input.appleMetalServing) return runtimeOverheadBytes(input.ubatchSize)
@@ -338,9 +341,8 @@ export function reserveBytes(input: ReserveInput): number {
   const cpu = cpuResidentLayers(input.gpuLayers, input.modelLayers)
   let host = intDiv(input.weightsBytes * cpu, layers)
   const pinned = cpuMoeHostLayers(input.cpuMoe, input.nCpuMoe, input.modelLayers)
-  const offloaded = layers - cpu
-  if (pinned > 0 && offloaded > 0) {
-    host += intDiv(input.expertBytes * Math.min(pinned, offloaded), layers)
+  if (pinned > cpu) {
+    host += intDiv(input.expertBytes * (pinned - cpu), layers)
   }
   if (host <= 0) return floor
   return floor + host

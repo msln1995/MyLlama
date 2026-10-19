@@ -409,10 +409,17 @@ func TestLoadRuntimeOverheadBytesCPUMoe(t *testing.T) {
 		// With every block on the host the experts are already inside the dense
 		// copy, so the flag costs nothing extra - no double counting.
 		{name: "cpu-moe with every block on the host", gpuLayers: "0", expertMB: 2700, cpuMoe: true, wantMB: 320 + 3600},
-		// --n-cpu-moe pins the first N blocks' experts, clamped to the block count.
+		// --n-cpu-moe pins the first N blocks, and -ngl offloads the last ones, so
+		// a span that stays inside the host's leading blocks moves nothing (the
+		// measured 1704/1706 and 3505/3504 MB pairs).
+		{name: "n-cpu-moe inside the host span", gpuLayers: "27", expertMB: 2700, nCpuMoe: 9, wantMB: 320 + 900},
+		{name: "n-cpu-moe with every block on the host", gpuLayers: "0", expertMB: 2700, nCpuMoe: 12, wantMB: 320 + 3600},
+		// Past the host cut line each pinned block adds its share of the pool: at
+		// -ngl 27 the first nine blocks are the host's, so twelve pinned blocks
+		// move three (2700 x 3/36 = 225).
+		{name: "n-cpu-moe past the host cut line", gpuLayers: "27", expertMB: 2700, nCpuMoe: 12, wantMB: 320 + 900 + 225},
 		{name: "n-cpu-moe eight blocks", gpuLayers: "all", expertMB: 2700, nCpuMoe: 8, wantMB: 320 + 600},
 		{name: "n-cpu-moe past the block count", gpuLayers: "all", expertMB: 2700, nCpuMoe: 99, wantMB: 320 + 2700},
-		{name: "n-cpu-moe inside the offloaded span only", gpuLayers: "27", expertMB: 2700, nCpuMoe: 9, wantMB: 320 + 900 + 675},
 		// A flag set on a dense model has no expert pool to move.
 		{name: "dense model", gpuLayers: "all", expertMB: 0, cpuMoe: true, wantMB: 320},
 		// Both flags set is read as the plain one, the conservative half.
@@ -513,6 +520,21 @@ func TestModelLoadBytesChargesCPUMoeExperts(t *testing.T) {
 	if got := modelLoadBytes(m, hosted); got != modelLoadBytes(m, plain) {
 		t.Errorf("-ngl 0 with --cpu-moe = %d, want the same %d (no double counting)",
 			got, modelLoadBytes(m, plain))
+	}
+	// The measured direction, end to end: -ngl offloads the *last* blocks and
+	// --n-cpu-moe pins the *first* ones, so the same pinned count costs different
+	// bytes depending on where the host cut line falls. At -ngl 2 the host runs
+	// blocks 0-1, which is exactly what --n-cpu-moe 2 pins - free. Pin four moves
+	// the two blocks Metal holds (the +expertPool/2 the full-offload split shows).
+	half := ModelConfig{CtxSize: 4096, GPULayers: "2", UBatchSize: 512}
+	pinnedHostSpan := ModelConfig{CtxSize: 4096, GPULayers: "2", UBatchSize: 512, NCpuMoe: 2}
+	if got := modelLoadBytes(m, pinnedHostSpan); got != modelLoadBytes(m, half) {
+		t.Errorf("-ngl 2 with --n-cpu-moe 2 = %d, want the same %d (the pinned blocks are the host's)",
+			got, modelLoadBytes(m, half))
+	}
+	pinnedAll := ModelConfig{CtxSize: 4096, GPULayers: "2", UBatchSize: 512, NCpuMoe: 4}
+	if got := modelLoadBytes(m, pinnedAll) - modelLoadBytes(m, half); got != expertPool/2 {
+		t.Errorf("-ngl 2 with --n-cpu-moe 4 adds %d B, want %d (two blocks moved off Metal)", got, expertPool/2)
 	}
 	// The copy is Apple silicon's: on the phone the host tensors are the mapped
 	// pages the weight term already covers, so the flag is free there.
