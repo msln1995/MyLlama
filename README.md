@@ -8,9 +8,9 @@
 
 它仍是同一套基于 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的跨平台本地大模型客户端：扫描本地 GGUF → 可视化配置推理参数（或一键智能调优）→ 生成 llama-server 预设 → 一个 OpenAI 兼容端点供内置聊天与任意客户端使用；模型下载、本地聊天与实时监控都在应用内完成，数据不出本机。
 
-**📥 本 fork 的安卓安装包：** [MyLlama-v0.5.3-fork.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.1/MyLlama-v0.5.3-fork.1-android-arm64.apk) ｜ [全部 Release](https://github.com/msln1995/MyLlama/releases)
+**📥 本 fork 的安卓安装包：** [MyLlama-v0.6.0-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-android-arm64.apk) ｜ [全部 Release](https://github.com/msln1995/MyLlama/releases)
 
-**🍎 本 fork 的 macOS 安装包（universal，Apple 芯片与 Intel 通用）：** [MyLlama-v0.5.3-fork.2-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.2/MyLlama-v0.5.3-fork.2-macos-universal.dmg) ｜ [zip 版](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.2/MyLlama-v0.5.3-fork.2-macos-universal.zip)（上游不发 macOS，这是本 fork 独有的产物）
+**🍎 本 fork 的 macOS 安装包（universal，Apple 芯片与 Intel 通用）：** [MyLlama-v0.6.0-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.dmg) ｜ [zip 版](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.zip)（上游不发 macOS，这是本 fork 独有的产物）
 
 包名是 `com.msln1995.myllama`，**与上游的 `com.codeneow.llamadesktop` 不同**：两个应用可以并存、互不覆盖，也不需要为了安装本 fork 而先卸载官方包。macOS 的 bundle id 同样用 `com.msln1995.myllama`。
 
@@ -38,6 +38,16 @@ Windows x64 · macOS universal · Android arm64 · Linux x64 · GPL-3.0
 
 我们只动了一条链路：**运行环境下载完之后，应用能不能真的认它**。修复已按 [PR #43](https://github.com/CodeNeow/MyLlama/pull/43) 提交上游评审，合并后这里的代码差异就会消失；包名（下面第 4 条）与 macOS 发行包（下面第 7 条）是本 fork 自己的决定，不会提交上游。
 
+**v0.6.0 新增改动（基于真机实测的性能优化）：**
+
+8. **Android 内存计价与守卫** — 启动前精确计算模型总 footprint（权重 + KV 缓存 + 上下文检查点 + 运行时开销），超预算直接拦截并给出可操作的上下文建议，不再闪退。KV 缓存按真实量化类型计价，守护与调参器共用同一公式。
+9. **Android prompt cache 优化** — 50% 的 headroom 钳位在 ctx 16384 时让 replay 慢 5× 但不省内存，Android 端份额提升至 90%，prompt cache 命中时 replay 快 3-5×。
+10. **Android 线程数修复** — 未调优模型默认 8 worker 与系统回收抢核导致卡顿；现在按性能核数封顶（4 线程），实测解码速度稳定在 3.4-3.9 tok/s。
+11. **macOS Metal 支持** — Mac 端（Apple Silicon）走 Metal 后端，全 offload 时推理速度显著快于 CPU-only；内存计价按 Metal working set 而非系统 RAM。
+12. **三选项外观模式** — 主题设置从「开/关」改为「跟随系统 / 浅色 / 深色」三选一，macOS 和 Android 均支持自动检测系统主题。
+13. **自动语言检测修复** — macOS 通过 `defaults read -g AppleLanguages`、Android 通过 `getprop persist.sys.locale` 检测系统语言，不再始终回退到英文。
+14. **更新指向 fork** — 应用内「检查更新」现在去本 fork 的 Release 页（`msln1995/MyLlama`）而非上游，设置页也加了说明提示这是独立分支。
+
 1. **选包**：打分相同时上游按 GitHub API 的返回顺序取第一个，于是安卓 / Linux arm64 经常拿到 `*-snapdragon` 的 `cmake --install` 布局包——解压完目录里没有可执行文件位置对得上。`pickBestAssetFor` 现在给 `-snapdragon` 强降权（−400 分），普通平铺 CPU 包优先，实在没有别的可选时才回退。
 2. **目录布局**：上游只在下载目录本身和它的一级子目录里平铺查找。`findLlamaBinInDir` 现在额外检查每个子目录下的 `bin/`（硬上限两层），`detectAccel` 与 CUDA runtime 探测同样遍历同级 `lib/`，于是 `release/bin/<binary>` 这种布局也能认。
 3. **安卓启动**：安卓的链接器不会自动搜索可执行文件所在目录，只导出二进制自身目录不够。`androidLdEnv` 现在把同级 `lib/` 一起加进 `LD_LIBRARY_PATH`（冒号分隔）。
@@ -59,7 +69,7 @@ Windows x64 · macOS universal · Android arm64 · Linux x64 · GPL-3.0
 
 ## 📥 安卓安装
 
-1. 下载 [MyLlama-v0.5.3-fork.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.1/MyLlama-v0.5.3-fork.1-android-arm64.apk)（arm64，Android 5.0+；[Releases 页](https://github.com/msln1995/MyLlama/releases) 有全部产物与说明）。
+1. 下载 [MyLlama-v0.6.0-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-android-arm64.apk)（arm64，Android 5.0+；[Releases 页](https://github.com/msln1995/MyLlama/releases) 有全部产物与说明）。
 2. 点开安装，按提示允许「安装未知来源应用」。因为包名不同，**官方包装着也能直接装**，不用卸载。
 3. 打开 App → 首页「运行环境」→ 下载 llama.cpp。现在拿到的是 `...-bin-android-arm64.tar.gz` 平铺包，装完应显示**已安装**（这就是本 fork 修的那一步）。
 4. 模型目录自己指定或下载（llama.cpp 运行时放在应用私有目录，安卓沙箱不允许执行外部存储上的二进制，所以没有「手动把包放进去」这条路）。
@@ -67,7 +77,7 @@ Windows x64 · macOS universal · Android arm64 · Linux x64 · GPL-3.0
 
 ## 🍎 macOS 安装
 
-1. 下载 [MyLlama-v0.5.3-fork.2-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.2/MyLlama-v0.5.3-fork.2-macos-universal.dmg)（universal：Apple 芯片与 Intel 同一个包，系统按原生 slice 执行；不想挂载 dmg 就用 [zip 版](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.2/MyLlama-v0.5.3-fork.2-macos-universal.zip)）。两个文件旁边各有同名 `.sha256`。
+1. 下载 [MyLlama-v0.6.0-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.dmg)（universal：Apple 芯片与 Intel 同一个包，系统按原生 slice 执行；不想挂载 dmg 就用 [zip 版](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.zip)）。两个文件旁边各有同名 `.sha256`。
 2. 挂载 dmg，把 `MyLlama.app` 拖进「应用程序」（zip 版就是把 `MyLlama.app` 拖到任意位置，别放在「下载」里）。
 3. **第一次打开需要绕过 Gatekeeper**：产物只有 adhoc 签名、没有 Apple 公证（fork 拿不到 Developer ID），浏览器下载回来的副本带 `com.apple.quarantine`。所以在访达里**右键（按住 Control 点击）→ 打开 → 再点「打开」**；如果被直接拦掉，终端执行 `xattr -dr com.apple.quarantine /Applications/MyLlama.app`。之后的启动正常。
 4. 打开 App → 首页「运行环境」→ 下载 llama.cpp。macOS 拿到的是 `...-bin-macos-arm64.tar.gz` 或 `-macos-x64.tar.gz`，都是平铺包；tar 里分别有 18 / 16 个软链接条目，`llama-server` 排在它们之后——**上游正是卡在这里，本 fork 修好了**（本页顶部第 5 条），装完应显示已安装。
@@ -78,8 +88,8 @@ Windows x64 · macOS universal · Android arm64 · Linux x64 · GPL-3.0
 ## ⚠️ 本 fork 独有的边界
 
 - 安装包是 fork CI 产的 per-runner **debug keystore** 签名（fork 拿不到仓库 secrets）。因为包名独立，这只影响「同一个包内不能覆盖不同签名」这一条，与官方包和平共存；升级本 fork 时用相同签名（都来自 fork CI）正常覆盖安装即可。
-- **不要用 App 内「检查更新」**：`core/update.go` 的更新接口硬编码指向上游仓库，它会去下另一个包名的 APK。升级请从本页 Releases 手动装。
-- App 内置教程（Docs 页）抓取的也是**上游 main** 的文档（`core/remotedocs.go` 的 `docsRawBaseURL` / `docsJSDBaseURL` 都写死了 CodeNeow/MyLlama），所以手机里看到的教程不含本页这些 fork 差异；本页 README 才是本 fork 的说明来源。
+- **应用内「检查更新」指向本 fork**（v0.6.0 起）：`core/update.go` 现在查询 `msln1995/MyLlama` 的 Release，而非上游。设置页有说明提示这是独立分支。
+- App 内置教程（Docs 页）抓取的仍然是**上游 main** 的文档（`core/remotedocs.go` 的 `docsRawBaseURL` / `docsJSDBaseURL` 都写死了 CodeNeow/MyLlama），所以手机里看到的教程不含本页这些 fork 差异；本页 README 才是本 fork 的说明来源。
 - macOS 产物由 `scripts/macos_package.sh` 在**本机**构建，不进 CI：只有 adhoc 签名、未经 Apple 公证（fork 没有 Developer ID，也用不了上游的证书），首次打开需要按上面第 3 步绕过 Gatekeeper；只有 CPU / Metal 功能路径在本机验证过，没有做跨机型矩阵测试。这条差异也不会随 PR #43 合并而消失——上游本来就没有 macOS 发行包，要不要加属于他们的决定。
 - macOS 没有 App 内「检查更新」：`core/update.go` 的自更新只覆盖 Windows 与 Android，本页 Releases 是 macOS 唯一的更新来源。
 - 两个已知缺口本次没动，也写进了 PR #43：`RuntimeSection.vue` 在状态为 `done` 时把两个入口都藏掉；`GetLlamaCpp` 的检测结果没有 TTL，也没有重新扫描的 binding。
@@ -309,7 +319,7 @@ HF 镜像 + ModelScope 双源搜索，批量下载走可断点续传的任务队
 
 ### Android
 
-本 fork 的安卓安装包见上文「📥 安卓安装」一节：从**本仓库**的 Releases 下载 `MyLlama-v0.5.3-fork.1-android-arm64.apk`，包名 `com.msln1995.myllama` 与上游不同，因此和官方应用可以共存、直接装而无需先卸载。原版（`com.codeneow.llamadesktop`）请从 [CodeNeow/MyLlama Releases](https://github.com/CodeNeow/MyLlama/releases/latest) 获取。注意：本 fork 里不要使用「设置 → 检查更新」，那个接口只会去拿上游另一个包名的 APK；升级请回到本仓库 Releases 手动安装（fork CI 的 debug 签名之间可以正常覆盖安装）。
+本 fork 的安卓安装包见上文「📥 安卓安装」一节：从**本仓库**的 Releases 下载 `MyLlama-v0.6.0-android-arm64.apk`，包名 `com.msln1995.myllama` 与上游不同，因此和官方应用可以共存、直接装而无需先卸载。原版（`com.codeneow.llamadesktop`）请从 [CodeNeow/MyLlama Releases](https://github.com/CodeNeow/MyLlama/releases/latest) 获取。v0.6.0 起应用内「检查更新」已指向本 fork，可正常使用；fork CI 的 debug 签名之间也可以正常覆盖安装。
 
 ### Linux
 
@@ -385,7 +395,7 @@ Windows 无头（API 路由）模式下端点照常可用，另有仅回环可�
 
 | 字段 | 含义 | 默认值 |
 | --- | --- | --- |
-| `theme` | 主题：`light` / `dark` | `light` |
+| `theme` | 外观模式：`auto`（跟随系统）/ `light` / `dark` | `light` |
 | `language` | 界面语言：`zh` / `en` / `auto`（auto 跟随系统语言） | `auto` |
 | `downloadSource` | 默认下载源：`hf`（HF 镜像）/ `huggingface`（官方）/ `modelscope` | `hf` |
 | `trayEnabled` | 系统托盘，关闭窗口最小化到托盘（Windows） | `true` |
@@ -485,7 +495,7 @@ Vite 开发服务器绑定 `localhost:5173`（Taskfile 的 `VITE_PORT`，可用 
 Wails v3 的 Linux 构建走 cgo：默认路径需要 GTK4 与 WebKitGTK 6.0 开发包（`libgtk-4-dev`、`libwebkitgtk-6.0-dev`），`-tags gtk3` 变体需要 `libgtk-3-dev`、`libwebkit2gtk-4.1-dev`。按所选构建变体用包管理器安装对应开发包与 `pkg-config` 后重新构建。
 
 **Android 无法安装或应用内更新失败。**
-安装 APK 需允许「安装未知来源应用」。本 fork 的包名是 `com.msln1995.myllama`，与上游的 `com.codeneow.llamadesktop` 不同，所以两个应用各自独立、互不覆盖，装本 fork 不需要先卸载官方版；「覆盖安装要求同一签名」这条只在**同一个包名内部**生效——本 fork 的升级包都来自 fork CI 的 debug keystore，彼此签名一致，直接覆盖即可。不要用应用内「检查更新」：`core/update.go` 的更新接口硬编码指向上游仓库，它下载的是另一个包名的 APK。本应用为侧载分发（不上架应用商店），本 fork 的更新包始终从本仓库 Releases 获取。
+安装 APK 需允许「安装未知来源应用」。本 fork 的包名是 `com.msln1995.myllama`，与上游的 `com.codeneow.llamadesktop` 不同，所以两个应用各自独立、互不覆盖，装本 fork 不需要先卸载官方版；「覆盖安装要求同一签名」这条只在**同一个包名内部**生效——本 fork 的升级包都来自 fork CI 的 debug keystore，彼此签名一致，直接覆盖即可。v0.6.0 起应用内「检查更新」已指向本 fork 的 Release 页（`msln1995/MyLlama`），可以正常使用；如果仍想手动升级，从本仓库 Releases 下载即可。本应用为侧载分发（不上架应用商店）。
 
 **macOS 打开时提示「无法验证开发者」或「已损坏」。**
 本 fork 的 macOS 包只有 adhoc 签名、没有 Apple 公证（fork 没有 Developer ID，也不可能用上游的证书），而浏览器下载会给文件加上 `com.apple.quarantine`。在访达里右键（按住 Control 点击）`MyLlama.app` → 打开 → 再点「打开」；仍被拦就执行 `xattr -dr com.apple.quarantine /Applications/MyLlama.app`。这不是签名坏了：`codesign --verify --deep --strict` 对压缩包里的 bundle 是通过的。macOS 也没有应用内「检查更新」（`core/update.go` 只覆盖 Windows 与 Android），更新始终回到本仓库 Releases。

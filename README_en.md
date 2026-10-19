@@ -8,9 +8,9 @@
 
 It is still the same cross-platform local-LLM client built on [llama.cpp](https://github.com/ggml-org/llama.cpp): scan local GGUF files → configure inference parameters visually (or one-click auto-tune) → generate llama-server presets → serve one OpenAI-compatible endpoint for the built-in chat and any OpenAI client. Model downloads, local chat and live monitoring all happen inside the app, and nothing leaves your machine.
 
-**📥 This fork's Android package:** [MyLlama-v0.5.3-fork.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.1/MyLlama-v0.5.3-fork.1-android-arm64.apk) · [all releases](https://github.com/msln1995/MyLlama/releases)
+**📥 This fork's Android package:** [MyLlama-v0.6.0-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-android-arm64.apk) · [all releases](https://github.com/msln1995/MyLlama/releases)
 
-**🍎 This fork's macOS package (universal — Apple silicon and Intel in one build):** [MyLlama-v0.5.3-fork.2-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.2/MyLlama-v0.5.3-fork.2-macos-universal.dmg) · [zip](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.2/MyLlama-v0.5.3-fork.2-macos-universal.zip) (upstream ships no macOS build — this one exists only here)
+**🍎 This fork's macOS package (universal — Apple silicon and Intel in one build):** [MyLlama-v0.6.0-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.dmg) · [zip](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.zip) (upstream ships no macOS build — this one exists only here)
 
 The package id is `com.msln1995.myllama`, **different from upstream's `com.codeneow.llamadesktop`**: the two apps coexist and never overwrite each other, so installing this fork does not require uninstalling the official one. The macOS bundle id is `com.msln1995.myllama` too.
 
@@ -38,6 +38,16 @@ This repository is a fork of [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLl
 
 We touched exactly one path: **whether the app can actually find the runtime after it finishes downloading it**. The fix is submitted upstream as [PR #43](https://github.com/CodeNeow/MyLlama/pull/43); once it merges, the code divergence here disappears. The package id (item 4 below) and the macOS distribution build (item 7 below) are this fork's own decisions and will never be submitted upstream.
 
+**v0.6.0 additions (on-device performance optimization):**
+
+8. **Android memory pricing and guard** — start-time footprint calculation (weights + KV cache + context checkpoints + runtime overhead) refuses over-budget loads with actionable context suggestions instead of crashing. KV cache priced by real quantization type; guard and tuner share one formula.
+9. **Android prompt cache optimization** — the 50% headroom clamp at ctx 16384 made replay 5× slower without saving RSS; Android share raised to 90%, prompt cache hits now give 3-5× replay speedup.
+10. **Android thread count fix** — untuned models defaulted to 8 workers competing with system reclaim under memory pressure; now capped at performance core count (4 threads), decode stable at 3.4-3.9 tok/s.
+11. **macOS Metal support** — Apple Silicon Macs use the Metal backend; full offload significantly faster than CPU-only. Memory pricing based on Metal working set, not system RAM.
+12. **Three-option theme selector** — theme setting changed from on/off toggle to "System / Light / Dark" three-way selector; macOS and Android both support automatic system theme detection.
+13. **Auto language detection fixed** — macOS detects system language via `defaults read -g AppleLanguages`, Android via `getprop persist.sys.locale`, no longer always falling back to English.
+14. **Update checks point to fork** — the in-app "check for updates" now queries this fork's release page (`msln1995/MyLlama`) instead of upstream; the Settings page also clarifies this is an independent branch.
+
 1. **Asset selection**: on equal scores upstream kept the first candidate in GitHub API order, so Android / Linux arm64 usually landed on a `*-snapdragon` `cmake --install` package whose layout has no binary where the scanner looks. `pickBestAssetFor` now deprioritizes `-snapdragon` assets (−400), so the plain flat CPU package wins; snapdragon stays as a last resort.
 2. **Directory layout**: upstream probed only the download directory itself and its first-level children. `findLlamaBinInDir` now also probes `bin/` inside each subdirectory (hard-bounded at two levels), and `detectAccel` / the CUDA-runtime probe walk the sibling `lib/`, so a `release/bin/<binary>` layout resolves too.
 3. **Android launch**: the Android linker does not search the executable's own directory, so exporting only that directory was never enough. `androidLdEnv` now adds the sibling `lib/` to `LD_LIBRARY_PATH` (colon-separated).
@@ -59,7 +69,7 @@ The matching focused tests live in the `core` package: asset-selection cases bui
 
 ## 📥 Installing on Android
 
-1. Download [MyLlama-v0.5.3-fork.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.1/MyLlama-v0.5.3-fork.1-android-arm64.apk) (arm64, Android 5.0+; the [release page](https://github.com/msln1995/MyLlama/releases) lists every artifact).
+1. Download [MyLlama-v0.6.0-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-android-arm64.apk) (arm64, Android 5.0+; the [release page](https://github.com/msln1995/MyLlama/releases) lists every artifact).
 2. Open it and allow "install unknown apps" when prompted. Because the package id differs, **it installs straight next to the official app** — nothing to uninstall.
 3. Open the app → Home → Runtime tab → download llama.cpp. You now get the flat `...-bin-android-arm64.tar.gz`, and the component should read **installed** afterwards (that is the step this fork fixes).
 4. Add a model directory or download one (the runtime must live in the app-private directory; Android's sandbox forbids executing binaries from shared storage, so there is no "place the files yourself" route).
@@ -67,7 +77,7 @@ The matching focused tests live in the `core` package: asset-selection cases bui
 
 ## 🍎 Installing on macOS
 
-1. Download [MyLlama-v0.5.3-fork.2-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.2/MyLlama-v0.5.3-fork.2-macos-universal.dmg) — universal, so one build covers Apple silicon and Intel and macOS picks the native slice at exec time; if you would rather not mount a dmg, take the [zip](https://github.com/msln1995/MyLlama/releases/download/v0.5.3-fork.2/MyLlama-v0.5.3-fork.2-macos-universal.zip). Each file has a matching `.sha256` next to it.
+1. Download [MyLlama-v0.6.0-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.dmg) — universal, so one build covers Apple silicon and Intel and macOS picks the native slice at exec time; if you would rather not mount a dmg, take the [zip](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.zip). Each file has a matching `.sha256` next to it.
 2. Mount the dmg and drag `MyLlama.app` into Applications (with the zip, drop `MyLlama.app` anywhere — just not into Downloads).
 3. **The first launch needs a Gatekeeper bypass**: the artifact is ad-hoc signed and not notarized (a fork has no Developer ID, and it cannot use upstream's certificate), so a browser-downloaded copy carries `com.apple.quarantine`. In Finder **right-click (Control-click) → Open → Open** again; if it is refused outright, run `xattr -dr com.apple.quarantine /Applications/MyLlama.app`. Later launches are normal.
 4. Open the app → Home → **Runtime Environment** → download llama.cpp. macOS receives `...-bin-macos-arm64.tar.gz` or `-macos-x64.tar.gz`, both flat archives whose tar members include 18 / 16 symlink entries respectively, with `llama-server` after them — **exactly where upstream aborted, and exactly what this fork fixes** (item 5 above), so the component should now read as installed.
@@ -78,8 +88,8 @@ Requires macOS 11 or later. Apple silicon gets Metal; **Intel Macs are CPU-only 
 ## ⚠️ Fork-only limitations
 
 - The APK is signed with the per-runner **debug keystore**, because Actions on a fork cannot read the repository secrets. Since the package id is our own, that only affects overwrite-installs *within* this package: upgrades from fork CI share the same debug key and install over each other normally.
-- **Do not use the in-app "check for updates"**: `core/update.go` hard-codes the upstream release API, so it downloads an APK for the other package id. Upgrade manually from this repository's releases.
-- The built-in tutorial (Docs page) also fetches its content from **upstream's `main`** — `core/remotedocs.go` hard-codes CodeNeow/MyLlama in both `docsRawBaseURL` and `docsJSDBaseURL` — so the on-device docs do not contain the fork notes above. This README is the description source for this fork.
+- **The in-app "check for updates" now points to this fork** (since v0.6.0): `core/update.go` queries `msln1995/MyLlama` releases instead of upstream. The Settings page clarifies this is an independent branch.
+- The built-in tutorial (Docs page) still fetches its content from **upstream's `main`** — `core/remotedocs.go` hard-codes CodeNeow/MyLlama in both `docsRawBaseURL` and `docsJSDBaseURL` — so the on-device docs do not contain the fork notes above. This README is the description source for this fork.
 - The macOS artifact is built by `scripts/macos_package.sh` **on a local Mac**, not in CI: it is ad-hoc signed and un notarized (a fork has no Developer ID and cannot use upstream's certificate), so first launch needs the Gatekeeper bypass in the macOS section above. Only the CPU / Metal functional paths were verified locally — there is no cross-model matrix testing — and this divergence does not disappear when PR #43 merges, since upstream ships no macOS build at all and adding one is their decision.
 - There is no in-app "check for updates" on macOS: `core/update.go` covers Windows and Android only, so this repository's releases are the sole update source on macOS.
 - Two known gaps are deliberately left out of this change and are recorded in PR #43: `RuntimeSection.vue` hides both entry points when the status is `done`, and `GetLlamaCpp`'s result cache has no TTL and no re-scan binding.
@@ -309,7 +319,7 @@ Requirements: Windows 10 or later (x64).
 
 ### Android
 
-For this fork, see the "📥 Installing on Android" section above: download `MyLlama-v0.5.3-fork.1-android-arm64.apk` from **this repository's** releases. The package id `com.msln1995.myllama` differs from upstream's `com.codeneow.llamadesktop`, so it coexists with the official app and installs without uninstalling anything. The original build (`com.codeneow.llamadesktop`) still comes from [CodeNeow/MyLlama Releases](https://github.com/CodeNeow/MyLlama/releases/latest). Note: do not use "Settings → Check for Updates" in this fork — that API only ever fetches an APK built for the other package id; come back to this repository's releases and install manually (fork CI debug-signed builds do overwrite-install each other).
+For this fork, see the "📥 Installing on Android" section above: download `MyLlama-v0.6.0-android-arm64.apk` from **this repository's** releases. The package id `com.msln1995.myllama` differs from upstream's `com.codeneow.llamadesktop`, so it coexists with the official app and installs without uninstalling anything. The original build (`com.codeneow.llamadesktop`) still comes from [CodeNeow/MyLlama Releases](https://github.com/CodeNeow/MyLlama/releases/latest). Since v0.6.0 the in-app "check for updates" points to this fork and works normally; fork CI debug-signed builds overwrite-install each other.
 
 ### Linux
 
@@ -385,7 +395,7 @@ Key fields:
 
 | Field | Meaning | Default |
 | --- | --- | --- |
-| `theme` | UI theme: `light` / `dark` | `light` |
+| `theme` | UI theme: `auto` (follow system) / `light` / `dark` | `light` |
 | `language` | UI language: `zh` / `en` / `auto` (auto follows the OS locale) | `auto` |
 | `downloadSource` | Default model source: `hf` (HF Mirror) / `huggingface` (official) / `modelscope` | `hf` |
 | `trayEnabled` | System tray, closing the window minimizes to tray (Windows) | `true` |
@@ -485,7 +495,7 @@ The frontend calls the Go backend through Wails v3 bindings generated at build t
 The Wails v3 Linux build goes through cgo: the default path needs the GTK4 and WebKitGTK 6.0 development packages (`libgtk-4-dev`, `libwebkitgtk-6.0-dev`), while the `-tags gtk3` variant needs `libgtk-3-dev` and `libwebkit2gtk-4.1-dev`. Install the packages matching your build variant — plus `pkg-config` — via your package manager and build again.
 
 **Android install or in-app update fails.**
-Installing the APK requires allowing "install unknown apps". This fork's package id is `com.msln1995.myllama` and upstream's is `com.codeneow.llamadesktop`, so they are two independent apps that never overwrite each other — installing this fork does not require uninstalling the official one. "Overwrite-install needs one signature" only applies *inside a single package id*: every artifact here comes from fork CI's debug keystore, so upgrades overwrite cleanly, while pushing an APK signed with a different key into the same package id is what fails (and forces an uninstall). Do not use the in-app "check for updates" in this fork: `core/update.go` hard-codes the upstream release API, so it only ever fetches an APK for the other package id. The app is sideload-only (not on any app store), and this fork's updates always come from this repository's releases.
+Installing the APK requires allowing "install unknown apps". This fork's package id is `com.msln1995.myllama` and upstream's is `com.codeneow.llamadesktop`, so they are two independent apps that never overwrite each other — installing this fork does not require uninstalling the official one. "Overwrite-install needs one signature" only applies *inside a single package id*: every artifact here comes from fork CI's debug keystore, so upgrades overwrite cleanly, while pushing an APK signed with a different key into the same package id is what fails (and forces an uninstall). Since v0.6.0 the in-app "check for updates" points to this fork's release page (`msln1995/MyLlama`) and works normally; for manual upgrades, download from this repository's releases. The app is sideload-only (not on any app store).
 
 **macOS refuses to open the app: "cannot be verified" or "it is damaged".**
 This fork's macOS build is ad-hoc signed and not notarized (a fork has no Developer ID and cannot use upstream's certificate), and the browser stamps downloads with `com.apple.quarantine`. In Finder right-click (Control-click) `MyLlama.app` → Open → click Open; if it is still refused, run `xattr -dr com.apple.quarantine /Applications/MyLlama.app`. The signature itself is intact — `codesign --verify --deep --strict` passes on the bundle inside the archive. There is also no in-app "check for updates" on macOS (`core/update.go` only covers Windows and Android), so updates always come from this repository's releases.

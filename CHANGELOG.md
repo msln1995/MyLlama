@@ -14,6 +14,9 @@ v0.6.0 是基于真机实测的大规模性能优化版本，在 vivo X60（Exyn
 - **Android prompt cache 优化** — 实测发现 50% 的 headroom 钳位在 ctx 16384 时让 replay 慢 5× 但不省内存，Android 端份额提升至 90%，prompt cache 命中时 replay 快 3-5×。
 - **Android 线程数修复** — 未调优模型原本默认 8 worker（全部核），内存吃紧时与系统回收抢核导致卡顿；现在按性能核数封顶（4 线程），实测解码速度稳定在 3.4-3.9 tok/s。
 - **macOS Metal 支持** — Mac 端（Apple Silicon）现在走 Metal 后端，全 offload 时推理速度显著快于 CPU-only；内存计价按 Metal working set（权重 + KV + 320 MiB 运行时保留）而非系统 RAM，守护更精确。部分 offload 和 `--cpu-moe` 的 Mac 负载也按真实驻留字节计价。
+- **三选项外观模式** — 设置页新增「跟随系统 / 浅色 / 深色」三选项，macOS 读取 `AppleInterfaceStyle`，Android 读取 `cmd uimode get`，实现真正的系统主题跟随。
+- **自动语言检测修复** — macOS 改用 `defaults read -g AppleLanguages`，Android 改用 `getprop persist.sys.locale`，修复了之前在某些系统上自动语言检测失效的问题。
+- **独立分支更新** — 更新检查现在指向本 fork 仓库（msln1995/MyLlama），设置页明确标注「本版本为独立分支，与官方版本不同」，避免用户混淆。
 - **前台服务保活** — Android 端 llama-server 生命周期绑定 `dataSync` 前台服务，切后台/息屏不再被系统冻结（代码已落地，待新 APK 真机复验）。
 - **上下文检查点计价** — 滑动窗口模型的上下文检查点 retention 现在按真实 KV 几何计价，不再免费；默认 cap 从 32 降至 8（收益饱和点），省内存但不影响对话性能。
 - **路由器模式内存守护** — 多模型场景下按可能同时驻留的模型集合（`modelsMax` 个最重的）计价，而非只算最重的单个，防止路由器模式下的隐性超卖。
@@ -41,6 +44,9 @@ v0.6.0 is a major performance optimization release based on extensive on-device 
 - **Android prompt cache optimization** — measurement showed the 50% headroom clamp at ctx 16384 made replay 5× slower without saving RSS; Android share raised to 90%, prompt cache hits now give 3-5× replay speedup.
 - **Android thread count fix** — untuned models defaulted to 8 workers (all cores), competing with system reclaim under memory pressure; now capped at performance core count (4 threads), decode stable at 3.4-3.9 tok/s.
 - **macOS Metal support** — Apple Silicon Macs now use the Metal backend; full offload significantly faster than CPU-only. Memory pricing based on Metal working set (weights + KV + 320 MiB runtime reserve), not system RAM. Partial offload and `--cpu-moe` Mac loads priced by actual resident bytes.
+- **Three-option theme selector** — Settings page now offers "Follow system / Light / Dark" options. macOS reads `AppleInterfaceStyle`, Android reads `cmd uimode get` for true system theme following.
+- **Auto language detection fixed** — macOS now uses `defaults read -g AppleLanguages`, Android uses `getprop persist.sys.locale`, fixing auto language detection failures on some systems.
+- **Independent fork updates** — Update checks now point to this fork's repository (msln1995/MyLlama), with a clear note in Settings stating "This is an independent fork, different from the official version" to avoid user confusion.
 - **Foreground service keepalive** — Android llama-server lifecycle bound to `dataSync` foreground service, no longer frozen when backgrounded/screen-off (code landed, pending on-device verification with new APK).
 - **Context checkpoint pricing** — sliding-window model context checkpoint retention now priced by real KV geometry, no longer free; default cap reduced from 32 to 8 (saturation point), saves memory without affecting chat performance.
 - **Router mode memory guard** — multi-model scenario priced by the set of possibly-resident models (`modelsMax` heaviest), not just the single heaviest, preventing implicit overcommit in router mode.
