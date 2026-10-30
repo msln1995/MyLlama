@@ -1064,6 +1064,11 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (webView != null) {
+            // 亮屏或切回前台：恢复 JS 定时器、DOM 渲染和动画
+            webView.resumeTimers();
+            webView.onResume();
+        }
         if (bridge != null) {
             bridge.onResume();
         }
@@ -1072,6 +1077,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
+        if (webView != null) {
+            // 切离前台：通知 WebView 渲染器进入暂停状态
+            webView.onPause();
+        }
         if (bridge != null) {
             bridge.onPause();
         }
@@ -1084,8 +1093,22 @@ public class MainActivity extends AppCompatActivity {
             unregisterSystemEventReceivers();
             systemReceiversRegistered = false;
         }
+        if (webView != null) {
+            // 息屏或彻底置于后台：彻底冻结 JS 定时器、Vue 响应式重排与 Blink 渲染循环
+            // 确保 CPU 不在不可见的 UI 渲染上消耗任何算力和电力
+            webView.pauseTimers();
+        }
         if (bridge != null) {
             bridge.onStop();
+        }
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (webView != null && level >= TRIM_MEMORY_UI_HIDDEN) {
+            // UI 彻底不可见或系统内存趋紧：清空离屏渲染缓存，降低图形内存占用
+            webView.clearCache(false);
         }
     }
 

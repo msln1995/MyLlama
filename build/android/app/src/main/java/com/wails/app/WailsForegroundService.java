@@ -4,10 +4,12 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -25,8 +27,21 @@ public class WailsForegroundService extends android.app.Service {
     private static final String CHANNEL_ID = "wails_foreground";
     private static final int NOTIFICATION_ID = 0x57A1; // "WAI"
 
+    // 息屏/锁屏保活核心机制：获取 PARTIAL_WAKE_LOCK 确保关屏后 Linux 内核不挂起 CPU 时钟
+    private PowerManager.WakeLock wakeLock;
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // 获取 PARTIAL_WAKE_LOCK 锁住 CPU，杜绝手机息屏后挂起导致模型推理卡死
+        if (wakeLock == null) {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MyLlama:InferenceWakeLock");
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire();
+            }
+        }
+
         String title = "Wails";
         String text = "Running in the background";
         if (intent != null) {
@@ -64,6 +79,21 @@ public class WailsForegroundService extends android.app.Service {
         }
         // Restart if the OS kills us while still wanted.
         return START_STICKY;
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        // 释放唤醒锁，交还系统电源管理权限，避免空耗电池
+        if (wakeLock != null) {
+            try {
+                if (wakeLock.isHeld()) {
+                    wakeLock.release();
+                }
+            } catch (Exception ignored) {
+            }
+            wakeLock = null;
+        }
     }
 
     @Nullable
