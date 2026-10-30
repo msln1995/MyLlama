@@ -263,6 +263,15 @@ export const messages: Record<Locale, Record<string, string>> = {
     'models.tuneError': '调优失败：{msg}',
     'models.back': '返回',
     'models.backendError': '无法连接后端服务：{msg}',
+    'models.delete': '删除',
+    'models.deleteTitle': '删除此模型文件',
+    'models.deleteConfirmTitle': '删除模型',
+    'models.deleteConfirmMsg': '确定要彻底删除模型「{name}」吗？此操作将永久删除本地文件并释放 {size} 存储空间，无法撤销。',
+    'models.deleting': '正在删除...',
+    'models.deleteSuccess': '模型已删除',
+    'models.deleteFailed': '删除模型失败：{msg}',
+    'models.cancel': '取消',
+    'models.confirmDelete': '确认删除',
 
     // ─── API page (Api.vue) ───
     'api.title': 'API 路由',
@@ -366,6 +375,20 @@ export const messages: Record<Locale, Record<string, string>> = {
     'downloads.searchEmptyChips': '试试这些热门关键词：',
     // Model detail page (issue #35): repo carries an mmproj file but none is selected yet
     'downloads.mmprojHint': '该仓库包含视觉投影文件 (mmproj)，需要图片输入请一并勾选',
+    // ─── 精选推荐模型 (基于物理芯片与内存带宽实测) ───
+    'downloads.recSectionTitle': '经实测精选推荐',
+    'downloads.recSectionSubtitle': '基于物理硬件算力与内存带宽实测，拒绝营销虚标，兼顾推理吞吐与逻辑智商',
+    'downloads.recFilterAll': '全部',
+    'downloads.recFilterMobile': '手机端精选',
+    'downloads.recFilterDesktop': '桌面端主力',
+    'downloads.recFilterCode': '编程专用',
+    'downloads.recWhy': '为什么推荐',
+    'downloads.recViewAndDownload': '查看文件与下载',
+    'downloads.recQuant': '建议量化',
+    'downloads.recRam': '运存要求',
+    'downloads.recLicense': '开源协议',
+    'downloads.recSpeed': '实测速度',
+    'downloads.recBackToCatalog': '查看精选推荐',
 
     // ─── Chat page (Chat.vue) ───
     'chat.title': '本地聊天',
@@ -1105,6 +1128,15 @@ export const messages: Record<Locale, Record<string, string>> = {
     'models.tuneError': 'Auto-tune failed: {msg}',
     'models.back': 'Back',
     'models.backendError': 'Unable to connect to backend: {msg}',
+    'models.delete': 'Delete',
+    'models.deleteTitle': 'Delete this model file',
+    'models.deleteConfirmTitle': 'Delete Model',
+    'models.deleteConfirmMsg': 'Are you sure you want to delete model "{name}"? This will permanently delete the files and free {size} of storage. This action cannot be undone.',
+    'models.deleting': 'Deleting...',
+    'models.deleteSuccess': 'Model deleted',
+    'models.deleteFailed': 'Failed to delete model: {msg}',
+    'models.cancel': 'Cancel',
+    'models.confirmDelete': 'Delete',
 
     // ─── API (Api.vue) ───
     'api.title': 'API Router',
@@ -1208,6 +1240,20 @@ export const messages: Record<Locale, Record<string, string>> = {
     'downloads.searchEmptyChips': 'Try a popular keyword:',
     // Model detail page (issue #35): repo carries an mmproj file but none is selected yet
     'downloads.mmprojHint': 'This repo has a vision projector file (mmproj) — select it too if you need image input',
+    // ─── Curated Recommended Models (Benchmark-tested on real hardware) ───
+    'downloads.recSectionTitle': 'Benchmark-Tested Recommendations',
+    'downloads.recSectionSubtitle': 'Curated based on physical hardware throughput and RAM bandwidth, cutting through marketing hype',
+    'downloads.recFilterAll': 'All',
+    'downloads.recFilterMobile': 'Mobile Picks',
+    'downloads.recFilterDesktop': 'Desktop Flagship',
+    'downloads.recFilterCode': 'Coding',
+    'downloads.recWhy': 'Why Recommended',
+    'downloads.recViewAndDownload': 'View Files & Download',
+    'downloads.recQuant': 'Recommended Quant',
+    'downloads.recRam': 'RAM Req.',
+    'downloads.recLicense': 'License',
+    'downloads.recSpeed': 'Measured Speed',
+    'downloads.recBackToCatalog': 'View Recommended Models',
 
     // ─── Chat page (Chat.vue) ───
     'chat.title': 'Local Chat',

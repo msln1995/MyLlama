@@ -51,6 +51,7 @@ const methodIds: Record<number, string> = {
   1383123962: 'BrowseModelsDir',
   2600950860: 'CancelDownloadTask',
   8953589: 'CheckForUpdate',
+  655232489: 'DeleteModel',
   4273232820: 'GetAppVersion',
   1302194621: 'GetCPU',
   2835900922: 'GetCUDA',

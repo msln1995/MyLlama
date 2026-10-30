@@ -144,6 +144,10 @@ export async function refreshModels(): Promise<any[]> {
   return app().RefreshModels()
 }
 
+export async function deleteModel(path: string): Promise<void> {
+  return app().DeleteModel(path)
+}
+
 export async function getModelConfig(modelID: string): Promise<any> {
   return app().GetModelConfig(modelID)
 }

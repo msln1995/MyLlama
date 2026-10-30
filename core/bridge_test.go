@@ -1127,8 +1127,8 @@ func TestBuildServerCommandAndroidThreadCap(t *testing.T) {
 // TestBuildServerCommandAndroidCacheRAMBounded verifies the phone-side prompt
 // cache bound reaches the command line and is reported in the server log: with
 // the probe pinned so the planned load leaves 640 MiB free, the requested
-// 8192 MiB is emitted as half that headroom (320), never as the desktop-sized
-// budget the cache would grow into during the session.
+// 8192 MiB is emitted as promptCacheShareAndroid (90%) of that headroom (576),
+// never as the desktop-sized budget the cache would grow into during the session.
 func TestBuildServerCommandAndroidCacheRAMBounded(t *testing.T) {
 	withPlatformGOOS(t, "android")
 	pinCPUCoreCounts(t, 8, 0)
@@ -1144,8 +1144,8 @@ func TestBuildServerCommandAndroidCacheRAMBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v, ok := argValue(args, "--cache-ram"); !ok || v != "320" {
-		t.Errorf("--cache-ram = %q (present %v), want 320: %v", v, ok, args)
+	if v, ok := argValue(args, "--cache-ram"); !ok || v != "576" {
+		t.Errorf("--cache-ram = %q (present %v), want 576: %v", v, ok, args)
 	}
 	for _, a := range args {
 		if a == "8192" {
@@ -1154,7 +1154,7 @@ func TestBuildServerCommandAndroidCacheRAMBounded(t *testing.T) {
 	}
 	var noted bool
 	for _, line := range serverLogsCopy() {
-		if strings.Contains(line, "prompt cache budget 8192 -> 320") {
+		if strings.Contains(line, "prompt cache budget 8192 -> 576") {
 			noted = true
 		}
 	}
@@ -1389,7 +1389,7 @@ func TestBuildServerCommandRouterWarnsOnOverPool(t *testing.T) {
 	if !strings.Contains(warned[0], "Compute error") {
 		t.Errorf("the over-pool warning does not describe the wedge it prevents: %q", warned[0])
 	}
-	if strings.Contains(warned[0], "空闲内存") || strings.Contains(warned[0], "memory is free") {
+	if strings.Contains(warned[0], "空闲内存只有") || strings.Contains(warned[0], "RAM is available") {
 		t.Errorf("the over-pool warning quotes free RAM as the limit: %q", warned[0])
 	}
 

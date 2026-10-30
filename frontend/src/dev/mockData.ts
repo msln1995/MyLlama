@@ -707,6 +707,14 @@ export const handlers: Record<string, (...args: any[]) => any> = {
     await sleep(300)
     return models.map((m) => ({ ...m }))
   },
+  DeleteModel: async (path: string) => {
+    await sleep(200)
+    const idx = models.findIndex((m) => m.path === path)
+    if (idx !== -1) {
+      const [deleted] = models.splice(idx, 1)
+      delete modelConfigs[deleted.name]
+    }
+  },
   GetModelConfig: (modelID: string) => ({ ...defaultModelConfig, ...(modelConfigs[modelID] ?? {}) }),
   SaveModelConfig: (modelID: string, cfg: any) => {
     modelConfigs[modelID] = { ...defaultModelConfig, ...modelConfigs[modelID], ...cfg }

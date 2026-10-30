@@ -114,32 +114,97 @@
       <div v-else-if="searched && !searching" class="empty-state">
         <h2>{{ t('downloads.noResults') }}</h2>
         <p>{{ t('downloads.tryOther') }}</p>
+        <button class="pill-btn clear-rec-btn" @click="resetToRecommendations">
+          {{ t('downloads.recBackToCatalog') }}
+        </button>
       </div>
 
-      <!-- Empty-search guidance (portrait tablet band, draft frame A⑧
-           adaptation): before any search the area below the pinned progress
-           card is a bare void — this card offers a hint plus tappable keyword
-           chips that fill the search box. Gated to the portrait band via the
-           shared platform state (showsSearchGuidance), so phone and desktop
-           render exactly as before. Hidden while a search is in flight and
-           never mixed with the no-results state above (that branch matches
-           first). -->
-      <div v-else-if="showsSearchGuidance" class="empty-state search-empty">
-        <div class="search-empty-glyph" aria-hidden="true">
-          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-          </svg>
+      <!-- Curated Recommended Models (Benchmark-tested on real chips & RAM bandwidth) -->
+      <div v-else class="rec-section">
+        <div class="rec-header">
+          <div class="rec-header-text">
+            <h2 class="rec-title">
+              <span class="rec-star-icon" aria-hidden="true">⭐</span>
+              {{ t('downloads.recSectionTitle') }}
+            </h2>
+            <p class="rec-subtitle">{{ t('downloads.recSectionSubtitle') }}</p>
+          </div>
+          <div class="rec-filter-bar" role="tablist" :aria-label="t('downloads.recSectionTitle')">
+            <button
+              v-for="f in recFilterOptions"
+              :key="f.key"
+              type="button"
+              class="rec-filter-pill"
+              :class="{ active: activeRecFilter === f.key }"
+              @click="activeRecFilter = f.key"
+            >
+              {{ f.label }}
+            </button>
+          </div>
         </div>
-        <h2>{{ t('downloads.searchEmptyHint') }}</h2>
-        <p class="search-empty-lead">{{ t('downloads.searchEmptyChips') }}</p>
-        <div class="search-chips">
-          <button
-            v-for="s in SEARCH_SUGGESTIONS"
-            :key="s"
-            type="button"
-            class="search-chip"
-            @click="applySuggestion(s)"
-          >{{ s }}</button>
+
+        <div v-if="showsSearchGuidance" class="tablet-search-chips">
+          <span class="tablet-chips-label">{{ t('downloads.searchEmptyChips') }}</span>
+          <div class="search-chips">
+            <button
+              v-for="s in SEARCH_SUGGESTIONS"
+              :key="s"
+              type="button"
+              class="search-chip"
+              @click="applySuggestion(s)"
+            >{{ s }}</button>
+          </div>
+        </div>
+
+        <div class="rec-grid">
+          <div
+            v-for="m in displayedRecommendedModels"
+            :key="m.modelId"
+            class="rec-card"
+            :class="{ featured: m.featured }"
+            @click="goToDetail(m.modelId)"
+            :title="t('downloads.recViewAndDownload')"
+          >
+            <div class="rec-card-top">
+              <div class="rec-title-group">
+                <span class="rec-name">{{ m.name }}</span>
+                <span class="rec-size-pill">{{ m.sizeCategory }}</span>
+                <span class="rec-badge" :class="{ 'rec-badge-featured': m.featured }">{{ isZh ? m.badgeZh : m.badgeEn }}</span>
+              </div>
+              <span class="rec-speed-pill">⚡ {{ isZh ? m.speedZh : m.speedEn }}</span>
+            </div>
+
+            <div class="rec-specs-row">
+              <span class="rec-spec"><span class="spec-k">{{ t('downloads.recQuant') }}:</span> {{ m.quant }}</span>
+              <span class="rec-spec"><span class="spec-k">{{ t('downloads.recRam') }}:</span> {{ m.ramRequired }}</span>
+              <span class="rec-spec">{{ m.fileSize }}</span>
+              <span class="rec-spec">{{ m.license }}</span>
+            </div>
+
+            <div class="rec-reason-box">
+              <div class="rec-reason-lead">
+                <span class="reason-icon" aria-hidden="true">💡</span>
+                <strong>{{ t('downloads.recWhy') }}：</strong>{{ isZh ? m.reasonZh : m.reasonEn }}
+              </div>
+              <ul class="rec-details-list">
+                <li v-for="(detail, idx) in (isZh ? m.recommendedReasonZhDetails : m.recommendedReasonEnDetails)" :key="idx">
+                  {{ detail }}
+                </li>
+              </ul>
+            </div>
+
+            <div class="rec-card-footer">
+              <div class="rec-tags">
+                <span v-for="tag in (isZh ? m.tagsZh : m.tagsEn)" :key="tag" class="rec-tag">{{ tag }}</span>
+              </div>
+              <button class="rec-download-btn" :title="t('downloads.recViewAndDownload')" @click.stop="goToDetail(m.modelId)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 4v12M6 12l6 6 6-6"/>
+                </svg>
+                <span>{{ t('downloads.recViewAndDownload') }}</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -240,8 +305,14 @@ import {
   SEARCH_SUGGESTIONS,
   showsEmptySearchGuidance,
 } from '../lib/downloadsState'
-import { t } from '../lib/i18n'
+import { t, locale } from '../lib/i18n'
 import { usePlatform } from '../lib/platform'
+import {
+  RECOMMENDED_MODELS,
+  getDefaultFilter,
+  filterRecommendedModels,
+  type RecommendationFilter,
+} from '../lib/recommendedModels'
 
 interface DlTask {
   id: string
@@ -271,6 +342,27 @@ const showsSearchGuidance = computed(
     !searching.value &&
     showsEmptySearchGuidance(platformState.value.isTablet),
 )
+
+// Curated model recommendation state
+const activeRecFilter = ref<RecommendationFilter>(getDefaultFilter(platformState.value.isMobile))
+const isZh = computed(() => locale.value.startsWith('zh'))
+
+const recFilterOptions = computed(() => [
+  { key: 'all' as RecommendationFilter, label: t('downloads.recFilterAll') },
+  { key: 'mobile' as RecommendationFilter, label: t('downloads.recFilterMobile') },
+  { key: 'desktop' as RecommendationFilter, label: t('downloads.recFilterDesktop') },
+  { key: 'code' as RecommendationFilter, label: t('downloads.recFilterCode') },
+])
+
+const displayedRecommendedModels = computed(() =>
+  filterRecommendedModels(RECOMMENDED_MODELS, activeRecFilter.value),
+)
+
+function resetToRecommendations(): void {
+  searchQuery.value = ''
+  searched.value = false
+  searchResults.value = []
+}
 
 // Suggestion chip click: fills the search box only — running the search stays
 // an explicit action on the search button
@@ -1150,6 +1242,293 @@ html[data-os='ios'] .cancel-btn:active {
   outline-offset: 2px;
 }
 
+/* ─── Curated Recommendations (Benchmark-tested) ─── */
+.clear-rec-btn {
+  margin-top: 14px;
+}
+
+.rec-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.rec-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding-bottom: 4px;
+}
+
+.rec-header-text {
+  flex: 1;
+  min-width: 260px;
+}
+
+.rec-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.rec-star-icon {
+  font-size: 18px;
+}
+
+.rec-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 4px 0 0 0;
+  line-height: 1.5;
+}
+
+.rec-filter-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rec-filter-pill {
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: inherit;
+}
+
+.rec-filter-pill:hover {
+  border-color: rgba(99, 102, 241, 0.4);
+  color: var(--accent-light);
+}
+
+.rec-filter-pill.active {
+  background: var(--accent-gradient);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
+}
+
+.tablet-search-chips {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.tablet-chips-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.rec-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+  gap: 16px;
+}
+
+.rec-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  cursor: pointer;
+  transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+  box-shadow: var(--shadow-sm);
+  position: relative;
+}
+
+.rec-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: var(--shadow-md);
+}
+
+.rec-card.featured {
+  border-color: rgba(99, 102, 241, 0.35);
+  background: linear-gradient(180deg, var(--surface) 0%, rgba(99, 102, 241, 0.03) 100%);
+}
+
+.rec-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.rec-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rec-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.rec-size-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.12);
+  color: var(--accent-light);
+  font-family: var(--font-mono);
+}
+
+.rec-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.rec-badge-featured {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.rec-speed-pill {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-light);
+  background: var(--bg-secondary);
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.rec-specs-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+}
+
+.rec-spec {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.spec-k {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-family: var(--font-sans);
+}
+
+.rec-reason-box {
+  background: rgba(99, 102, 241, 0.04);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-primary);
+}
+
+.rec-reason-lead {
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.reason-icon {
+  margin-right: 4px;
+}
+
+.rec-details-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.rec-details-list li {
+  margin-bottom: 2px;
+}
+
+.rec-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 6px;
+  flex-wrap: wrap;
+}
+
+.rec-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.rec-tag {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.rec-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--accent-gradient);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.15s;
+  font-family: inherit;
+}
+
+.rec-download-btn:hover {
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+
 /* ─── Tablet portrait (768..1099px, design draft frame A⑧): the pinned
        progress card's meta line joins into one muted "size · remaining ·
        speed" line like the draft's dlcard (the speed tail itself is gated in
@@ -1312,6 +1691,21 @@ html[data-os='ios'] .cancel-btn:active {
   .results-grid {
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+
+  .rec-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .rec-card {
+    padding: 14px 16px;
+  }
+
+  .rec-download-btn {
+    width: 100%;
+    justify-content: center;
+    min-height: 42px;
   }
 
   .result-card {

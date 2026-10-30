@@ -94,6 +94,14 @@
               <h3 class="model-name">{{ model.name }}</h3>
               <span v-if="model.hasMmproj" class="mmproj-badge" :title="t('models.multimodalTitle')">👁️ {{ t('models.multimodal') }}</span>
               <div class="model-actions">
+                <button class="model-delete-btn" :title="t('models.deleteTitle')" @click.stop="promptDelete(model)">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3 6 5 6 21 6"/>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                    <line x1="10" y1="11" x2="10" y2="17"/>
+                    <line x1="14" y1="11" x2="14" y2="17"/>
+                  </svg>
+                </button>
                 <button class="model-settings-btn" :title="t('models.settings')" @click.stop="openSettings(model)">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -119,13 +127,42 @@
       </div>
       </div>
     </div>
+
+    <!-- Delete confirmation modal -->
+    <Teleport to="body">
+      <div v-if="modelToDelete" class="delete-overlay" @click.self="cancelDelete">
+        <div class="delete-modal-panel">
+          <div class="delete-modal-header">
+            <h3 class="delete-modal-title">{{ t('models.deleteConfirmTitle') }}</h3>
+            <button class="delete-modal-close" :disabled="deleting" @click="cancelDelete">✕</button>
+          </div>
+          <div class="delete-modal-body">
+            <p class="delete-confirm-text">
+              {{ t('models.deleteConfirmMsg', { name: modelToDelete.name, size: modelToDelete.sizeHuman }) }}
+            </p>
+            <div v-if="deleteError" class="delete-error-banner">
+              {{ deleteError }}
+            </div>
+          </div>
+          <div class="delete-modal-footer">
+            <button class="delete-cancel-btn" :disabled="deleting" @click="cancelDelete">
+              {{ t('models.cancel') }}
+            </button>
+            <button class="delete-confirm-btn" :disabled="deleting" @click="executeDelete">
+              <span v-if="deleting">{{ t('models.deleting') }}</span>
+              <span v-else>{{ t('models.confirmDelete') }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getModels, refreshModels, getConfig, browseModelsDir } from '../wails'
+import { getModels, refreshModels, getConfig, browseModelsDir, deleteModel } from '../wails'
 import { t } from '../lib/i18n'
 import { formatBytes } from '../lib/format'
 import { usePlatform } from '../lib/platform'
@@ -189,6 +226,36 @@ async function chooseModelsDir() {
 // in real time).
 function openSettings(model: ModelInfo) {
   router.push('/models/settings/' + encodeURIComponent(model.name))
+}
+
+const modelToDelete = ref<ModelInfo | null>(null)
+const deleting = ref(false)
+const deleteError = ref('')
+
+function promptDelete(model: ModelInfo) {
+  modelToDelete.value = model
+  deleteError.value = ''
+}
+
+function cancelDelete() {
+  if (deleting.value) return
+  modelToDelete.value = null
+  deleteError.value = ''
+}
+
+async function executeDelete() {
+  if (!modelToDelete.value || deleting.value) return
+  deleting.value = true
+  deleteError.value = ''
+  try {
+    await deleteModel(modelToDelete.value.path)
+    modelToDelete.value = null
+    await fetchModels(true)
+  } catch (e: any) {
+    deleteError.value = e?.message || String(e) || t('models.deleteFailed', { msg: 'Unknown error' })
+  } finally {
+    deleting.value = false
+  }
 }
 
 async function fetchModels(force = false) {
@@ -456,6 +523,31 @@ onMounted(() => {
   color: var(--accent-light);
 }
 
+.model-delete-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 6px;
+  opacity: 0.55;
+  transition: opacity 0.2s, background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.model-card:hover .model-delete-btn {
+  opacity: 1;
+}
+
+.model-delete-btn:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
 /* Touch press feedback (OS-scoped): the model card itself is not clickable;
    its clickable area is this gear button, whose active state mirrors the
    hover visuals on touch. */
@@ -463,6 +555,12 @@ html[data-os='android'] .model-settings-btn:active,
 html[data-os='ios'] .model-settings-btn:active {
   background: var(--hover-bg);
   color: var(--accent-light);
+}
+
+html[data-os='android'] .model-delete-btn:active,
+html[data-os='ios'] .model-delete-btn:active {
+  background: rgba(239, 68, 68, 0.18);
+  color: #ef4444;
 }
 
 .model-name {
@@ -823,7 +921,27 @@ html[data-os='ios'] .model-settings-btn:active {
     opacity: 1;
   }
 
+  .model-delete-btn {
+    width: 44px;
+    height: 44px;
+    margin: -8px;
+    border-radius: 50%;
+    background: var(--bg-card);
+    color: var(--text-muted);
+    opacity: 1;
+  }
+
+  .model-delete-btn:hover,
+  .model-delete-btn:active {
+    background: rgba(239, 68, 68, 0.18);
+    color: #ef4444;
+  }
+
   .model-card:hover .model-settings-btn {
+    opacity: 1;
+  }
+
+  .model-card:hover .model-delete-btn {
     opacity: 1;
   }
 
@@ -1109,7 +1227,27 @@ html[data-os='ios'] .model-settings-btn:active {
     opacity: 1;
   }
 
+  .model-delete-btn {
+    width: 44px;
+    height: 44px;
+    margin: -8px;
+    border-radius: 50%;
+    background: var(--bg-card);
+    color: var(--text-muted);
+    opacity: 1;
+  }
+
+  .model-delete-btn:hover,
+  .model-delete-btn:active {
+    background: rgba(239, 68, 68, 0.18);
+    color: #ef4444;
+  }
+
   .model-card:hover .model-settings-btn {
+    opacity: 1;
+  }
+
+  .model-card:hover .model-delete-btn {
     opacity: 1;
   }
 
@@ -1289,6 +1427,142 @@ html[data-os='ios'] .model-settings-btn:active {
 
 @keyframes skel-sweep {
   to { background-position: -200% 0; }
+}
+
+/* ─── Delete Confirmation Modal ─── */
+.delete-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 20px;
+}
+
+.delete-modal-panel {
+  width: 100%;
+  max-width: 440px;
+  background: var(--glass);
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--r-lg, 16px);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: delete-modal-fade-in 0.2s ease-out;
+}
+
+@keyframes delete-modal-fade-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.delete-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.delete-modal-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.delete-modal-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all 0.15s;
+}
+
+.delete-modal-close:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.delete-modal-body {
+  padding: 20px;
+}
+
+.delete-confirm-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.delete-error-banner {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #ef4444;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.delete-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.delete-cancel-btn {
+  padding: 8px 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.delete-cancel-btn:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.delete-confirm-btn {
+  padding: 8px 20px;
+  border: none;
+  border-radius: 8px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.delete-confirm-btn:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.delete-confirm-btn:disabled,
+.delete-cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 </style>

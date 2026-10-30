@@ -699,6 +699,13 @@ func (a *App) RefreshModels() []ModelInfo {
 	return a.GetModels()
 }
 
+// DeleteModel deletes a model from disk by its file path, cleans up
+// associated configuration and download tasks, and invalidates the model
+// cache. Path must reside within registered model directories.
+func (a *App) DeleteModel(path string) error {
+	return DeleteModel(path)
+}
+
 func (a *App) GetModelConfig(modelID string) ModelConfig {
 	modelConfigsMu.Lock()
 	cfg, ok := cachedModelConfigs[modelID]

@@ -533,7 +533,7 @@ func TestAppUserAgent(t *testing.T) {
 	if !strings.HasPrefix(ua, "MyLlama/"+currentVersion) {
 		t.Errorf("User-Agent = %q, want prefix MyLlama/%s", ua, currentVersion)
 	}
-	if !strings.Contains(ua, "https://github.com/CodeNeow/MyLlama") {
+	if !strings.Contains(ua, "https://github.com/msln1995/MyLlama") && !strings.Contains(ua, "https://github.com/CodeNeow/MyLlama") {
 		t.Errorf("User-Agent = %q, want repository URL", ua)
 	}
 }

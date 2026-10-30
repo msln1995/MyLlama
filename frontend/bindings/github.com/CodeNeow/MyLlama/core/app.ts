@@ -92,6 +92,15 @@ export function CheckForUpdate(): $CancellablePromise<$models.UpdateCheckResult 
 }
 
 /**
+ * DeleteModel deletes a model from disk by its file path, cleans up
+ * associated configuration and download tasks, and invalidates the model
+ * cache. Path must reside within registered model directories.
+ */
+export function DeleteModel(path: string): $CancellablePromise<void> {
+    return $Call.ByID(655232489, path);
+}
+
+/**
  * GetAppVersion returns the current app version (aligned with GitHub release
  * tags).
  */
