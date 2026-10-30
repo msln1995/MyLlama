@@ -25,15 +25,12 @@ func TestEffectiveHost(t *testing.T) {
 	}
 }
 
-// TestEffectiveHostAndroidLocalOnly pins the product decision: a phone never
-// serves other devices, so even a stale persisted "lan" access mode (left by
-// an older version) derives the loopback listen address on Android — the
-// lan bind is refused at the single derivation point shared by
-// SaveServerConfig, loadConfig and buildServerCommand.
-func TestEffectiveHostAndroidLocalOnly(t *testing.T) {
+// TestEffectiveHostAndroidLANAllowed verifies that Android honors the user's
+// explicit LAN access mode setting: lan → 0.0.0.0, local → 127.0.0.1.
+func TestEffectiveHostAndroidLANAllowed(t *testing.T) {
 	withPlatformGOOS(t, "android")
-	if got := effectiveHost(accessLAN); got != "127.0.0.1" {
-		t.Errorf("effectiveHost(lan) on android = %q, want 127.0.0.1 (phones never bind the LAN)", got)
+	if got := effectiveHost(accessLAN); got != "0.0.0.0" {
+		t.Errorf("effectiveHost(lan) on android = %q, want 0.0.0.0", got)
 	}
 	if got := effectiveHost(accessLocal); got != "127.0.0.1" {
 		t.Errorf("effectiveHost(local) on android = %q, want 127.0.0.1", got)

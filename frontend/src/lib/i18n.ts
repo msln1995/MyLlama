@@ -11,6 +11,19 @@ import { ref } from 'vue'
 
 export type Locale = 'zh' | 'en'
 
+/**
+ * 客户端环境系统语言探测：基于标准浏览器 navigator.language API。
+ * 在 Android WebView / 桌面端均能原生可靠获取操作系统界面语言，
+ * 彻底解决 Android 应用沙盒无权执行 `getprop` 导致的语言误判问题。
+ */
+export function getSystemLanguageClient(): 'zh' | 'en' {
+  if (typeof navigator !== 'undefined' && navigator.language) {
+    const lang = navigator.language.toLowerCase()
+    if (lang.startsWith('zh')) return 'zh'
+  }
+  return 'en'
+}
+
 // Exported for the i18n symmetry test (zh/en dictionaries must share the same
 // key set so no locale ever falls back to a raw key).
 export const messages: Record<Locale, Record<string, string>> = {

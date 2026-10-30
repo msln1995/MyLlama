@@ -3,18 +3,25 @@
 package core
 
 import (
-	"os/exec"
 	"strings"
 )
 
-// readSystemLocale reads the Android system locale via `getprop`:
-// returns persist.sys.locale (e.g. "zh-CN" / "en-US"), parsed by localeToLanguage
-// via prefix match. Returns empty string on failure; detectSystemLanguage falls
-// back to "en".
+// readSystemLocale reads the Android system locale.
+// In the Android app sandbox, os/exec cannot spawn child processes (SELinux denies
+// `getprop` execution by untrusted_app). We read system build properties in-process
+// via readProcFile without spawning child processes.
 func readSystemLocale() string {
-	out, err := exec.Command("getprop", "persist.sys.locale").Output()
-	if err != nil || len(out) == 0 {
-		return ""
+	for _, propFile := range []string{"/system/build.prop", "/vendor/build.prop", "/product/build.prop"} {
+		content := readProcFile(propFile)
+		if content == "" {
+			continue
+		}
+		for _, line := range strings.Split(content, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "ro.product.locale=") {
+				return strings.TrimPrefix(line, "ro.product.locale=")
+			}
+		}
 	}
-	return strings.TrimSpace(string(out))
+	return ""
 }

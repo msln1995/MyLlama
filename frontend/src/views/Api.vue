@@ -43,7 +43,7 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="address-lock-icon">
                 <rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/>
               </svg>
-              <span class="address-text">http://{{ cfg.host }}:{{ cfg.port }}</span>
+              <span class="address-text">http://{{ displayHost }}:{{ cfg.port }}</span>
               <span v-if="copied" class="address-copied">{{ t('api.addressCopied') }}</span>
               <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="address-copy-icon">
                 <rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
@@ -332,6 +332,9 @@ const cfg = reactive({
   cacheRam: 8192,
 })
 
+// 0.0.0.0 是通配监听地址，客户端访问及拷贝时规范化为可直接连接的 127.0.0.1
+const displayHost = computed(() => (!cfg.host || cfg.host === '0.0.0.0' ? '127.0.0.1' : cfg.host))
+
 const availableModels = ref<string[]>([])
 const modelCount = ref(0)
 
@@ -395,7 +398,7 @@ let copiedTimer: ReturnType<typeof setTimeout> | null = null
 
 async function copyAddress() {
   try {
-    await navigator.clipboard.writeText(`http://${cfg.host}:${cfg.port}`)
+    await navigator.clipboard.writeText(`http://${displayHost.value}:${cfg.port}`)
     copied.value = true
     if (copiedTimer) clearTimeout(copiedTimer)
     copiedTimer = setTimeout(() => {

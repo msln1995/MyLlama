@@ -914,21 +914,12 @@ const modelDirSub = computed(() => {
 // Android: local-only product decision — the phone never serves other
 // devices, so the LAN option is not offered (the backend's effectiveHost
 // degrades a stale persisted 'lan' to 127.0.0.1 regardless).
-const accessOptions = computed(() => {
-  const opts = [{ value: 'local', label: t('settings.accessLocalShort') }]
-  if (!isAndroid.value) {
-    opts.push({ value: 'lan', label: t('settings.accessLanShort') })
-  }
-  return opts
-})
+const accessOptions = computed(() => [
+  { value: 'local', label: t('settings.accessLocalShort') },
+  { value: 'lan', label: t('settings.accessLanShort') },
+])
 
-// Display normalization for the stale-config case: an Android device whose
-// persisted access mode is still 'lan' shows 'local' in the selector (the
-// backend listen address already IS 127.0.0.1 via effectiveHost). The
-// persisted value is NOT rewritten — read-only display mapping.
-const displayAccessMode = computed(() =>
-  isAndroid.value && appConfig.serverAccessMode === 'lan' ? 'local' : appConfig.serverAccessMode
-)
+const displayAccessMode = computed(() => appConfig.serverAccessMode)
 
 const accessError = ref('')
 const accessSwitching = ref(false)
@@ -939,6 +930,15 @@ async function setAccessScope(mode: string) {
   accessError.value = ''
   try {
     await applyServerAccessMode(mode)
+    // 监听地址变更（local ↔ lan）：若服务正在运行，立即重启服务使新绑定参数生效
+    try {
+      const st = await getServerStatus()
+      if (st.running) {
+        await restartServer()
+      }
+    } catch {
+      // 容错：探测或重启失败不阻断设置保存流程
+    }
   } catch {
     accessError.value = t('settings.accessError')
   } finally {
