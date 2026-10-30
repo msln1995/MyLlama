@@ -10,7 +10,7 @@ It is still the same cross-platform local-LLM client built on [llama.cpp](https:
 
 **📥 This fork's Android package:** [MyLlama-v0.6.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-android-arm64.apk) · [all releases](https://github.com/msln1995/MyLlama/releases)
 
-**🍎 This fork's macOS package (universal — Apple silicon and Intel in one build):** [MyLlama-v0.6.0-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.dmg) · [zip](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.zip) (upstream ships no macOS build — this one exists only here)
+**🍎 This fork's macOS package (universal — Apple silicon and Intel in one build):** [MyLlama-v0.6.1-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-macos-universal.dmg) · [zip](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-macos-universal.zip) (upstream ships no macOS build — this one exists only here)
 
 The package id is `com.msln1995.myllama`, **different from upstream's `com.codeneow.llamadesktop`**: the two apps coexist and never overwrite each other, so installing this fork does not require uninstalling the official one. The macOS bundle id is `com.msln1995.myllama` too.
 
@@ -85,7 +85,7 @@ The matching focused tests live in the `core` package: asset-selection cases bui
 
 ## 🍎 Installing on macOS
 
-1. Download [MyLlama-v0.6.0-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.dmg) — universal, so one build covers Apple silicon and Intel and macOS picks the native slice at exec time; if you would rather not mount a dmg, take the [zip](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.zip). Each file has a matching `.sha256` next to it.
+1. Download [MyLlama-v0.6.1-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-macos-universal.dmg) — universal, so one build covers Apple silicon and Intel and macOS picks the native slice at exec time; if you would rather not mount a dmg, take the [zip](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-macos-universal.zip). Each file has a matching `.sha256` next to it.
 2. Mount the dmg and drag `MyLlama.app` into Applications (with the zip, drop `MyLlama.app` anywhere — just not into Downloads).
 3. **The first launch needs a Gatekeeper bypass**: the artifact is ad-hoc signed and not notarized (a fork has no Developer ID, and it cannot use upstream's certificate), so a browser-downloaded copy carries `com.apple.quarantine`. In Finder **right-click (Control-click) → Open → Open** again; if it is refused outright, run `xattr -dr com.apple.quarantine /Applications/MyLlama.app`. Later launches are normal.
 4. Open the app → Home → **Runtime Environment** → download llama.cpp. macOS receives `...-bin-macos-arm64.tar.gz` or `-macos-x64.tar.gz`, both flat archives whose tar members include 18 / 16 symlink entries respectively, with `llama-server` after them — **exactly where upstream aborted, and exactly what this fork fixes** (item 5 above), so the component should now read as installed.

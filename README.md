@@ -10,7 +10,7 @@
 
 **📥 本 fork 的安卓安装包：** [MyLlama-v0.6.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-android-arm64.apk) ｜ [全部 Release](https://github.com/msln1995/MyLlama/releases)
 
-**🍎 本 fork 的 macOS 安装包（universal，Apple 芯片与 Intel 通用）：** [MyLlama-v0.6.0-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.dmg) ｜ [zip 版](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.zip)（上游不发 macOS，这是本 fork 独有的产物）
+**🍎 本 fork 的 macOS 安装包（universal，Apple 芯片与 Intel 通用）：** [MyLlama-v0.6.1-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-macos-universal.dmg) ｜ [zip 版](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-macos-universal.zip)（上游不发 macOS，这是本 fork 独有的产物）
 
 包名是 `com.msln1995.myllama`，**与上游的 `com.codeneow.llamadesktop` 不同**：两个应用可以并存、互不覆盖，也不需要为了安装本 fork 而先卸载官方包。macOS 的 bundle id 同样用 `com.msln1995.myllama`。
 
@@ -85,7 +85,7 @@ Windows x64 · macOS universal · Android arm64 · Linux x64 · GPL-3.0
 
 ## 🍎 macOS 安装
 
-1. 下载 [MyLlama-v0.6.0-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.dmg)（universal：Apple 芯片与 Intel 同一个包，系统按原生 slice 执行；不想挂载 dmg 就用 [zip 版](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.zip)）。两个文件旁边各有同名 `.sha256`。
+1. 下载 [MyLlama-v0.6.1-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-macos-universal.dmg)（universal：Apple 芯片与 Intel 同一个包，系统按原生 slice 执行；不想挂载 dmg 就用 [zip 版](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-macos-universal.zip)）。两个文件旁边各有同名 `.sha256`。
 2. 挂载 dmg，把 `MyLlama.app` 拖进「应用程序」（zip 版就是把 `MyLlama.app` 拖到任意位置，别放在「下载」里）。
 3. **第一次打开需要绕过 Gatekeeper**：产物只有 adhoc 签名、没有 Apple 公证（fork 拿不到 Developer ID），浏览器下载回来的副本带 `com.apple.quarantine`。所以在访达里**右键（按住 Control 点击）→ 打开 → 再点「打开」**；如果被直接拦掉，终端执行 `xattr -dr com.apple.quarantine /Applications/MyLlama.app`。之后的启动正常。
 4. 打开 App → 首页「运行环境」→ 下载 llama.cpp。macOS 拿到的是 `...-bin-macos-arm64.tar.gz` 或 `-macos-x64.tar.gz`，都是平铺包；tar 里分别有 18 / 16 个软链接条目，`llama-server` 排在它们之后——**上游正是卡在这里，本 fork 修好了**（本页顶部第 5 条），装完应显示已安装。
