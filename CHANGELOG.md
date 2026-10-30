@@ -2,6 +2,40 @@
 
 更新日志的**权威来源**（见 `AGENTS.md`「版本发布」）：发版时先在此新增版本条目（含日期），`git tag` 注解消息与 GitHub Release 正文均从该条目复制，保持一致。自 v0.3.3 起条目为概括式双语（中文在上）；v0.3.0 之前的逐提交条目已随对应 tag 与 Release 的清理移除（见文末「历史版本」）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [v0.6.1] - 2026-10-30
+
+## 中文
+
+v0.6.1 新增了模型删除与硬件实测精选推荐模型功能，彻底解决了移动端大模型无法删除占用存储空间的缺陷，并通过真机严苛测试打破营销号吹嘘，为用户提供真正可用的精选模型推荐。
+
+**🌟 本版亮点**
+
+- **安全模型删除** — 后端新增 `DeleteModel` 绑定，严格防御路径穿越（仅允许删除白名单扫描目录下的模型文件），防御运行中与内存加载中删除；支持 3 级变体目录整体解包清理与空父目录自动回收；自动同步注销模型专属配置、终止并清理关联下载队列，彻底释放磁盘空间。
+- **本地模型管理界面升级** — 本地模型列表新增红色垃圾桶删除按钮与安全确认弹窗，明确提示释放的具体空间大小，避免误删；解决 Android 私有沙箱目录无法通过系统文件管理器删除巨型模型文件的痛点。
+- **真机实测精选推荐模型** — 拒绝营销虚标，基于移动端物理内存带宽与实测吞吐，在下载页新增精选推荐网格，支持按「手机精选 / 桌面主力 / 编程专用」过滤：
+  - **移动端机皇 `Qwen2.5-3B-Instruct`**：7.8 tok/s 贴合人眼自然阅读速度，冷启仅 6.5s，常驻仅 2.1 GB，发热仅 38.8°C 不杀后台；实测稳定输出标准 OpenAI JSON 多动作复合工具调用调度；
+  - **极速轻量 `Qwen2.5-1.5B-Instruct`**：15~20 tok/s，1.04 GB，老机型和入门设备无压力秒开；
+  - **桌面主力 `Qwen2.5-7B-Instruct`**：通用逻辑天花板，桌面端旗舰首选；
+  - **代码 Copilot `Qwen2.5-Coder-7B-Instruct`**：编程代码专用模型；
+  - **英文长文 `Llama-3.2-3B-Instruct`**：128K 超长上下文英文科研首选。
+- **真机实测清理验证** — 在 vivo X60（Exynos 1080）真机上实测删除 Huihui 9B（5.2 GB）与 Octopus-v2（1.5 GB），成功为手机安全释放 6.7 GB 内部存储空间。
+
+## English
+
+v0.6.1 introduces safe local model deletion and hardware-tested curated model recommendations, eliminating storage bottlenecks on mobile devices and cutting through marketing hype with verified on-device performance benchmarks.
+
+**Highlights**
+
+- **Safe Model Deletion** — New `DeleteModel` backend binding with strict path traversal defense, active serving/loaded model guards, automatic variant directory and empty parent directory cleanup, configuration pruning, and download queue cancellation.
+- **Local Model UI Management** — Local model cards now feature a delete button with a glass confirmation modal displaying the exact storage reclaimed. Solves Android's sandbox storage constraint where user file managers cannot delete multi-gigabyte models.
+- **Curated Hardware-Tested Recommendations** — Grounded in real mobile RAM bandwidth and chip benchmarks:
+  - **Mobile Champion `Qwen2.5-3B-Instruct`**: 7.8 tok/s natural reading speed, 6.5s load, 2.1 GB RSS, 38.8°C cool running, verified zero-shot OpenAI JSON multi-action tool calls.
+  - **Ultra-light `Qwen2.5-1.5B-Instruct`**: 15~20 tok/s, 1.04 GB, low-spec device friendly.
+  - **Desktop Flagship `Qwen2.5-7B-Instruct`**: Top-tier general intelligence for PC/Mac.
+  - **Coding Copilot `Qwen2.5-Coder-7B-Instruct`**: Dedicated programming model.
+  - **Academic English `Llama-3.2-3B-Instruct`**: 128K context window.
+- **On-Device Verification** — Tested live on vivo X60, safely reclaiming 6.7 GB of flash memory.
+
 ## [v0.6.0] - 2026-10-19
 
 ## 中文
