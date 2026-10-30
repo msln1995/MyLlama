@@ -8,7 +8,7 @@
 
 它仍是同一套基于 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的跨平台本地大模型客户端：扫描本地 GGUF → 可视化配置推理参数（或一键智能调优）→ 生成 llama-server 预设 → 一个 OpenAI 兼容端点供内置聊天与任意客户端使用；模型下载、本地聊天与实时监控都在应用内完成，数据不出本机。
 
-**📥 本 fork 的安卓安装包：** [MyLlama-v0.6.0-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-android-arm64.apk) ｜ [全部 Release](https://github.com/msln1995/MyLlama/releases)
+**📥 本 fork 的安卓安装包：** [MyLlama-v0.6.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-android-arm64.apk) ｜ [全部 Release](https://github.com/msln1995/MyLlama/releases)
 
 **🍎 本 fork 的 macOS 安装包（universal，Apple 芯片与 Intel 通用）：** [MyLlama-v0.6.0-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.dmg) ｜ [zip 版](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.zip)（上游不发 macOS，这是本 fork 独有的产物）
 
@@ -36,9 +36,19 @@ Windows x64 · macOS universal · Android arm64 · Linux x64 · GPL-3.0
 
 这个仓库是 [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLlama) 的 fork。**上游不属于我们，官方 Release 也只由上游发布**——本页只写我们这一份的实际情况，想读原版说明请直接跳转上游仓库，不要在这里找。
 
-我们只动了一条链路：**运行环境下载完之后，应用能不能真的认它**。修复已按 [PR #43](https://github.com/CodeNeow/MyLlama/pull/43) 提交上游评审，合并后这里的代码差异就会消失；包名（下面第 4 条）与 macOS 发行包（下面第 7 条）是本 fork 自己的决定，不会提交上游。
+我们最初只动了一条链路：**运行环境下载完之后，应用能不能真的认它**。修复已按 [PR #43](https://github.com/CodeNeow/MyLlama/pull/43) 提交上游评审，合并后这里的代码差异就会消失；包名（下面第 4 条）与 macOS 发行包（下面第 7 条）是本 fork 自己的决定，不会提交上游。
 
-**v0.6.0 新增改动（基于真机实测的性能优化）：**
+### 🛠️ 核心链路修复（已提交 PR #43）
+
+1. **选包**：打分相同时上游按 GitHub API 的返回顺序取第一个，于是安卓 / Linux arm64 经常拿到 `*-snapdragon` 的 `cmake --install` 布局包——解压完目录里没有可执行文件位置对得上。`pickBestAssetFor` 现在给 `-snapdragon` 强降权（−400 分），普通平铺 CPU 包优先，实在没有别的可选时才回退。
+2. **目录布局**：上游只在下载目录本身和它的一级子目录里平铺查找。`findLlamaBinInDir` 现在额外检查每个子目录下的 `bin/`（硬上限两层），`detectAccel` 与 CUDA runtime 探测同样遍历同级 `lib/`，于是 `release/bin/<binary>` 这种布局也能认。
+3. **安卓启动**：安卓的链接器不会自动搜索可执行文件所在目录，只导出二进制自身目录不够。`androidLdEnv` 现在把同级 `lib/` 一起加进 `LD_LIBRARY_PATH`（冒号分隔）。
+4. **包名独立**：`applicationId` / `namespace` 改成 `com.msln1995.myllama`（上游是 `com.codeneow.llamadesktop`）。这样本 fork 的 debug 签名包与官方正式包**互不冲突、可同时安装**，不再需要「先卸载才能装」；代价是两份数据目录彼此独立——配置、llama.cpp 运行时与模型都不互通，需要在本 fork 里重新下一遍。Java 源码仍留在 `com.wails.app`，因为 Wails v3 的 JNI 导出符号是按那个包名硬编码的。
+5. **解压不再被软链接打断**：macOS / Linux 的 tar 包里 `llama-server` 排在软链接条目之后，上游遇到第一个 symlink 就中断，于是「已安装」和「找不到」同时成立。`archive.go` 改成两阶段物化：先落普通文件并收集链接条目，再统一创建 symlink / hardlink，失败时复制目标文件兜底；复制的字节也计入总量上限。
+6. **解压加固**：链接目标必须留在解压目录内（沿用既有的路径穿越拒绝规则），并新增 `maxExtractTarLinks = 64` 上限。
+7. **macOS 有了发行包**：上游只发 Windows / Ubuntu / Android 四个产物，**从来没有发过 macOS**，虽然代码侧对 darwin 的支持是完整的。本 fork 补了 `scripts/macos_package.sh`：交叉编译 arm64 + x86_64、`lipo` 成 universal 可执行文件、组装 `MyLlama.app`（Info.plist / PkgInfo / 由 `build/appicon.png` 生成的 AppIcon.icns）、adhoc 签名，产出 zip 与 dmg。走本地脚本而不是 CI 作业，是因为 macOS runner 的分钟数在公开仓库也要计费——是否值得加 `build-macos` CI 作业留给上游决定。
+
+### ⚡ v0.6.0 真机实测性能优化
 
 8. **Android 内存计价与守卫** — 启动前精确计算模型总 footprint（权重 + KV 缓存 + 上下文检查点 + 运行时开销），超预算直接拦截并给出可操作的上下文建议，不再闪退。KV 缓存按真实量化类型计价，守护与调参器共用同一公式。
 9. **Android prompt cache 优化** — 50% 的 headroom 钳位在 ctx 16384 时让 replay 慢 5× 但不省内存，Android 端份额提升至 90%，prompt cache 命中时 replay 快 3-5×。
@@ -48,13 +58,11 @@ Windows x64 · macOS universal · Android arm64 · Linux x64 · GPL-3.0
 13. **自动语言检测修复** — macOS 通过 `defaults read -g AppleLanguages`、Android 通过 `getprop persist.sys.locale` 检测系统语言，不再始终回退到英文。
 14. **更新指向 fork** — 应用内「检查更新」现在去本 fork 的 Release 页（`msln1995/MyLlama`）而非上游，设置页也加了说明提示这是独立分支。
 
-1. **选包**：打分相同时上游按 GitHub API 的返回顺序取第一个，于是安卓 / Linux arm64 经常拿到 `*-snapdragon` 的 `cmake --install` 布局包——解压完目录里没有可执行文件位置对得上。`pickBestAssetFor` 现在给 `-snapdragon` 强降权（−400 分），普通平铺 CPU 包优先，实在没有别的可选时才回退。
-2. **目录布局**：上游只在下载目录本身和它的一级子目录里平铺查找。`findLlamaBinInDir` 现在额外检查每个子目录下的 `bin/`（硬上限两层），`detectAccel` 与 CUDA runtime 探测同样遍历同级 `lib/`，于是 `release/bin/<binary>` 这种布局也能认。
-3. **安卓启动**：安卓的链接器不会自动搜索可执行文件所在目录，只导出二进制自身目录不够。`androidLdEnv` 现在把同级 `lib/` 一起加进 `LD_LIBRARY_PATH`（冒号分隔）。
-4. **包名独立**：`applicationId` / `namespace` 改成 `com.msln1995.myllama`（上游是 `com.codeneow.llamadesktop`）。这样本 fork 的 debug 签名包与官方正式包**互不冲突、可同时安装**，不再需要「先卸载才能装」；代价是两份数据目录彼此独立——配置、llama.cpp 运行时与模型都不互通，需要在本 fork 里重新下一遍。Java 源码仍留在 `com.wails.app`，因为 Wails v3 的 JNI 导出符号是按那个包名硬编码的。
-5. **解压不再被软链接打断**：macOS / Linux 的 tar 包里 `llama-server` 排在软链接条目之后，上游遇到第一个 symlink 就中断，于是「已安装」和「找不到」同时成立。`archive.go` 改成两阶段物化：先落普通文件并收集链接条目，再统一创建 symlink / hardlink，失败时复制目标文件兜底；复制的字节也计入总量上限。
-6. **解压加固**：链接目标必须留在解压目录内（沿用既有的路径穿越拒绝规则），并新增 `maxExtractTarLinks = 64` 上限。
-7. **macOS 有了发行包**：上游只发 Windows / Ubuntu / Android 四个产物，**从来没有发过 macOS**，虽然代码侧对 darwin 的支持是完整的。本 fork 补了 `scripts/macos_package.sh`：交叉编译 arm64 + x86_64、`lipo` 成 universal 可执行文件、组装 `MyLlama.app`（Info.plist / PkgInfo / 由 `build/appicon.png` 生成的 AppIcon.icns）、adhoc 签名，产出 zip 与 dmg。走本地脚本而不是 CI 作业，是因为 macOS runner 的分钟数在公开仓库也要计费——是否值得加 `build-macos` CI 作业留给上游决定。
+### 🚀 v0.6.1 真机极限探索与实用体验升级
+
+15. **真机极限探索（12GB 设备解锁 7B ~ 9B 纯离线推理）** — 凭借无 JNI 膨胀的纯原生进程隔离、精细化物理内存守卫（`promptCacheShareAndroid = 0.9`）与直接模式（Direct Mode），在具备 12GB 物理内存的设备（如 Exynos 1080 / 骁龙 888+）上成功解锁 9B 级别模型（如 Huihui-Qwen3.5-9B Q4_K_M，5.24 GB 权重）的离线推理，实测生成速度 2.5 ~ 3.5 tok/s，不杀后台、不虚标。
+16. **实测精选推荐模型** — 拒绝营销号虚标与参数幻觉，基于移动端/桌面端物理硬件算力与内存带宽实测，在下载页内置精选推荐（首推 Qwen2.5-3B 综合天花板 7.8 tok/s，搭配 1.5B 极速入门、7B/9B 深度探索、Coder-7B 编程专用），并附带详细推荐理由、实测速度与部署门槛。
+17. **全平台模型一键删除** — 解决此前模型下载后无法在应用内删除、占满手机存储的痛点。后端提供严格的路径穿越防御、运行中模型保护与残留配置清理，前端配备二次确认防误触弹窗。
 
 配套的针对性单测在 `core` 包里：用真实 b11671 资产名与 API 返回顺序做选包用例、两种目录布局的检测用例、symlink / hardlink 与链接数上限的解压用例。
 
@@ -69,7 +77,7 @@ Windows x64 · macOS universal · Android arm64 · Linux x64 · GPL-3.0
 
 ## 📥 安卓安装
 
-1. 下载 [MyLlama-v0.6.0-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-android-arm64.apk)（arm64，Android 5.0+；[Releases 页](https://github.com/msln1995/MyLlama/releases) 有全部产物与说明）。
+1. 下载 [MyLlama-v0.6.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-android-arm64.apk)（arm64，Android 5.0+；[Releases 页](https://github.com/msln1995/MyLlama/releases) 有全部产物与说明）。
 2. 点开安装，按提示允许「安装未知来源应用」。因为包名不同，**官方包装着也能直接装**，不用卸载。
 3. 打开 App → 首页「运行环境」→ 下载 llama.cpp。现在拿到的是 `...-bin-android-arm64.tar.gz` 平铺包，装完应显示**已安装**（这就是本 fork 修的那一步）。
 4. 模型目录自己指定或下载（llama.cpp 运行时放在应用私有目录，安卓沙箱不允许执行外部存储上的二进制，所以没有「手动把包放进去」这条路）。
@@ -156,6 +164,12 @@ HF 镜像 + ModelScope 双源搜索，批量下载走可断点续传的任务队
 </td>
 </tr>
 </table>
+
+### 📱 移动端真实极限：不仅是玩玩具（12GB 设备解锁 7B ~ 9B 纯离线推理）
+
+市面上多数移动端客户端因框架自身堆内存与运行时冗余开销，遇到 4B 以上模型即被 Android LMK（Low Memory Killer）查杀崩溃。MyLlama 凭借**无 JNI 内存膨胀的纯原生进程隔离**与**动态内存预算守卫**，在具备 12GB 物理内存的设备上成功解锁了 9B 级别模型（如 Qwen2.5-7B、Huihui-Qwen3.5-9B Q4_K_M）的离线推理：
+- **实测指标**：静态权重 5.24 GB + 动态 KV 缓存，常驻物理内存约 6.7 GB；Exynos 1080 纯 CPU 解码速度 **2.5 ~ 3.5 tok/s**，全程不崩、不杀后台。
+- **真实定位**：日常高频对话首推 3B（7.8 tok/s，秒级自然阅读流速）；9B 则为深度逻辑分析、长文硬核总结及特定无审查私密任务提供**真正可用的极端生产力边界**。
 
 <details>
 <summary><b>📖 目录</b></summary>

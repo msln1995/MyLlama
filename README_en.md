@@ -8,7 +8,7 @@
 
 It is still the same cross-platform local-LLM client built on [llama.cpp](https://github.com/ggml-org/llama.cpp): scan local GGUF files → configure inference parameters visually (or one-click auto-tune) → generate llama-server presets → serve one OpenAI-compatible endpoint for the built-in chat and any OpenAI client. Model downloads, local chat and live monitoring all happen inside the app, and nothing leaves your machine.
 
-**📥 This fork's Android package:** [MyLlama-v0.6.0-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-android-arm64.apk) · [all releases](https://github.com/msln1995/MyLlama/releases)
+**📥 This fork's Android package:** [MyLlama-v0.6.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-android-arm64.apk) · [all releases](https://github.com/msln1995/MyLlama/releases)
 
 **🍎 This fork's macOS package (universal — Apple silicon and Intel in one build):** [MyLlama-v0.6.0-macos-universal.dmg](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.dmg) · [zip](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-macos-universal.zip) (upstream ships no macOS build — this one exists only here)
 
@@ -38,7 +38,17 @@ This repository is a fork of [CodeNeow/MyLlama](https://github.com/CodeNeow/MyLl
 
 We touched exactly one path: **whether the app can actually find the runtime after it finishes downloading it**. The fix is submitted upstream as [PR #43](https://github.com/CodeNeow/MyLlama/pull/43); once it merges, the code divergence here disappears. The package id (item 4 below) and the macOS distribution build (item 7 below) are this fork's own decisions and will never be submitted upstream.
 
-**v0.6.0 additions (on-device performance optimization):**
+### 🛠️ Core runtime fixes (submitted as PR #43)
+
+1. **Asset selection**: on equal scores upstream kept the first candidate in GitHub API order, so Android / Linux arm64 usually landed on a `*-snapdragon` `cmake --install` package whose layout has no binary where the scanner looks. `pickBestAssetFor` now deprioritizes `-snapdragon` assets (−400), so the plain flat CPU package wins; snapdragon stays as a last resort.
+2. **Directory layout**: upstream probed only the download directory itself and its first-level children. `findLlamaBinInDir` now also probes `bin/` inside each subdirectory (hard-bounded at two levels), and `detectAccel` / the CUDA-runtime probe walk the sibling `lib/`, so a `release/bin/<binary>` layout resolves too.
+3. **Android launch**: the Android linker does not search the executable's own directory, so exporting only that directory was never enough. `androidLdEnv` now adds the sibling `lib/` to `LD_LIBRARY_PATH` (colon-separated).
+4. **Its own package id**: `applicationId` / `namespace` became `com.msln1995.myllama` (upstream: `com.codeneow.llamadesktop`). This fork's debug-signed APK therefore **installs alongside the official app instead of colliding with it** — no more "uninstall first". The cost: the two apps have separate data directories, so config, the llama.cpp runtime and models do not carry over and must be downloaded again inside this fork. The Java sources stay in `com.wails.app` because the Wails v3 JNI export symbols are hard-coded to that package.
+5. **Extraction no longer aborts on symlinks**: in the macOS / Linux tarballs `llama-server` sits after the symlink entries, and upstream aborted at the first symlink — which is why "installed" and "not found" were both true at once. `archive.go` now materializes in two passes: regular files first while link entries are collected, then symlinks / hardlinks are created, falling back to copying the target; copied bytes are charged to the total-size cap.
+6. **Extraction hardening**: link targets must resolve inside the destination (the existing path-traversal rejection rule) plus a new `maxExtractTarLinks = 64` cap.
+7. **A macOS build actually ships**: upstream only ever published Windows / Ubuntu / Android — four artifacts, none of them macOS — even though the darwin code path is complete. This fork adds `scripts/macos_package.sh`: cross-compile darwin/arm64 and darwin/amd64, `lipo` them into a universal executable, assemble `MyLlama.app` (Info.plist, PkgInfo, AppIcon.icns generated from `build/appicon.png`), sign it ad-hoc, and emit a zip plus an hdiutil dmg. It is a local script rather than a CI job because macOS runner minutes are billed even on public repositories; whether a `build-macos` CI job is worth it stays upstream's call.
+
+### ⚡ v0.6.0 on-device performance optimizations
 
 8. **Android memory pricing and guard** — start-time footprint calculation (weights + KV cache + context checkpoints + runtime overhead) refuses over-budget loads with actionable context suggestions instead of crashing. KV cache priced by real quantization type; guard and tuner share one formula.
 9. **Android prompt cache optimization** — the 50% headroom clamp at ctx 16384 made replay 5× slower without saving RSS; Android share raised to 90%, prompt cache hits now give 3-5× replay speedup.
@@ -48,13 +58,11 @@ We touched exactly one path: **whether the app can actually find the runtime aft
 13. **Auto language detection fixed** — macOS detects system language via `defaults read -g AppleLanguages`, Android via `getprop persist.sys.locale`, no longer always falling back to English.
 14. **Update checks point to fork** — the in-app "check for updates" now queries this fork's release page (`msln1995/MyLlama`) instead of upstream; the Settings page also clarifies this is an independent branch.
 
-1. **Asset selection**: on equal scores upstream kept the first candidate in GitHub API order, so Android / Linux arm64 usually landed on a `*-snapdragon` `cmake --install` package whose layout has no binary where the scanner looks. `pickBestAssetFor` now deprioritizes `-snapdragon` assets (−400), so the plain flat CPU package wins; snapdragon stays as a last resort.
-2. **Directory layout**: upstream probed only the download directory itself and its first-level children. `findLlamaBinInDir` now also probes `bin/` inside each subdirectory (hard-bounded at two levels), and `detectAccel` / the CUDA-runtime probe walk the sibling `lib/`, so a `release/bin/<binary>` layout resolves too.
-3. **Android launch**: the Android linker does not search the executable's own directory, so exporting only that directory was never enough. `androidLdEnv` now adds the sibling `lib/` to `LD_LIBRARY_PATH` (colon-separated).
-4. **Its own package id**: `applicationId` / `namespace` became `com.msln1995.myllama` (upstream: `com.codeneow.llamadesktop`). This fork's debug-signed APK therefore **installs alongside the official app instead of colliding with it** — no more "uninstall first". The cost: the two apps have separate data directories, so config, the llama.cpp runtime and models do not carry over and must be downloaded again inside this fork. The Java sources stay in `com.wails.app` because the Wails v3 JNI export symbols are hard-coded to that package.
-5. **Extraction no longer aborts on symlinks**: in the macOS / Linux tarballs `llama-server` sits after the symlink entries, and upstream aborted at the first symlink — which is why "installed" and "not found" were both true at once. `archive.go` now materializes in two passes: regular files first while link entries are collected, then symlinks / hardlinks are created, falling back to copying the target; copied bytes are charged to the total-size cap.
-6. **Extraction hardening**: link targets must resolve inside the destination (the existing path-traversal rejection rule) plus a new `maxExtractTarLinks = 64` cap.
-7. **A macOS build actually ships**: upstream only ever published Windows / Ubuntu / Android — four artifacts, none of them macOS — even though the darwin code path is complete. This fork adds `scripts/macos_package.sh`: cross-compile darwin/arm64 and darwin/amd64, `lipo` them into a universal executable, assemble `MyLlama.app` (Info.plist, PkgInfo, AppIcon.icns generated from `build/appicon.png`), sign it ad-hoc, and emit a zip plus an hdiutil dmg. It is a local script rather than a CI job because macOS runner minutes are billed even on public repositories; whether a `build-macos` CI job is worth it stays upstream's call.
+### 🚀 v0.6.1 real-device limit exploration & usability upgrades
+
+15. **Real-device limit exploration (7B ~ 9B offline inference on 12GB devices)** — with zero-JNI native process isolation, fine-grained physical RAM budget guards (`promptCacheShareAndroid = 0.9`), and direct mode, 9B-class models (e.g. Huihui-Qwen3.5-9B Q4_K_M, 5.24 GB static weights) run stably on 12GB phones (such as Exynos 1080 / Snapdragon 888+), delivering real-world generation speeds of 2.5 ~ 3.5 tok/s without LMK kills or false marketing claims.
+16. **Benchmarked recommended models** — based on physical hardware compute and memory bandwidth measurements (rejecting marketing hype), the download tab features verified recommendations (Qwen2.5-3B mobile champion at 7.8 tok/s, 1.5B ultralight, 7B/9B deep exploration, Coder-7B coding specialist) with explicit reasoning, real speeds, and RAM requirements.
+17. **One-click model deletion across platforms** — solved the pain point where downloaded models could not be deleted within the app. Backend provides strict path-traversal guards, active-model protection, and configuration cleanup; frontend includes a glass-style confirmation modal.
 
 The matching focused tests live in the `core` package: asset-selection cases built from the real b11671 asset names in API order, detection cases for both directory layouts, and extraction cases for symlinks, hardlinks and the link-count cap.
 
@@ -69,7 +77,7 @@ The matching focused tests live in the `core` package: asset-selection cases bui
 
 ## 📥 Installing on Android
 
-1. Download [MyLlama-v0.6.0-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.0/MyLlama-v0.6.0-android-arm64.apk) (arm64, Android 5.0+; the [release page](https://github.com/msln1995/MyLlama/releases) lists every artifact).
+1. Download [MyLlama-v0.6.1-android-arm64.apk](https://github.com/msln1995/MyLlama/releases/download/v0.6.1/MyLlama-v0.6.1-android-arm64.apk) (arm64, Android 5.0+; the [release page](https://github.com/msln1995/MyLlama/releases) lists every artifact).
 2. Open it and allow "install unknown apps" when prompted. Because the package id differs, **it installs straight next to the official app** — nothing to uninstall.
 3. Open the app → Home → Runtime tab → download llama.cpp. You now get the flat `...-bin-android-arm64.tar.gz`, and the component should read **installed** afterwards (that is the step this fork fixes).
 4. Add a model directory or download one (the runtime must live in the app-private directory; Android's sandbox forbids executing binaries from shared storage, so there is no "place the files yourself" route).
@@ -156,6 +164,12 @@ Dual prompt-processing / generation tok/s metrics with a 60-second speed chart, 
 </td>
 </tr>
 </table>
+
+### 📱 Mobile real-world limits: more than a toy (12GB devices unlock 7B ~ 9B offline inference)
+
+Most mobile LLM wrappers crash via Android LMK (Low Memory Killer) when loading anything beyond 4B due to runtime and framework heap bloat. MyLlama's **zero-JNI native process architecture** and **dynamic memory budget guards** enable reliable 9B-class inference on 12GB mobile devices:
+- **Measured metrics**: 5.24 GB static weights + dynamic KV cache (~6.7 GB resident RAM); Exynos 1080 CPU decode speed of **2.5 ~ 3.5 tok/s**, rock-solid without process kills.
+- **Pragmatic positioning**: 3B is recommended for daily conversational fluid reading (7.8 tok/s); 9B provides an **actual working productivity boundary** for complex logic, long-text reasoning, and uncensored tasks.
 
 <details>
 <summary><b>📖 Table of Contents</b></summary>
