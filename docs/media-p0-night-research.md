@@ -26,37 +26,41 @@ P0 时 GitHub API 403 未完成的事项，本次通过 release 页面核实：
 
 同参数（832×480、17 帧、10 步、seed 42）唯一变量 `--vae-tile-size`，对照 P0 run4（默认 256×256 分块）：
 
-| 指标 | 256×256（run4） | 512×512（本次） |
-| --- | --- | --- |
-| 分块单元数 | 10 | **2** |
-| 采样阶段 | 684 s | 684 s（同） |
-| VAE 解码 | **3573 s** | **2339 s（-34.5%）** |
-| 全程 generate_video | 4283 s | **3058 s（-28.6%）** |
-| 解码期空闲内存低点 | 47–48% | **13%（约 3 GB）** |
-| 峰值 RSS | 7.8 GiB | 8.3 GiB |
-| 产物 | .webm/VP8 可解码 | .webm/VP8 可解码（ffprobe + 全流解码通过） |
+| 指标 | 256×256（run4） | 384×384（补充） | 512×512 |
+| --- | --- | --- | --- |
+| 分块网格 | — | 3×2=6 块 | 2 块 |
+| 采样阶段 | 684 s | 684 s | 684 s（同） |
+| VAE 解码 | 3573 s | **4016 s（最差）** | **2339 s（最快，-34.5%）** |
+| 全程 generate_video | 4283 s | 4610 s | **3058 s（-28.6%）** |
+| 解码期空闲内存低点 | 47–48% | 36% | **13%（约 3 GB）** |
+| 峰值 RSS | 7.8 GiB | 8.4 GiB | 8.3 GiB |
+| 产物 | .webm/VP8 可解码 | .webm/VP8 可解码 | .webm/VP8 可解码（ffprobe + 全流解码通过） |
 
-结论与建议：
+结论与建议（三点曲线已测全）：
 
-1. **默认保持 256×256**：512 分块的余量低点（3 GB）低于用户可接受底线（4 GB），且收益(34%)不足以在共机上默认开启。
-2. tile-512 作为"机器空闲 + 余量 ≥10 GB"时的可选加速档；P3 可再测 384×384 找折中点（预期 3–4 块、余量 ~6–7 GB、解码 ~28–30 min）。
+1. **权衡曲线非单调，384×384 是双重劣化点**（比 256 慢 12%、余量更低）——机理：分块越大单块越快，但网格覆盖的总像素面积（含重叠冗余）增大，384 恰好落在冗余增大而并行度未升的谷底。**tile 尺寸不能做成裸滑杆**，只能枚举实测可用的档位。
+2. 可用档位仅两个：**256×256（默认安全档，余量 ~48%）** 与 **512×512（加速档，-34.5% 解码，余量 ~13%，仅机器空闲且余量 ≥10 GB 时可开）**。832×480 分辨率下 512 接近最优（2 块已接近无冗余覆盖）。
 3. 根本解法仍是替换/增强解码路径（VAE tae、分帧流水、或等待上游 Metal 改进）——上游 11-08 仍在密集合入 Metal 相关提交（如 INT8 ConvRot），P3 前值得重新 pin 新版本复测。
 
 ## 3. Z-Image Turbo Q2_K 量化实测（Android 内存压缩路径）
 
 组件身份：`leejet/Z-Image-Turbo-GGUF @ c61c0e42`，`z_image_turbo-Q2_K.gguf`，2,592,442,304 B，sha256 `a9cf1b03…8d58a`（下载后本地复算一致）。对照 P0 run1（Q4_K，同 prompt/尺寸/步数/seed）：
 
-| 指标 | Q4_K（P0 run1） | Q2_K（本次） |
-| --- | --- | --- |
-| 生成耗时（512×1024/8 步） | 182.1 s | 182.5 s（持平） |
-| 峰值 RSS | 6.65 GiB | **5.31 GiB（-1.34 GB / -20%）** |
-| 输出 | 已目验（锐利） | 已目验：**语义正确、构图保持，但纹理呈画意感伪影、岩石/水面细节退化** |
-| 产物 sha256 | `d4ecf12c…` | `80d24044…`（不同权重，必然不同） |
+| 指标 | Q4_K + QwenQ4_K_M（P0 run1） | Q2_K + QwenQ4_K_M | **Q2_K + QwenQ2_K（最低档）** |
+| --- | --- | --- | --- |
+| 生成耗时（512×1024/8 步） | 182.1 s | 182.5 s | **176.0 s** |
+| 峰值 RSS | 6.65 GiB | 5.31 GiB（-20%） | **4.84 GiB（-27%）** |
+| 输出目验 | 锐利（基准） | 语义正确、构图保持，纹理画意感伪影 | 与左列相当——**编码器 Q2 无进一步可见退化，主模型 Q2 主导质量损失** |
+| 产物 sha256 | `d4ecf12c…` | `80d24044…` | 见 outputs/p0-image-q2k-low.png |
+
+组件身份（均经本地 sha256 复算）：Z-Image Q2_K `a9cf1b03…8d58a`（2,592,442,304 B）；Qwen3-4B Q2_K `f7ed2f57…7862`（1,669,500,000 B，unsloth 仓库 Q2_K 与 Q2_K_L 内容相同）。
+
+内存阶梯实测要点：编码器 Q2 只省 ~0.5 GB RSS（权重差 0.9 GB，计算缓冲吃掉差额）——压缩阶梯的边际收益递减，Android 分级按实测值而非权重和推算。
 
 结论与建议：
 
 1. Q2_K **速度无损、内存 -20%、质量明显降级**——定位为"低内存档位"，不替代 Q4_K 默认档。目录（P2）可加 `q2-k` variant，UI 标注质量取舍。
-2. **Android 12 GB 设备可行域确认**：Q2 主模型 + Qwen3-4B Q4_K_M 编码器 + ae VAE ≈ 5.3 GB 峰值（12 GB 设备可用 ~7–8 GB）；若再加 Qwen Q2 编码器可到 ~4.4 GB（未测）。可行性文档 §4 的"边缘"评级可上调为"可行（Q2 档）"，真机验证仍是 R1 门槛。
+2. **Android 12 GB 设备可行域确认（已实测）**：最低档（Q2 主模型 + Qwen Q2 编码器）峰值 RSS **4.84 GiB**，12 GB 设备（可用 ~7–8 GB）舒适；8 GB 设备（可用 ~4–5 GB）仍差一步——下一步压缩方向是计算缓冲（更小分辨率）而非继续降权重量化（边际收益已<0.5 GB）。
 3. Metal 上生成耗时与权重带宽无关（激活主导），换量化不省时间——Android CPU 端预期不同（带宽敏感），R1 实测修正。
 
 ## 4. 对计划路线的影响
@@ -65,10 +69,10 @@ P0 时 GitHub API 403 未完成的事项，本次通过 release 页面核实：
 | --- | --- |
 | P2 | 一键安装可锚定 release tag `master-1057-5f8c19f`；Windows/Linux 用官方资产，**macOS 资产是 x86_64 陷阱**（自建或明示 Rosetta）；目录新增 Q2 variant + 质量标注；安装器镜像 llama.cpp 的 fetch→pickAsset→resume→extract→probe 流 |
 | P3 | tile 尺寸做成可解释档位（默认 256 安全档）；pin 上游新版本复测 Metal 解码性能（上游活跃改进中） |
-| R1 (Android) | Q2 档 + 5.3 GB 峰值使 12 GB 设备可行；NDK 自建 sd-cli 已确认为必经路径；真机内存/速度实测仍是准入条件 |
+| R1 (Android) | 最低档（Z2+QwenQ2）实测 4.84 GiB 峰值 → 12 GB 设备可行；8 GB 设备需再压计算缓冲（小分辨率优先于再降量化）；NDK 自建 sd-cli 已确认为必经路径；真机内存/速度实测仍是准入条件 |
 
 ## 5. 证据索引
 
-- 实验（本机 `~/myllama-media-p0/`）：`logs/tile512-monitor.log`、`logs/vid-tile512.log(-time.log)`、`outputs/p0-video-probe-tile512.webm`、`logs/img-q2k.log(-time.log)`、`outputs/p0-image-q2k.png`、`engine/sd-release/`（官方资产解包）、`logs/dl-q2.log`
+- 实验（本机 `~/myllama-media-p0/`）：`logs/tile512-monitor.log`、`logs/vid-tile512.log(-time.log)`、`outputs/p0-video-probe-tile512.webm`、`logs/tile384-monitor.log`、`logs/vid-tile384.log(-time.log)`、`outputs/p0-video-probe-tile384.webm`、`logs/img-q2k.log(-time.log)`、`outputs/p0-image-q2k.png`、`logs/img-q2k-low.log(-time.log)`、`outputs/p0-image-q2k-low.png`、`engine/sd-release/`（官方资产解包）、`logs/dl-q2.log`、`logs/dl-qwen-q2.log`
 - 对照基线：`docs/media-generation-p0-validation.md` §5/§6
 - 仓库内不留任何模型/二进制/大产物；Q2_K 权重在内置盘 `models-internal/`（外置盘已满），后续可清理
