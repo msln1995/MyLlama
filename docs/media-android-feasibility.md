@@ -38,11 +38,11 @@ P0 图片组合（Z-Image Turbo Q4_K 3.86 GB + Qwen3-4B Q4_K_M 2.50 GB + ae VAE 
 
 | 设备档位 | 可用 RAM（扣除系统） | 评估 |
 | --- | --- | --- |
-| 8 GB | ~4–5 GB | 不可行（权重即 6.7 GB） |
-| 12 GB | ~7–8 GB | 边缘：需降低缓冲（更小分辨率/步数）或更低量化文本编码器；必须真机实测 |
-| 16 GB+ | ~10 GB+ | 预计可运行（未验证） |
+| 8 GB | ~4–5 GB | 不可行（Q4 权重即 6.7 GB；Q2 档 5.3 GB 仍超） |
+| 12 GB | ~7–8 GB | **可行（Q2_K 档实测 -20% 内存后 5.31 GiB 峰值，见夜间研究 §3）**；Q4 档仍边缘 |
+| 16 GB+ | ~10 GB+ | 预计 Q4 档可运行（未验证） |
 
-压缩路径（按优先级）：主模型 Q2_K（2.59 GB，上游有现成量化，质量下降需目验）→ 文本编码器 Q2（Qwen3-4B 2bit 约 1.6 GB）→ 分辨率降至 512×512 级别。组合后权重可压至 ~4.5 GB，12 GB 设备可行域。以上均为推算，**未实测**。
+压缩路径实测/推算（2026-11-09 更新）：Z-Image Q2_K 已实测（速度持平、内存 -20%、质量降级可用，见 `docs/media-p0-night-research.md` §3）→ 组合后 ~5.3 GB 峰值进入 12 GB 设备可行域；Qwen 编码器 Q2（~1.6 GB）为下一级（未测）。以上仍需真机复测。
 
 视频：P0 实测采样期 RSS ~7 GB + VAE 不 tiled 内存悬崖 +7 GB / tiled 59.5 min——手机 CPU 后端两项都不可接受。**结论：视频不对 Android 开放**（与计划 §3.1 一致），除非未来出现大幅压缩的 VAE 路径。
 
@@ -70,8 +70,8 @@ P0 图片组合（Z-Image Turbo Q4_K 3.86 GB + Qwen3-4B Q4_K_M 2.50 GB + ae VAE 
 
 ## 8. 开放问题
 
-1. 上游是否发布 Android arm64 预编译 sd 资产（GitHub API rate limit 未确认；无则自建并纳入发布流程，含 16KB 对齐与 License 清单）。
-2. `mediaProcessing` 前台服务类型（API 35）与现有 `dataSync` 的迁移/兼容策略。
-3. Qwen3-4B Q2 量化 + Z-Image Q2_K 的质量目验（M2 上可先行，验证后作为 Android 参数分级的输入）。
+1. ~~上游是否发布 Android arm64 预编译 sd 资产~~ **已确认（2026-11-09 夜间研究，见 docs/media-p0-night-research.md §1）：release `master-1057-5f8c19f` 无 Android 资产**——NDK 自建 sd-cli 为必经路径（含 16KB 对齐与 License 清单）。
+2. `mediaProcessing` 前台服务类型（API 35）与现有 `dataSync` 的迁移/兼容策略。（未解）
+3. ~~Qwen3-4B Q2 量化 + Z-Image Q2_K 的质量目验~~ **已部分确认（夜间研究 §3）：Z-Image Q2_K 实测峰值 RSS 5.31 GiB（-20%）、速度持平、质量降级可用**——作为低内存档位成立；Qwen 编码器 Q2 仍未测（可再压 ~0.9 GB）。
 4. 孤儿引擎进程的跨重启清理（进程身份锚点可复用 `proctime_*` 的 processStartTime 思路，但 Android 无 /proc stat 读取限制问题——`procfile_android.go` 已有进程内读取通道）。
 5. 真机清单与最低开放线（建议首测：12 GB 旗舰一台 + 8 GB 中端一台各一，验证 §4 分级）。
