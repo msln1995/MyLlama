@@ -82,6 +82,14 @@ export function CancelDownloadTask(id: string): $CancellablePromise<void> {
 }
 
 /**
+ * CancelMediaJob cancels a queued/running job; cancellation completes only
+ * after the engine exit is confirmed.
+ */
+export function CancelMediaJob(jobID: string): $CancellablePromise<void> {
+    return $Call.ByID(3945688462, jobID);
+}
+
+/**
  * CheckForUpdate queries the remote repo latest release and returns whether a
  * new version exists along with version info.
  */
@@ -197,15 +205,42 @@ export function GetLoadedModels(): $CancellablePromise<$models.LoadedModel[]> {
     });
 }
 
+/**
+ * GetMediaHTTPStatus reports the local media service state.
+ */
+export function GetMediaHTTPStatus(): $CancellablePromise<$models.MediaHTTPStatus> {
+    return $Call.ByID(4229687489).then(($result: any) => {
+        return $$createType21($result);
+    });
+}
+
+/**
+ * GetMediaJobs returns all jobs (newest first) with their statuses.
+ */
+export function GetMediaJobs(): $CancellablePromise<$models.MediaJob[]> {
+    return $Call.ByID(1867295719).then(($result: any) => {
+        return $$createType23($result);
+    });
+}
+
+/**
+ * GetMediaRuntime reports the detected sd engine (path, version probe).
+ */
+export function GetMediaRuntime(): $CancellablePromise<$models.MediaRuntimeStatus> {
+    return $Call.ByID(1202968393).then(($result: any) => {
+        return $$createType24($result);
+    });
+}
+
 export function GetMemory(): $CancellablePromise<$models.MemoryInfo | null> {
     return $Call.ByID(1825090130).then(($result: any) => {
-        return $$createType22($result);
+        return $$createType26($result);
     });
 }
 
 export function GetModelConfig(modelID: string): $CancellablePromise<$models.ModelConfig> {
     return $Call.ByID(1343528888, modelID).then(($result: any) => {
-        return $$createType23($result);
+        return $$createType27($result);
     });
 }
 
@@ -224,7 +259,7 @@ export function GetModelDescription(modelID: string): $CancellablePromise<string
  */
 export function GetModelFiles(modelID: string): $CancellablePromise<$models.HFFileOut[]> {
     return $Call.ByID(3827624353, modelID).then(($result: any) => {
-        return $$createType25($result);
+        return $$createType29($result);
     });
 }
 
@@ -239,7 +274,7 @@ export function GetModelMaxFileSize(modelID: string): $CancellablePromise<number
 
 export function GetModels(): $CancellablePromise<$models.ModelInfo[]> {
     return $Call.ByID(68250215).then(($result: any) => {
-        return $$createType27($result);
+        return $$createType31($result);
     });
 }
 
@@ -250,13 +285,13 @@ export function GetModels(): $CancellablePromise<$models.ModelInfo[]> {
  */
 export function GetMonitorStatus(): $CancellablePromise<$models.MonitorStatus | null> {
     return $Call.ByID(1410600887).then(($result: any) => {
-        return $$createType29($result);
+        return $$createType33($result);
     });
 }
 
 export function GetOS(): $CancellablePromise<{ [_ in string]?: string }> {
     return $Call.ByID(1742051203).then(($result: any) => {
-        return $$createType30($result);
+        return $$createType34($result);
     });
 }
 
@@ -269,7 +304,7 @@ export function GetOS(): $CancellablePromise<{ [_ in string]?: string }> {
  */
 export function GetRemoteDoc(lang: string, sectionID: string, force: boolean): $CancellablePromise<$models.RemoteDocResult> {
     return $Call.ByID(3167960667, lang, sectionID, force).then(($result: any) => {
-        return $$createType31($result);
+        return $$createType35($result);
     });
 }
 
@@ -282,13 +317,13 @@ export function GetRemoteDoc(lang: string, sectionID: string, force: boolean): $
  */
 export function GetSafeArea(): $CancellablePromise<$models.SafeArea> {
     return $Call.ByID(2134401773).then(($result: any) => {
-        return $$createType32($result);
+        return $$createType36($result);
     });
 }
 
 export function GetServerConfig(): $CancellablePromise<$models.ServerConfig> {
     return $Call.ByID(923718408).then(($result: any) => {
-        return $$createType33($result);
+        return $$createType37($result);
     });
 }
 
@@ -301,7 +336,7 @@ export function GetServerConfig(): $CancellablePromise<$models.ServerConfig> {
  */
 export function GetServerLogsSince(since: number): $CancellablePromise<$models.ServerLogsPage> {
     return $Call.ByID(795529405, since).then(($result: any) => {
-        return $$createType34($result);
+        return $$createType38($result);
     });
 }
 
@@ -313,7 +348,7 @@ export function GetServerStatus(): $CancellablePromise<{ [_ in string]?: any }> 
 
 export function GetSystemInfo(): $CancellablePromise<$models.SystemInfo | null> {
     return $Call.ByID(3756917252).then(($result: any) => {
-        return $$createType36($result);
+        return $$createType40($result);
     });
 }
 
@@ -332,7 +367,28 @@ export function GetSystemTheme(): $CancellablePromise<string> {
  */
 export function GetUpdateDownloadStatus(): $CancellablePromise<$models.UpdateDownloadState | null> {
     return $Call.ByID(3051828874).then(($result: any) => {
-        return $$createType38($result);
+        return $$createType42($result);
+    });
+}
+
+/**
+ * ImportMediaComponents records an install whose components are external
+ * file references, verifying every file against its pinned identity first.
+ */
+export function ImportMediaComponents(modelID: string, variantID: string, pathByRole: { [_ in string]?: string }): $CancellablePromise<$models.MediaInstallRecord | null> {
+    return $Call.ByID(1371044170, modelID, variantID, pathByRole).then(($result: any) => {
+        return $$createType44($result);
+    });
+}
+
+/**
+ * InspectMediaImport hashes candidate files and reports which catalog
+ * components they match and which roles are still missing (plan §5.3 rule 4:
+ * file names are hints, never matches).
+ */
+export function InspectMediaImport(modelID: string, variantID: string, paths: string[]): $CancellablePromise<$models.MediaImportReport | null> {
+    return $Call.ByID(453313302, modelID, variantID, paths).then(($result: any) => {
+        return $$createType46($result);
     });
 }
 
@@ -346,6 +402,34 @@ export function InstallUpdate(): $CancellablePromise<void> {
     return $Call.ByID(1932284239);
 }
 
+/**
+ * ListMediaArtifacts returns the validated works registry, newest first.
+ */
+export function ListMediaArtifacts(): $CancellablePromise<$models.MediaArtifact[]> {
+    return $Call.ByID(2155703620).then(($result: any) => {
+        return $$createType48($result);
+    });
+}
+
+/**
+ * ListMediaInstalls returns all install records with live statuses.
+ */
+export function ListMediaInstalls(): $CancellablePromise<$models.MediaInstallsList | null> {
+    return $Call.ByID(3950258909).then(($result: any) => {
+        return $$createType50($result);
+    });
+}
+
+/**
+ * ListMediaModels returns the catalog models with per-variant live install
+ * statuses (the frontend derives display state from this).
+ */
+export function ListMediaModels(): $CancellablePromise<$models.mediaModelEntry[]> {
+    return $Call.ByID(1917486727).then(($result: any) => {
+        return $$createType52($result);
+    });
+}
+
 export function PauseDownloadTask(id: string): $CancellablePromise<void> {
     return $Call.ByID(612386522, id);
 }
@@ -356,8 +440,15 @@ export function PauseLlamaCppDownload(): $CancellablePromise<void> {
 
 export function RefreshModels(): $CancellablePromise<$models.ModelInfo[]> {
     return $Call.ByID(1283513860).then(($result: any) => {
-        return $$createType27($result);
+        return $$createType31($result);
     });
+}
+
+/**
+ * RemoveMediaInstall drops an install record; external files are untouched.
+ */
+export function RemoveMediaInstall(modelID: string, variantID: string): $CancellablePromise<void> {
+    return $Call.ByID(683317872, modelID, variantID);
 }
 
 /**
@@ -421,7 +512,7 @@ export function SaveServerConfig(cfg: $models.ServerConfig): $CancellablePromise
  */
 export function SearchDownloads(query: string, filter: string): $CancellablePromise<$models.HFSearchResult[]> {
     return $Call.ByID(3530747576, query, filter).then(($result: any) => {
-        return $$createType40($result);
+        return $$createType54($result);
     });
 }
 
@@ -474,6 +565,15 @@ export function SetLanguage(language: string): $CancellablePromise<string> {
  */
 export function SetLlamaCppDownloadDir(dir: string): $CancellablePromise<void> {
     return $Call.ByID(987292370, dir);
+}
+
+/**
+ * SetMediaEngineDir configures the sd engine directory (manual engine setup;
+ * empty string restores the managed media-runtime default). Takes effect on
+ * the next probe.
+ */
+export function SetMediaEngineDir(dir: string): $CancellablePromise<void> {
+    return $Call.ByID(3229036172, dir);
 }
 
 /**
@@ -547,6 +647,17 @@ export function StartLlamaCppDownload(): $CancellablePromise<void> {
     return $Call.ByID(1108336451);
 }
 
+/**
+ * StartMediaJob submits one generation job (idempotent by RequestID) into
+ * the serial queue shared with the local HTTP service. Returns immediately
+ * with the job snapshot; completion is polled via GetMediaJobs.
+ */
+export function StartMediaJob(req: $models.MediaJobStartRequest): $CancellablePromise<$models.MediaJob | null> {
+    return $Call.ByID(2131692570, req).then(($result: any) => {
+        return $$createType55($result);
+    });
+}
+
 export function StartServer(): $CancellablePromise<void> {
     return $Call.ByID(96158786);
 }
@@ -598,7 +709,7 @@ export function StopUpdateDownload(): $CancellablePromise<void> {
  */
 export function TuneModelConfig(modelID: string): $CancellablePromise<$models.ModelConfig> {
     return $Call.ByID(899609304, modelID).then(($result: any) => {
-        return $$createType23($result);
+        return $$createType27($result);
     });
 }
 
@@ -633,23 +744,38 @@ const $$createType17 = $models.DownloadState.createFrom;
 const $$createType18 = $Create.Nullable($$createType17);
 const $$createType19 = $models.LoadedModel.createFrom;
 const $$createType20 = $Create.Array($$createType19);
-const $$createType21 = $models.MemoryInfo.createFrom;
-const $$createType22 = $Create.Nullable($$createType21);
-const $$createType23 = $models.ModelConfig.createFrom;
-const $$createType24 = $models.HFFileOut.createFrom;
-const $$createType25 = $Create.Array($$createType24);
-const $$createType26 = $models.ModelInfo.createFrom;
-const $$createType27 = $Create.Array($$createType26);
-const $$createType28 = $models.MonitorStatus.createFrom;
-const $$createType29 = $Create.Nullable($$createType28);
-const $$createType30 = $Create.Map($Create.Any, $Create.Any);
-const $$createType31 = $models.RemoteDocResult.createFrom;
-const $$createType32 = $models.SafeArea.createFrom;
-const $$createType33 = $models.ServerConfig.createFrom;
-const $$createType34 = $models.ServerLogsPage.createFrom;
-const $$createType35 = $models.SystemInfo.createFrom;
-const $$createType36 = $Create.Nullable($$createType35);
-const $$createType37 = $models.UpdateDownloadState.createFrom;
-const $$createType38 = $Create.Nullable($$createType37);
-const $$createType39 = $models.HFSearchResult.createFrom;
-const $$createType40 = $Create.Array($$createType39);
+const $$createType21 = $models.MediaHTTPStatus.createFrom;
+const $$createType22 = $models.MediaJob.createFrom;
+const $$createType23 = $Create.Array($$createType22);
+const $$createType24 = $models.MediaRuntimeStatus.createFrom;
+const $$createType25 = $models.MemoryInfo.createFrom;
+const $$createType26 = $Create.Nullable($$createType25);
+const $$createType27 = $models.ModelConfig.createFrom;
+const $$createType28 = $models.HFFileOut.createFrom;
+const $$createType29 = $Create.Array($$createType28);
+const $$createType30 = $models.ModelInfo.createFrom;
+const $$createType31 = $Create.Array($$createType30);
+const $$createType32 = $models.MonitorStatus.createFrom;
+const $$createType33 = $Create.Nullable($$createType32);
+const $$createType34 = $Create.Map($Create.Any, $Create.Any);
+const $$createType35 = $models.RemoteDocResult.createFrom;
+const $$createType36 = $models.SafeArea.createFrom;
+const $$createType37 = $models.ServerConfig.createFrom;
+const $$createType38 = $models.ServerLogsPage.createFrom;
+const $$createType39 = $models.SystemInfo.createFrom;
+const $$createType40 = $Create.Nullable($$createType39);
+const $$createType41 = $models.UpdateDownloadState.createFrom;
+const $$createType42 = $Create.Nullable($$createType41);
+const $$createType43 = $models.MediaInstallRecord.createFrom;
+const $$createType44 = $Create.Nullable($$createType43);
+const $$createType45 = $models.MediaImportReport.createFrom;
+const $$createType46 = $Create.Nullable($$createType45);
+const $$createType47 = $models.MediaArtifact.createFrom;
+const $$createType48 = $Create.Array($$createType47);
+const $$createType49 = $models.MediaInstallsList.createFrom;
+const $$createType50 = $Create.Nullable($$createType49);
+const $$createType51 = $models.mediaModelEntry.createFrom;
+const $$createType52 = $Create.Array($$createType51);
+const $$createType53 = $models.HFSearchResult.createFrom;
+const $$createType54 = $Create.Array($$createType53);
+const $$createType55 = $Create.Nullable($$createType22);

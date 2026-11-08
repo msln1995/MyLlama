@@ -12,6 +12,7 @@ import type { MonitorStatus } from './lib/monitor'
 import type { ServerLogEntry } from './lib/serverLog'
 
 import * as bindings from '../bindings/github.com/CodeNeow/MyLlama/core/app'
+import * as mediaModels from '../bindings/github.com/CodeNeow/MyLlama/core/models'
 
 // The generated bindings are statically imported, so unlike the v2
 // window.go bridge there is no runtime availability probe: standalone
@@ -518,4 +519,97 @@ export interface RemoteDocResult {
 // rejects only for invalid arguments.
 export async function getRemoteDoc(lang: 'zh' | 'en', sectionId: string, force = false): Promise<RemoteDocResult> {
   return app().GetRemoteDoc(lang, sectionId, force)
+}
+
+// ─── Media Generation ────────────────────────────────────────────────────────
+
+// Media types re-exported from the generated bindings (single import point
+// for the media pages, same rule as the other domains).
+export type {
+  MediaRuntimeStatus,
+  mediaModelEntry,
+  MediaVariant,
+  MediaComponent,
+  MediaRunnerProfile,
+  MediaImportMatch,
+  MediaImportReport,
+  MediaInstallRecord,
+  MediaComponentSource,
+  MediaInstallsList,
+  MediaJob,
+  MediaJobParams,
+  MediaJobStartRequest,
+  MediaArtifact,
+  MediaHTTPStatus,
+} from '../bindings/github.com/CodeNeow/MyLlama/core/models'
+
+// getMediaRuntime reports the detected sd engine (path + version probe).
+export async function getMediaRuntime(): Promise<mediaModels.MediaRuntimeStatus> {
+  return app().GetMediaRuntime()
+}
+
+// listMediaModels returns catalog models with per-variant live install statuses.
+export async function listMediaModels(): Promise<mediaModels.mediaModelEntry[]> {
+  return (await app().ListMediaModels()) ?? []
+}
+
+// inspectMediaImport hashes candidate files against a variant's components
+// and reports matches plus missing roles (import first reports, never installs).
+export async function inspectMediaImport(
+  modelId: string,
+  variantId: string,
+  paths: string[],
+): Promise<mediaModels.MediaImportReport> {
+  return app().InspectMediaImport(modelId, variantId, paths)
+}
+
+// importMediaComponents records an install backed by external file references,
+// verifying every file against its pinned identity first.
+export async function importMediaComponents(
+  modelId: string,
+  variantId: string,
+  pathByRole: Record<string, string>,
+): Promise<mediaModels.MediaInstallRecord> {
+  return app().ImportMediaComponents(modelId, variantId, pathByRole)
+}
+
+// listMediaInstalls returns install records with live statuses.
+export async function listMediaInstalls(): Promise<mediaModels.MediaInstallsList> {
+  return (await app().ListMediaInstalls()) ?? { installs: [], statuses: [] }
+}
+
+// removeMediaInstall drops an install record (external files untouched).
+export async function removeMediaInstall(modelId: string, variantId: string): Promise<void> {
+  return app().RemoveMediaInstall(modelId, variantId)
+}
+
+// startMediaJob submits one generation job (idempotent by requestId); the
+// promise resolves with the queued job snapshot — completion is polled.
+export async function startMediaJob(req: mediaModels.MediaJobStartRequest): Promise<mediaModels.MediaJob | null> {
+  return app().StartMediaJob(req)
+}
+
+// getMediaJobs returns all jobs newest first with statuses.
+export async function getMediaJobs(): Promise<mediaModels.MediaJob[]> {
+  return (await app().GetMediaJobs()) ?? []
+}
+
+// cancelMediaJob cancels a queued/running job; terminal transition is confirmed.
+export async function cancelMediaJob(jobId: string): Promise<void> {
+  return app().CancelMediaJob(jobId)
+}
+
+// listMediaArtifacts returns the validated works registry, newest first.
+export async function listMediaArtifacts(): Promise<mediaModels.MediaArtifact[]> {
+  return (await app().ListMediaArtifacts()) ?? []
+}
+
+// getMediaHTTPStatus reports the local media service state.
+export async function getMediaHTTPStatus(): Promise<mediaModels.MediaHTTPStatus> {
+  return app().GetMediaHTTPStatus()
+}
+
+// setMediaEngineDir configures the sd engine directory (empty = managed default).
+export async function setMediaEngineDir(dir: string): Promise<void> {
+  return app().SetMediaEngineDir(dir)
 }

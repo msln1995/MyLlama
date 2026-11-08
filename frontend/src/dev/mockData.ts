@@ -657,6 +657,34 @@ applyScenario(scenario)
 
 // ─── Handler table (keyed by bare binding method name) ───────────────────────
 
+// ─── Media mock state (scenarios: media / mediafail / mediacancel) ──────────
+
+interface MockMediaJob {
+  id: string
+  requestId: string
+  modelId: string
+  variantId: string
+  params: { prompt: string; seed: number; width: number; height: number; steps: number; cfgScale: number; sampler: string; negativePrompt: string }
+  status: string
+  error: string
+  engineVersion: string
+  engineCommit: string
+  createdAt: string
+  startedAt: string
+  finishedAt: string
+  logTail: string[]
+  artifact: Record<string, unknown> | null
+}
+
+const mediaJobs: MockMediaJob[] = []
+const mediaWorks: Record<string, unknown>[] = []
+// Hang-mode advance hook (mediacancel): cancelled via the CancelMediaJob handler.
+let mediaAdvance: ((status: string, err?: string) => void) | null = null
+
+function isMediaTerminal(status: string): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'cancelled' || status === 'interrupted'
+}
+
 export const handlers: Record<string, (...args: any[]) => any> = {
   // ── Config ──
   GetConfig: () => ({ ...config }),
@@ -996,6 +1024,140 @@ export const handlers: Record<string, (...args: any[]) => any> = {
   SetModelsDir: (dir: string) => {
     if (!dir) throw new Error('empty directory')
     config.modelsDir = dir
+  },
+  // ── Media generation (P1: engine detection + job core; scenarios cover the
+  // required states — engine missing by default, ?sc=media happy path,
+  // ?sc=mediafail artifact failure, ?sc=mediacancel hang-until-cancelled) ──
+  GetMediaRuntime: () => {
+    if (scenario === 'media' || scenario === 'mediafail' || scenario === 'mediacancel') {
+      return { installed: true, engineDir: '/mock/media-runtime', enginePath: '/mock/media-runtime/sd-cli', version: 'unknown', commit: 'deadbeef17', backend: 'unknown' }
+    }
+    return { installed: false, engineDir: '/mock/media-runtime', enginePath: '/mock/media-runtime/sd-cli', version: '', commit: '', backend: 'unknown', error: 'sd engine not found (install or configure the engine directory)' }
+  },
+  ListMediaModels: () => {
+    const status = scenario === 'media' || scenario === 'mediafail' || scenario === 'mediacancel' ? 'ready' : 'not_installed'
+    return [
+      {
+        id: 'z-image-turbo', family: 'z-image', name: 'Z-Image Turbo',
+        developer: 'Tongyi Lab (Alibaba)', license: 'Apache-2.0; VAE under FLUX.1 license terms',
+        description: 'Distilled few-step text-to-image model.',
+        variants: [
+          {
+            id: 'q4-k', label: 'Q4_K',
+            components: [
+              { role: 'diffusion', repo: 'leejet/Z-Image-Turbo-GGUF', revision: 'c61c0e42', file: 'z_image_turbo-Q4_K.gguf', size: 3864250304, sha256: '14b375ab4f226bc5378f68f37e899ef3c2242b8541e61e2bc1aff40976086fbd', format: 'gguf' },
+              { role: 'text_encoder', repo: 'unsloth/Qwen3-4B-Instruct-2507-GGUF', revision: 'a06e946b', file: 'Qwen3-4B-Instruct-2507-Q4_K_M.gguf', size: 2497281120, sha256: '3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597', format: 'gguf' },
+              { role: 'vae', repo: 'Comfy-Org/Z-Image-Turbo', revision: '6fc90a3b', file: 'split_files/vae/ae.safetensors', size: 335304388, sha256: 'afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38', format: 'safetensors' },
+            ],
+            profile: { family: 'z-image-turbo', kind: 'image', cfgScale: 1.0, steps: 8, sampler: 'euler', minSize: 256, maxSize: 1024, sizeMultiple: 16 },
+          },
+        ],
+        variantStatus: { 'q4-k': status },
+      },
+    ]
+  },
+  InspectMediaImport: () => ({
+    matches: [
+      { path: '/mock/src/diffusion.bin', size: 3864250304, sha256: '14b375ab4f226bc5378f68f37e899ef3c2242b8541e61e2bc1aff40976086fbd', fileName: 'z_image_turbo-Q4_K.gguf', matched: { role: 'diffusion', repo: 'leejet/Z-Image-Turbo-GGUF', revision: 'c61c0e42', file: 'z_image_turbo-Q4_K.gguf', size: 3864250304, sha256: '14b375ab4f226bc5378f68f37e899ef3c2242b8541e61e2bc1aff40976086fbd', format: 'gguf' } },
+      { path: '/mock/src/other.bin', size: 123, sha256: 'ff'.repeat(32), fileName: 'other.bin', hint: 'no catalog component matches this content; unknown files are not auto-installed' },
+    ],
+    missing: ['text_encoder', 'vae'],
+  }),
+  ImportMediaComponents: (modelID: string, variantID: string, pathByRole: Record<string, string>) => {
+    if (Object.keys(pathByRole).length !== 3) throw new Error('import needs one path per role (3), got ' + Object.keys(pathByRole).length)
+    return { modelId: modelID, variantId: variantID, components: Object.entries(pathByRole).map(([role, path]) => ({ role, identity: 'mock@rev:' + role, kind: 'external', path, size: 1, sha256: 'ff'.repeat(32) })) }
+  },
+  ListMediaInstalls: () => {
+    const ready = scenario === 'media' || scenario === 'mediafail' || scenario === 'mediacancel'
+    return {
+      installs: ready
+        ? [{ modelId: 'z-image-turbo', variantId: 'q4-k', components: [] }]
+        : [],
+      statuses: ready ? ['ready'] : [],
+    }
+  },
+  RemoveMediaInstall: (modelID: string, variantID: string) => {
+    if (modelID !== 'z-image-turbo' || variantID !== 'q4-k') throw new Error('no install record for ' + modelID + '/' + variantID)
+  },
+  StartMediaJob: (req: { requestId?: string; modelId: string; variantId: string; params: { prompt?: string; seed?: number; width?: number; height?: number; steps?: number; cfgScale?: number } }) => {
+    if (!req.modelId || !req.variantId) throw new Error('modelId and variantId are required')
+    if (!req.params || !req.params.prompt || !req.params.prompt.trim()) throw new Error('invalid job parameters: prompt is required')
+    if (scenario !== 'media' && scenario !== 'mediafail' && scenario !== 'mediacancel') {
+      throw new Error('sd engine not installed')
+    }
+    // One job at a time in the mock: a queued/running job makes a second
+    // submit wait (the real backend queues; the mock reflects the gate).
+    if (mediaJobs.some((j) => !isMediaTerminal(j.status))) {
+      throw new Error('a media job is already active in the mock preview')
+    }
+    const job = {
+      id: 'job-' + Math.random().toString(16).slice(2, 10),
+      requestId: req.requestId ?? '',
+      modelId: req.modelId,
+      variantId: req.variantId,
+      params: { prompt: req.params.prompt, seed: req.params.seed ?? 42, width: req.params.width ?? 512, height: req.params.height ?? 512, steps: req.params.steps ?? 8, cfgScale: req.params.cfgScale ?? 1.0, sampler: 'euler', negativePrompt: '' },
+      status: 'queued',
+      error: '',
+      engineVersion: 'unknown',
+      engineCommit: 'deadbeef17',
+      createdAt: new Date().toISOString(),
+      startedAt: '',
+      finishedAt: '',
+      logTail: ['[mock] engine started'],
+      artifact: null as { id: string; jobId: string; type: string; path: string; size: number; sha256: string; width: number; height: number; createdAt: string; params: unknown } | null,
+    }
+    mediaJobs.unshift(job)
+    const advance = (status: string, err = '') => {
+      job.status = status
+      job.error = err
+      if (status === 'succeeded' || status === 'failed' || status === 'cancelled') job.finishedAt = new Date().toISOString()
+    }
+    setTimeout(() => advance('preparing'), 300)
+    setTimeout(() => advance('running'), 700)
+    if (scenario === 'mediafail') {
+      setTimeout(() => advance('failed', 'artifact validation failed: output file missing'), 1600)
+    } else if (scenario === 'mediacancel') {
+      // Hangs in running until cancelled; the cancel handler resolves it.
+      mediaAdvance = advance
+    } else {
+      setTimeout(() => {
+        job.artifact = {
+          id: 'art-' + job.id, jobId: job.id, type: 'image',
+          path: '/mock/Media-Outputs/job-' + job.id + '/output.png',
+          size: 964_001, sha256: 'aa'.repeat(32), width: job.params.width, height: job.params.height,
+          createdAt: new Date().toISOString(), params: job.params,
+        }
+        mediaWorks.unshift(job.artifact)
+        advance('succeeded')
+      }, 1800)
+    }
+    return JSON.parse(JSON.stringify(job))
+  },
+  GetMediaJobs: () => JSON.parse(JSON.stringify(mediaJobs)),
+  CancelMediaJob: (jobID: string) => {
+    const job = mediaJobs.find((j) => j.id === jobID)
+    if (!job) throw new Error('media job "' + jobID + '" not found')
+    if (isMediaTerminal(job.status)) throw new Error('job ' + jobID + ' already finished (' + job.status + ')')
+    if (job.status === 'queued') {
+      job.status = 'cancelled'
+      job.error = 'cancelled while queued'
+      job.finishedAt = new Date().toISOString()
+      return
+    }
+    job.status = 'cancelling'
+    setTimeout(() => {
+      job.status = 'cancelled'
+      job.error = 'cancelled by user'
+      job.finishedAt = new Date().toISOString()
+      mediaAdvance = null
+    }, 600)
+  },
+  ListMediaArtifacts: () => JSON.parse(JSON.stringify(mediaWorks)),
+  GetMediaHTTPStatus: () => ({ running: true, addr: '127.0.0.1:1901', state: 'running' }),
+  SetMediaEngineDir: (dir: string) => {
+    // Any non-empty dir registers as "configured" in the mock; the scenario
+    // flags above decide what GetMediaRuntime reports.
+    void dir
   },
 }
 

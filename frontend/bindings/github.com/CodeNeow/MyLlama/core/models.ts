@@ -514,6 +514,741 @@ export class LoadedModel {
     }
 }
 
+/**
+ * MediaArtifact is a validated generated work.
+ */
+export class MediaArtifact {
+    "id": string;
+    "jobId": string;
+
+    /**
+     * "image" (P1); "video" later
+     */
+    "type": string;
+
+    /**
+     * absolute, machine-local (paths are machine-local state)
+     */
+    "path": string;
+    "size": number;
+    "sha256": string;
+    "width": number;
+    "height": number;
+    "createdAt": string;
+
+    /**
+     * parameter provenance (plan §5.6)
+     */
+    "params": MediaJobParams;
+
+    /** Creates a new MediaArtifact instance. */
+    constructor($$source: Partial<MediaArtifact> = {}) {
+        if (!("id" in $$source)) {
+            this["id"] = "";
+        }
+        if (!("jobId" in $$source)) {
+            this["jobId"] = "";
+        }
+        if (!("type" in $$source)) {
+            this["type"] = "";
+        }
+        if (!("path" in $$source)) {
+            this["path"] = "";
+        }
+        if (!("size" in $$source)) {
+            this["size"] = 0;
+        }
+        if (!("sha256" in $$source)) {
+            this["sha256"] = "";
+        }
+        if (!("width" in $$source)) {
+            this["width"] = 0;
+        }
+        if (!("height" in $$source)) {
+            this["height"] = 0;
+        }
+        if (!("createdAt" in $$source)) {
+            this["createdAt"] = "0001-01-01T00:00:00.000Z";
+        }
+        if (!("params" in $$source)) {
+            this["params"] = (new MediaJobParams());
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaArtifact instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaArtifact {
+        const $$createField9_0 = $$createType3;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("params" in $$parsedSource) {
+            $$parsedSource["params"] = $$createField9_0($$parsedSource["params"]);
+        }
+        return new MediaArtifact($$parsedSource as Partial<MediaArtifact>);
+    }
+}
+
+/**
+ * MediaComponent pins the identity of one downloadable weight file: where it
+ * came from (Repo@Revision), what it is called there, its exact size and
+ * content hash. Two components with the same Repo+Revision+File are the same
+ * asset and must not be downloaded twice (dedupe rule, plan §5.3).
+ */
+export class MediaComponent {
+    /**
+     * one of the MediaRole* constants
+     */
+    "role": string;
+
+    /**
+     * source repo id, e.g. "leejet/Z-Image-Turbo-GGUF"
+     */
+    "repo": string;
+
+    /**
+     * pinned commit/ref of Repo
+     */
+    "revision": string;
+
+    /**
+     * file name (or repo-relative path) within Repo@Revision
+     */
+    "file": string;
+
+    /**
+     * exact byte size; 0 means "unknown yet" (shown as such)
+     */
+    "size": number;
+
+    /**
+     * lowercase hex; empty means "unknown yet" (blocks readiness)
+     */
+    "sha256": string;
+
+    /**
+     * gguf / safetensors (informational + import hint)
+     */
+    "format": string;
+
+    /** Creates a new MediaComponent instance. */
+    constructor($$source: Partial<MediaComponent> = {}) {
+        if (!("role" in $$source)) {
+            this["role"] = "";
+        }
+        if (!("repo" in $$source)) {
+            this["repo"] = "";
+        }
+        if (!("revision" in $$source)) {
+            this["revision"] = "";
+        }
+        if (!("file" in $$source)) {
+            this["file"] = "";
+        }
+        if (!("size" in $$source)) {
+            this["size"] = 0;
+        }
+        if (!("sha256" in $$source)) {
+            this["sha256"] = "";
+        }
+        if (!("format" in $$source)) {
+            this["format"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaComponent instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaComponent {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new MediaComponent($$parsedSource as Partial<MediaComponent>);
+    }
+}
+
+/**
+ * MediaComponentSource records one resolved component of an installed
+ * variant: which catalog asset it stands for and where the bytes live.
+ */
+export class MediaComponentSource {
+    "role": string;
+
+    /**
+     * Repo@Revision:File dedupe key
+     */
+    "identity": string;
+
+    /**
+     * "external" | "managed"
+     */
+    "kind": string;
+
+    /**
+     * absolute local path
+     */
+    "path": string;
+    "size": number;
+    "sha256": string;
+
+    /** Creates a new MediaComponentSource instance. */
+    constructor($$source: Partial<MediaComponentSource> = {}) {
+        if (!("role" in $$source)) {
+            this["role"] = "";
+        }
+        if (!("identity" in $$source)) {
+            this["identity"] = "";
+        }
+        if (!("kind" in $$source)) {
+            this["kind"] = "";
+        }
+        if (!("path" in $$source)) {
+            this["path"] = "";
+        }
+        if (!("size" in $$source)) {
+            this["size"] = 0;
+        }
+        if (!("sha256" in $$source)) {
+            this["sha256"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaComponentSource instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaComponentSource {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new MediaComponentSource($$parsedSource as Partial<MediaComponentSource>);
+    }
+}
+
+/**
+ * MediaHTTPStatus reports the service state for diagnostics/bindings.
+ */
+export class MediaHTTPStatus {
+    "running": boolean;
+    "addr": string;
+    "state": string;
+    "error"?: string;
+
+    /** Creates a new MediaHTTPStatus instance. */
+    constructor($$source: Partial<MediaHTTPStatus> = {}) {
+        if (!("running" in $$source)) {
+            this["running"] = false;
+        }
+        if (!("addr" in $$source)) {
+            this["addr"] = "";
+        }
+        if (!("state" in $$source)) {
+            this["state"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaHTTPStatus instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaHTTPStatus {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new MediaHTTPStatus($$parsedSource as Partial<MediaHTTPStatus>);
+    }
+}
+
+/**
+ * MediaImportMatch is the per-file result of an import inspection (plan §5.3:
+ * import first reports identification, reusable files, missing pieces — it
+ * never silently installs by file name).
+ */
+export class MediaImportMatch {
+    "path": string;
+    "size": number;
+    "sha256": string;
+
+    /**
+     * catalog component with identical content identity, if any
+     */
+    "matched"?: MediaComponent | null;
+    "fileName": string;
+
+    /**
+     * candidate hint from the file name when no content match exists
+     */
+    "hint"?: string;
+
+    /** Creates a new MediaImportMatch instance. */
+    constructor($$source: Partial<MediaImportMatch> = {}) {
+        if (!("path" in $$source)) {
+            this["path"] = "";
+        }
+        if (!("size" in $$source)) {
+            this["size"] = 0;
+        }
+        if (!("sha256" in $$source)) {
+            this["sha256"] = "";
+        }
+        if (!("fileName" in $$source)) {
+            this["fileName"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaImportMatch instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaImportMatch {
+        const $$createField3_0 = $$createType5;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("matched" in $$parsedSource) {
+            $$parsedSource["matched"] = $$createField3_0($$parsedSource["matched"]);
+        }
+        return new MediaImportMatch($$parsedSource as Partial<MediaImportMatch>);
+    }
+}
+
+/**
+ * MediaImportReport is the import inspection result: content-identity matches
+ * per file plus the roles still missing for a full variant (plan §5.3:
+ * import first reports, never silently installs).
+ */
+export class MediaImportReport {
+    "matches": MediaImportMatch[];
+    "missing": string[];
+
+    /** Creates a new MediaImportReport instance. */
+    constructor($$source: Partial<MediaImportReport> = {}) {
+        if (!("matches" in $$source)) {
+            this["matches"] = [];
+        }
+        if (!("missing" in $$source)) {
+            this["missing"] = [];
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaImportReport instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaImportReport {
+        const $$createField0_0 = $$createType7;
+        const $$createField1_0 = $$createType0;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("matches" in $$parsedSource) {
+            $$parsedSource["matches"] = $$createField0_0($$parsedSource["matches"]);
+        }
+        if ("missing" in $$parsedSource) {
+            $$parsedSource["missing"] = $$createField1_0($$parsedSource["missing"]);
+        }
+        return new MediaImportReport($$parsedSource as Partial<MediaImportReport>);
+    }
+}
+
+/**
+ * MediaInstallRecord is one installed (model, variant) with resolved
+ * component sources. External references coexist with managed copies; the
+ * record never implies ownership of external files.
+ */
+export class MediaInstallRecord {
+    "modelId": string;
+    "variantId": string;
+    "components": MediaComponentSource[];
+
+    /** Creates a new MediaInstallRecord instance. */
+    constructor($$source: Partial<MediaInstallRecord> = {}) {
+        if (!("modelId" in $$source)) {
+            this["modelId"] = "";
+        }
+        if (!("variantId" in $$source)) {
+            this["variantId"] = "";
+        }
+        if (!("components" in $$source)) {
+            this["components"] = [];
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaInstallRecord instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaInstallRecord {
+        const $$createField2_0 = $$createType9;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("components" in $$parsedSource) {
+            $$parsedSource["components"] = $$createField2_0($$parsedSource["components"]);
+        }
+        return new MediaInstallRecord($$parsedSource as Partial<MediaInstallRecord>);
+    }
+}
+
+/**
+ * MediaInstallsList wraps install records with their live statuses.
+ */
+export class MediaInstallsList {
+    "installs": MediaInstallRecord[];
+    "statuses": string[];
+
+    /** Creates a new MediaInstallsList instance. */
+    constructor($$source: Partial<MediaInstallsList> = {}) {
+        if (!("installs" in $$source)) {
+            this["installs"] = [];
+        }
+        if (!("statuses" in $$source)) {
+            this["statuses"] = [];
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaInstallsList instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaInstallsList {
+        const $$createField0_0 = $$createType11;
+        const $$createField1_0 = $$createType0;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("installs" in $$parsedSource) {
+            $$parsedSource["installs"] = $$createField0_0($$parsedSource["installs"]);
+        }
+        if ("statuses" in $$parsedSource) {
+            $$parsedSource["statuses"] = $$createField1_0($$parsedSource["statuses"]);
+        }
+        return new MediaInstallsList($$parsedSource as Partial<MediaInstallsList>);
+    }
+}
+
+/**
+ * MediaJob is one generation task. Persisted fields only — logs are capped
+ * tails, no ephemeral handles.
+ */
+export class MediaJob {
+    "id": string;
+    "requestId"?: string;
+    "modelId": string;
+    "variantId": string;
+    "params": MediaJobParams;
+    "status": string;
+    "error"?: string;
+    "engineVersion"?: string;
+    "engineCommit"?: string;
+    "createdAt": string;
+    "startedAt"?: string;
+    "finishedAt"?: string;
+    "logTail"?: string[];
+    "artifact"?: MediaArtifact | null;
+
+    /** Creates a new MediaJob instance. */
+    constructor($$source: Partial<MediaJob> = {}) {
+        if (!("id" in $$source)) {
+            this["id"] = "";
+        }
+        if (!("modelId" in $$source)) {
+            this["modelId"] = "";
+        }
+        if (!("variantId" in $$source)) {
+            this["variantId"] = "";
+        }
+        if (!("params" in $$source)) {
+            this["params"] = (new MediaJobParams());
+        }
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+        if (!("createdAt" in $$source)) {
+            this["createdAt"] = "0001-01-01T00:00:00.000Z";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaJob instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaJob {
+        const $$createField4_0 = $$createType3;
+        const $$createField12_0 = $$createType0;
+        const $$createField13_0 = $$createType13;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("params" in $$parsedSource) {
+            $$parsedSource["params"] = $$createField4_0($$parsedSource["params"]);
+        }
+        if ("logTail" in $$parsedSource) {
+            $$parsedSource["logTail"] = $$createField12_0($$parsedSource["logTail"]);
+        }
+        if ("artifact" in $$parsedSource) {
+            $$parsedSource["artifact"] = $$createField13_0($$parsedSource["artifact"]);
+        }
+        return new MediaJob($$parsedSource as Partial<MediaJob>);
+    }
+}
+
+/**
+ * MediaJobParams is the user-visible generation request for an image job.
+ * Every field is validated against the variant's profile before a process is
+ * started (plan §5.2: 模型族约束在后端校验，不能只依赖控件范围).
+ */
+export class MediaJobParams {
+    "prompt": string;
+    "negativePrompt"?: string;
+    "seed": number;
+    "width": number;
+    "height": number;
+    "steps": number;
+    "cfgScale": number;
+    "sampler"?: string;
+
+    /** Creates a new MediaJobParams instance. */
+    constructor($$source: Partial<MediaJobParams> = {}) {
+        if (!("prompt" in $$source)) {
+            this["prompt"] = "";
+        }
+        if (!("seed" in $$source)) {
+            this["seed"] = 0;
+        }
+        if (!("width" in $$source)) {
+            this["width"] = 0;
+        }
+        if (!("height" in $$source)) {
+            this["height"] = 0;
+        }
+        if (!("steps" in $$source)) {
+            this["steps"] = 0;
+        }
+        if (!("cfgScale" in $$source)) {
+            this["cfgScale"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaJobParams instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaJobParams {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new MediaJobParams($$parsedSource as Partial<MediaJobParams>);
+    }
+}
+
+/**
+ * MediaJobStartRequest is the submission payload (GUI binding + HTTP share
+ * it). RequestID enables idempotent retries.
+ */
+export class MediaJobStartRequest {
+    "requestId": string;
+    "modelId": string;
+    "variantId": string;
+    "params": MediaJobParams;
+
+    /** Creates a new MediaJobStartRequest instance. */
+    constructor($$source: Partial<MediaJobStartRequest> = {}) {
+        if (!("requestId" in $$source)) {
+            this["requestId"] = "";
+        }
+        if (!("modelId" in $$source)) {
+            this["modelId"] = "";
+        }
+        if (!("variantId" in $$source)) {
+            this["variantId"] = "";
+        }
+        if (!("params" in $$source)) {
+            this["params"] = (new MediaJobParams());
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaJobStartRequest instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaJobStartRequest {
+        const $$createField3_0 = $$createType3;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("params" in $$parsedSource) {
+            $$parsedSource["params"] = $$createField3_0($$parsedSource["params"]);
+        }
+        return new MediaJobStartRequest($$parsedSource as Partial<MediaJobStartRequest>);
+    }
+}
+
+/**
+ * MediaRunnerProfile describes how a runner turns a variant plus a validated
+ * job request into an engine command. P1 ships the fixed image profile; the
+ * field stays extensible for video profiles later.
+ */
+export class MediaRunnerProfile {
+    /**
+     * Family names the engine wiring, e.g. "z-image-turbo". The runner
+     * dispatches on it; unknown families fail closed.
+     */
+    "family": string;
+
+    /**
+     * Kind is the capability the profile implements: "image" (P1) or
+     * "video" (later; rejected while unverified, plan §7 P1).
+     */
+    "kind": string;
+
+    /**
+     * Defaults are profile-level generation defaults (cfg scale, steps,
+     * sampling method) the job request may override within validated ranges.
+     */
+    "cfgScale": number;
+    "steps": number;
+    "sampler": string;
+
+    /**
+     * inclusive W/H bounds for the request
+     */
+    "minSize": number;
+    "maxSize": number;
+
+    /**
+     * W/H must be a multiple of this (latent alignment)
+     */
+    "sizeMultiple": number;
+
+    /** Creates a new MediaRunnerProfile instance. */
+    constructor($$source: Partial<MediaRunnerProfile> = {}) {
+        if (!("family" in $$source)) {
+            this["family"] = "";
+        }
+        if (!("kind" in $$source)) {
+            this["kind"] = "";
+        }
+        if (!("cfgScale" in $$source)) {
+            this["cfgScale"] = 0;
+        }
+        if (!("steps" in $$source)) {
+            this["steps"] = 0;
+        }
+        if (!("sampler" in $$source)) {
+            this["sampler"] = "";
+        }
+        if (!("minSize" in $$source)) {
+            this["minSize"] = 0;
+        }
+        if (!("maxSize" in $$source)) {
+            this["maxSize"] = 0;
+        }
+        if (!("sizeMultiple" in $$source)) {
+            this["sizeMultiple"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaRunnerProfile instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaRunnerProfile {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new MediaRunnerProfile($$parsedSource as Partial<MediaRunnerProfile>);
+    }
+}
+
+/**
+ * MediaRuntimeStatus describes the detected sd engine. Backend is reported
+ * only when it can be stated honestly: "unknown" until a real probe says
+ * otherwise (plan §4.2: unknown is never treated as zero or "enough").
+ */
+export class MediaRuntimeStatus {
+    "installed": boolean;
+    "engineDir": string;
+    "enginePath": string;
+    "version": string;
+    "commit": string;
+
+    /**
+     * best-effort: "unknown" when not detectable from --version
+     */
+    "backend": string;
+    "error"?: string;
+
+    /** Creates a new MediaRuntimeStatus instance. */
+    constructor($$source: Partial<MediaRuntimeStatus> = {}) {
+        if (!("installed" in $$source)) {
+            this["installed"] = false;
+        }
+        if (!("engineDir" in $$source)) {
+            this["engineDir"] = "";
+        }
+        if (!("enginePath" in $$source)) {
+            this["enginePath"] = "";
+        }
+        if (!("version" in $$source)) {
+            this["version"] = "";
+        }
+        if (!("commit" in $$source)) {
+            this["commit"] = "";
+        }
+        if (!("backend" in $$source)) {
+            this["backend"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaRuntimeStatus instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaRuntimeStatus {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new MediaRuntimeStatus($$parsedSource as Partial<MediaRuntimeStatus>);
+    }
+}
+
+/**
+ * MediaVariant is one concrete, installable flavor of a model: a quantization
+ * choice with its exact component set. The Label may name the main model's
+ * quant but component precision is per-component (plan §2.1 risk 5).
+ */
+export class MediaVariant {
+    "id": string;
+    "label": string;
+    "components": MediaComponent[];
+    "profile": MediaRunnerProfile;
+
+    /** Creates a new MediaVariant instance. */
+    constructor($$source: Partial<MediaVariant> = {}) {
+        if (!("id" in $$source)) {
+            this["id"] = "";
+        }
+        if (!("label" in $$source)) {
+            this["label"] = "";
+        }
+        if (!("components" in $$source)) {
+            this["components"] = [];
+        }
+        if (!("profile" in $$source)) {
+            this["profile"] = (new MediaRunnerProfile());
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MediaVariant instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MediaVariant {
+        const $$createField2_0 = $$createType14;
+        const $$createField3_0 = $$createType15;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("components" in $$parsedSource) {
+            $$parsedSource["components"] = $$createField2_0($$parsedSource["components"]);
+        }
+        if ("profile" in $$parsedSource) {
+            $$parsedSource["profile"] = $$createField3_0($$parsedSource["profile"]);
+        }
+        return new MediaVariant($$parsedSource as Partial<MediaVariant>);
+    }
+}
+
 export class MemoryInfo {
     "totalGb": number;
     "freeGb": number;
@@ -994,8 +1729,8 @@ export class MonitorStatus {
      * Creates a new MonitorStatus instance from a string or object.
      */
     static createFrom($$source: any = {}): MonitorStatus {
-        const $$createField3_0 = $$createType4;
-        const $$createField8_0 = $$createType6;
+        const $$createField3_0 = $$createType17;
+        const $$createField8_0 = $$createType19;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("gpus" in $$parsedSource) {
             $$parsedSource["gpus"] = $$createField3_0($$parsedSource["gpus"]);
@@ -1263,7 +1998,7 @@ export class ServerLogsPage {
      * Creates a new ServerLogsPage instance from a string or object.
      */
     static createFrom($$source: any = {}): ServerLogsPage {
-        const $$createField0_0 = $$createType8;
+        const $$createField0_0 = $$createType21;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("entries" in $$parsedSource) {
             $$parsedSource["entries"] = $$createField0_0($$parsedSource["entries"]);
@@ -1313,12 +2048,12 @@ export class SystemInfo {
      * Creates a new SystemInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): SystemInfo {
-        const $$createField2_0 = $$createType9;
-        const $$createField3_0 = $$createType10;
-        const $$createField4_0 = $$createType12;
-        const $$createField5_0 = $$createType13;
-        const $$createField6_0 = $$createType14;
-        const $$createField7_0 = $$createType6;
+        const $$createField2_0 = $$createType22;
+        const $$createField3_0 = $$createType23;
+        const $$createField4_0 = $$createType25;
+        const $$createField5_0 = $$createType26;
+        const $$createField6_0 = $$createType27;
+        const $$createField7_0 = $$createType19;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("cpu" in $$parsedSource) {
             $$parsedSource["cpu"] = $$createField2_0($$parsedSource["cpu"]);
@@ -1460,19 +2195,99 @@ export class UpdateDownloadState {
     }
 }
 
+/**
+ * mediaModelEntry is one catalog model plus its install statuses.
+ */
+export class mediaModelEntry {
+    "id": string;
+    "family": string;
+    "name": string;
+    "developer": string;
+    "license": string;
+
+    /**
+     * reviewed bilingual-free neutral copy (zh/en rendered by i18n keys elsewhere)
+     */
+    "description": string;
+    "variants": MediaVariant[];
+    "variantStatus": { [_ in string]?: string };
+
+    /** Creates a new mediaModelEntry instance. */
+    constructor($$source: Partial<mediaModelEntry> = {}) {
+        if (!("id" in $$source)) {
+            this["id"] = "";
+        }
+        if (!("family" in $$source)) {
+            this["family"] = "";
+        }
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("developer" in $$source)) {
+            this["developer"] = "";
+        }
+        if (!("license" in $$source)) {
+            this["license"] = "";
+        }
+        if (!("description" in $$source)) {
+            this["description"] = "";
+        }
+        if (!("variants" in $$source)) {
+            this["variants"] = [];
+        }
+        if (!("variantStatus" in $$source)) {
+            this["variantStatus"] = {};
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new mediaModelEntry instance from a string or object.
+     */
+    static createFrom($$source: any = {}): mediaModelEntry {
+        const $$createField6_0 = $$createType29;
+        const $$createField7_0 = $$createType30;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("variants" in $$parsedSource) {
+            $$parsedSource["variants"] = $$createField6_0($$parsedSource["variants"]);
+        }
+        if ("variantStatus" in $$parsedSource) {
+            $$parsedSource["variantStatus"] = $$createField7_0($$parsedSource["variantStatus"]);
+        }
+        return new mediaModelEntry($$parsedSource as Partial<mediaModelEntry>);
+    }
+}
+
 // Private type creation functions
 const $$createType0 = $Create.Array($Create.Any);
 const $$createType1 = HFFile.createFrom;
 const $$createType2 = $Create.Array($$createType1);
-const $$createType3 = MonitorGPU.createFrom;
-const $$createType4 = $Create.Array($$createType3);
-const $$createType5 = DiskUsage.createFrom;
-const $$createType6 = $Create.Nullable($$createType5);
-const $$createType7 = ServerLogEntry.createFrom;
-const $$createType8 = $Create.Array($$createType7);
-const $$createType9 = CPUInfo.createFrom;
-const $$createType10 = MemoryInfo.createFrom;
-const $$createType11 = GPUInfo.createFrom;
-const $$createType12 = $Create.Array($$createType11);
-const $$createType13 = CUDAInfo.createFrom;
-const $$createType14 = LlamaCppInfo.createFrom;
+const $$createType3 = MediaJobParams.createFrom;
+const $$createType4 = MediaComponent.createFrom;
+const $$createType5 = $Create.Nullable($$createType4);
+const $$createType6 = MediaImportMatch.createFrom;
+const $$createType7 = $Create.Array($$createType6);
+const $$createType8 = MediaComponentSource.createFrom;
+const $$createType9 = $Create.Array($$createType8);
+const $$createType10 = MediaInstallRecord.createFrom;
+const $$createType11 = $Create.Array($$createType10);
+const $$createType12 = MediaArtifact.createFrom;
+const $$createType13 = $Create.Nullable($$createType12);
+const $$createType14 = $Create.Array($$createType4);
+const $$createType15 = MediaRunnerProfile.createFrom;
+const $$createType16 = MonitorGPU.createFrom;
+const $$createType17 = $Create.Array($$createType16);
+const $$createType18 = DiskUsage.createFrom;
+const $$createType19 = $Create.Nullable($$createType18);
+const $$createType20 = ServerLogEntry.createFrom;
+const $$createType21 = $Create.Array($$createType20);
+const $$createType22 = CPUInfo.createFrom;
+const $$createType23 = MemoryInfo.createFrom;
+const $$createType24 = GPUInfo.createFrom;
+const $$createType25 = $Create.Array($$createType24);
+const $$createType26 = CUDAInfo.createFrom;
+const $$createType27 = LlamaCppInfo.createFrom;
+const $$createType28 = MediaVariant.createFrom;
+const $$createType29 = $Create.Array($$createType28);
+const $$createType30 = $Create.Map($Create.Any, $Create.Any);

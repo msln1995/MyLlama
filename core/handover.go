@@ -342,6 +342,9 @@ func adoptHandover(pid, port int, logPath string, start handoverStartCheck) {
 	serverStartTime = time.Now()
 	serverTrueStart = trueStart
 	serverMu.Unlock()
+	// The adopted llama-server is live: the media gate blocks from here (plan
+	// §5.5 covers process adoption).
+	ArbiterLLamaUp()
 	if start.Verified {
 		log.Printf("[OK] Adopted llama-server pid=%d port=%d (start time verified)", pid, port)
 	} else {

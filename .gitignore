@@ -40,6 +40,15 @@ myllama-config.json
 myllama-server-handover.json
 myllama-benchcache.json
 myllama-docscache/
+
+# Media generation runtime state and content directories (cwd-relative on
+# Windows, app-data on other platforms — never committed either way).
+myllama-media-jobs.json
+myllama-media-works.json
+myllama-media-installs.json
+media-runtime/
+Media-Models/
+Media-Outputs/
 .codegraph
 .zcode/plans/
 .mimosa/

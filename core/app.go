@@ -99,6 +99,15 @@ func (a *App) Startup(ctx context.Context) {
 	// Load persisted config on startup
 	loadConfig()
 
+	// Media domain: create the media directories and boot the job manager
+	// (recovering interrupted jobs from the last session) so the GUI and the
+	// local media HTTP service submit into the same task core from the first
+	// frame. The loopback media HTTP service (image mode, plan §5.7) starts
+	// here too — Android skips it inside (no local media execution).
+	ensureMediaDirs()
+	mediaJobsStart()
+	mediaHTTPStart()
+
 	// LAN-exposed control plane (POST /start for the phone pairing): GUI
 	// mode only runs it when the persisted RemoteStart flag is on (off by
 	// default), and never on Android (phones never serve other devices). The
@@ -169,10 +178,22 @@ func (a *App) Shutdown(ctx context.Context) {
 	if switchRestartPending.Load() {
 		// Mode-switch restart: the successor process (already relaunched)
 		// adopts llama-server via the handover file; keep the service and the
-		// download goroutines alive until this process exits.
+		// download goroutines alive until this process exits. Media jobs do
+		// NOT hand over (plan §5.5: 媒体不写入现有 llama handover 文件) — the
+		// SetApiRouteMode gate rejects the switch while jobs are active, so
+		// reaching this point with an active job is defensive only; cancel
+		// and bounded-wait it here anyway so no engine outlives the process.
+		mediaJobsShutdown()
 		log.Println("[INFO] MyLlama stopping for mode switch; llama-server keeps running")
 		return
 	}
+
+	// Media jobs: cancel the active job with a bounded exit wait and cancel
+	// queued jobs before the llama-server stop (plan §5.5: 正常退出取消媒体
+	// 并有界等待). Recovery semantics (interrupted on next boot) live in the
+	// job manager. The media HTTP service goes down with the process.
+	mediaHTTPStop()
+	mediaJobsShutdown()
 
 	// Stop running llama-server if any (#3): stopServerInternal is the single
 	// stop path shared with the StopServer binding — it covers both flavors
@@ -429,6 +450,12 @@ func (a *App) SetTrayEnabled(enabled bool) error {
 // tears the dev session down (binary lock + dead vite server), so the
 // feature must be exercised on a `wails build` production binary.
 func (a *App) SetApiRouteMode(enabled bool) error {
+	// Media gate (plan §5.5): the mode switch restarts the process, and media
+	// jobs do not hand over — reject while any job is active, BEFORE the
+	// preference is written or the successor is launched.
+	if len(ArbiterMediaHolders()) > 0 {
+		return errors.New(tr("媒体生成任务正在进行，无法切换 API 路由模式；请等待任务完成或取消后再切换", "a media generation task is active; wait for it to finish or cancel it before switching API route mode"))
+	}
 	if enabled && isDevBuild {
 		return errors.New(tr("wails dev 开发构建不支持开启 API 路由模式：切换会重启进程并终止开发会话，请使用 wails build 的正式构建测试", "API route mode cannot be enabled in a wails dev build: the switch restarts the process and ends the dev session — test with a wails build production binary"))
 	}
@@ -1294,4 +1321,122 @@ func (a *App) UnloadModel(id string) error {
 		return errors.New(tr("模型 id 不能为空", "model id cannot be empty"))
 	}
 	return unloadRouterModel(port, id)
+}
+
+// ─── Media Generation ───────────────────────────────────────────────
+
+// MediaImportReport is the import inspection result: content-identity matches
+// per file plus the roles still missing for a full variant (plan §5.3:
+// import first reports, never silently installs).
+type MediaImportReport struct {
+	Matches []MediaImportMatch `json:"matches"`
+	Missing []string           `json:"missing"`
+}
+
+// MediaInstallsList wraps install records with their live statuses.
+type MediaInstallsList struct {
+	Installs []MediaInstallRecord `json:"installs"`
+	Statuses []string             `json:"statuses"`
+}
+
+// GetMediaRuntime reports the detected sd engine (path, version probe).
+func (a *App) GetMediaRuntime() MediaRuntimeStatus {
+	return MediaRuntimeStatusNow()
+}
+
+// ListMediaModels returns the catalog models with per-variant live install
+// statuses (the frontend derives display state from this).
+func (a *App) ListMediaModels() []mediaModelEntry {
+	cat, err := GetMediaCatalog()
+	if err != nil {
+		log.Println("[WARN] ListMediaModels:", err)
+		return nil
+	}
+	out := make([]mediaModelEntry, 0, len(cat.Models))
+	for i := range cat.Models {
+		m := cat.Models[i]
+		entry := mediaModelEntry{MediaModel: m, VariantStatus: map[string]string{}}
+		for _, v := range m.Variants {
+			st, _, err := MediaInstallStatus(m.ID, v.ID)
+			if err != nil {
+				st = "unknown"
+			}
+			entry.VariantStatus[v.ID] = st
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// InspectMediaImport hashes candidate files and reports which catalog
+// components they match and which roles are still missing (plan §5.3 rule 4:
+// file names are hints, never matches).
+func (a *App) InspectMediaImport(modelID, variantID string, paths []string) (*MediaImportReport, error) {
+	matches, missing, err := MediaImportInspect(modelID, variantID, paths)
+	if err != nil {
+		return nil, err
+	}
+	return &MediaImportReport{Matches: matches, Missing: missing}, nil
+}
+
+// ImportMediaComponents records an install whose components are external
+// file references, verifying every file against its pinned identity first.
+func (a *App) ImportMediaComponents(modelID, variantID string, pathByRole map[string]string) (*MediaInstallRecord, error) {
+	return MediaImportVariant(modelID, variantID, pathByRole)
+}
+
+// ListMediaInstalls returns all install records with live statuses.
+func (a *App) ListMediaInstalls() *MediaInstallsList {
+	records, statuses, err := MediaListInstalls()
+	if err != nil {
+		log.Println("[WARN] ListMediaInstalls:", err)
+		return &MediaInstallsList{Installs: []MediaInstallRecord{}, Statuses: []string{}}
+	}
+	return &MediaInstallsList{Installs: records, Statuses: statuses}
+}
+
+// RemoveMediaInstall drops an install record; external files are untouched.
+func (a *App) RemoveMediaInstall(modelID, variantID string) error {
+	return MediaRemoveInstall(modelID, variantID)
+}
+
+// StartMediaJob submits one generation job (idempotent by RequestID) into
+// the serial queue shared with the local HTTP service. Returns immediately
+// with the job snapshot; completion is polled via GetMediaJobs.
+func (a *App) StartMediaJob(req MediaJobStartRequest) (*MediaJob, error) {
+	return StartMediaJob(req)
+}
+
+// GetMediaJobs returns all jobs (newest first) with their statuses.
+func (a *App) GetMediaJobs() []MediaJob {
+	return GetMediaJobs()
+}
+
+// CancelMediaJob cancels a queued/running job; cancellation completes only
+// after the engine exit is confirmed.
+func (a *App) CancelMediaJob(jobID string) error {
+	return CancelMediaJob(jobID)
+}
+
+// ListMediaArtifacts returns the validated works registry, newest first.
+func (a *App) ListMediaArtifacts() []MediaArtifact {
+	return ListMediaArtifacts()
+}
+
+// GetMediaHTTPStatus reports the local media service state.
+func (a *App) GetMediaHTTPStatus() MediaHTTPStatus {
+	return mediaHTTPStatusSnapshot()
+}
+
+// SetMediaEngineDir configures the sd engine directory (manual engine setup;
+// empty string restores the managed media-runtime default). Takes effect on
+// the next probe.
+func (a *App) SetMediaEngineDir(dir string) error {
+	mediaSettingsMu.Lock()
+	mediaEngineDirSetting = dir
+	mediaSettingsMu.Unlock()
+	mediaResetRuntimeCache()
+	saveConfig()
+	log.Printf("[INFO] Media engine dir set to %q", dir)
+	return nil
 }

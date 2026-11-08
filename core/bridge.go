@@ -139,6 +139,20 @@ func resolveDirectModel(models []ModelInfo, requested string) (ModelInfo, error)
 // same resident model makes the call a no-op; a different resident model
 // stops the service first, then starts with the new model.
 func startServerInternalWithModel(requested string) error {
+	// Inference arbiter (plan §5.5): claiming the llama side here — before any
+	// spawn decision work — is what makes "media holds a reservation → no
+	// llama start" atomic with the media submit path. Every early return
+	// below abandons the claim; the settled flag flips once the child is
+	// committed to the running state.
+	if !ArbiterClaimLLama() {
+		return errors.New(tr("媒体生成任务正在进行，无法启动聊天/API 服务；请等待任务完成或取消后再试", "a media generation task is active; wait for it to finish or cancel it before starting the chat/API service"))
+	}
+	llamaClaimSettled := false
+	defer func() {
+		if !llamaClaimSettled {
+			ArbiterAbandonLLama()
+		}
+	}()
 	serverConfigMu.Lock()
 	cfg := cachedServerConfig
 	serverConfigMu.Unlock()
@@ -202,7 +216,14 @@ func startServerInternalWithModel(requested string) error {
 		}
 	}
 
-	return spawnServerProcess(llamaServer, args, cfg, resident)
+	if err := spawnServerProcess(llamaServer, args, cfg, resident); err != nil {
+		return err
+	}
+	// The child is committed to the running state: the llama side of the
+	// gate is live, so the media side now blocks (until stop or child exit).
+	ArbiterLLamaUp()
+	llamaClaimSettled = true
+	return nil
 }
 
 // spawnServerProcess is the shared spawn/log/tail/wait machinery behind every
@@ -332,6 +353,9 @@ func spawnServerProcess(llamaServer string, args []string, cfg ServerConfig, res
 			serverDone = nil
 		}
 		serverMu.Unlock()
+		// The child exited (crash or external kill): the llama side of the
+		// inference gate reopens (idempotent with the graceful stop path).
+		ArbiterLLamaDown()
 		// Release the foreground-service hold only when this instance was the
 		// current server: a model switch restarts the child, and the outgoing
 		// goroutine must not tear down the service the new start just raised.
@@ -683,6 +707,8 @@ func stopAdoptedServerIfAny() bool {
 	tail := serverLogTail
 	serverLogTail = nil
 	serverMu.Unlock()
+	// The adopted llama-server is gone: reopen the media side of the gate.
+	ArbiterLLamaDown()
 	if tail != nil {
 		// The adopted child has no Wait handle; stopping the tailer here is
 		// what ends log capture (it drains the file's remaining bytes first).

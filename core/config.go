@@ -126,6 +126,26 @@ type appConfig struct {
 	// enabled/host/apiKey keep their zero values (disabled pairing).
 	RemoteChat    RemoteChatConfig  `json:"remoteChat"`
 	DownloadTasks []PersistedDlTask `json:"downloadTasks,omitempty"`
+	// Media carries the media-generation settings (sd engine / weights /
+	// outputs directory overrides). Old configs missing the media key load as
+	// the zero value — every field empty means "use the platform default"
+	// (see mediapaths.go), so pre-media configs load unchanged.
+	Media MediaSettingsConfig `json:"media,omitempty"`
+}
+
+// MediaSettingsConfig holds the media-generation directory preferences. Empty
+// fields fall back to the per-OS defaults derived in mediapaths.go; the
+// appliers write into the mediaSettings* guarded vars on load.
+type MediaSettingsConfig struct {
+	// EngineDir is the user-configured sd engine location (manual engine
+	// setup; empty = managed media-runtime dir, see activeMediaRuntimeDir).
+	EngineDir string `json:"engineDir,omitempty"`
+	// ModelsDir is the media weights directory override (empty = default
+	// Media-Models placement, see activeMediaModelsDir).
+	ModelsDir string `json:"modelsDir,omitempty"`
+	// OutputsDir is the generated-works directory override (empty = default
+	// Media-Outputs placement, see activeMediaOutputsDir).
+	OutputsDir string `json:"outputsDir,omitempty"`
 }
 
 // RemoteChatConfig holds the phone-to-PC LAN chat pairing used by the chat
@@ -609,6 +629,15 @@ func loadConfig() {
 	cachedRemoteChat = cfg.RemoteChat
 	configMu.Unlock()
 
+	// Media settings: old configs missing the media key load as the zero
+	// value — every empty override means "use the per-OS default" inside
+	// activeMedia*Dir, so pre-media configs behave exactly as before.
+	mediaSettingsMu.Lock()
+	mediaEngineDirSetting = cfg.Media.EngineDir
+	mediaModelsDirSetting = cfg.Media.ModelsDir
+	mediaOutputsSetting = cfg.Media.OutputsDir
+	mediaSettingsMu.Unlock()
+
 	// Restore the download task queue (after a process restart there are no
 	// active goroutines, so no task auto-starts its download): Source falls
 	// back to hf; statuses outside the whitelist and downloading are all
@@ -790,6 +819,14 @@ func saveConfig() {
 	remoteChat := cachedRemoteChat
 	configMu.Unlock()
 
+	mediaSettingsMu.Lock()
+	mediaSettings := MediaSettingsConfig{
+		EngineDir:  mediaEngineDirSetting,
+		ModelsDir:  mediaModelsDirSetting,
+		OutputsDir: mediaOutputsSetting,
+	}
+	mediaSettingsMu.Unlock()
+
 	// Lock-ordering iron rule: inside saveConfig, dlTasksMu must be the last
 	// lock acquired. No call site may call saveConfig while holding dlTasksMu —
 	// callers must copy under the lock, unlock, then save (e.g.
@@ -831,6 +868,7 @@ func saveConfig() {
 		ApiRouteMode:        apiRoute,
 		RemoteChat:          remoteChat,
 		DownloadTasks:       persistedTasks,
+		Media:               mediaSettings,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
