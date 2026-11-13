@@ -48,6 +48,7 @@ myllama-media-works.json
 myllama-media-installs.json
 media-runtime/
 Media-Models/
+.qoder/
 Media-Outputs/
 .codegraph
 .zcode/plans/

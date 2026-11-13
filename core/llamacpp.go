@@ -429,6 +429,11 @@ func detectAccel(dir, goos string, hostArm64 bool) string {
 		}
 		return "cpu"
 	case "android":
+		for _, d := range dirs {
+			if dirHasFileFold(d, "libggml-vulkan.so") || dirHasFileFold(d, "ggml-vulkan.so") {
+				return "vulkan"
+			}
+		}
 		return "cpu"
 	}
 	return "cpu"
@@ -794,6 +799,92 @@ func downloadLlamaCpp() {
 	llamaMu.Unlock()
 
 	log.Printf("[OK] llama.cpp %s downloaded and extracted to %s/", release.TagName, targetDir)
+}
+
+// androidVulkanAssetURL points to the compiled Android arm64 Vulkan release asset.
+// Declared as a package-level var so tests can inject an httptest server URL.
+var androidVulkanAssetURL = "https://github.com/msln1995/MyLlama/releases/download/v0.6.1/llama-vulkan-android-arm64.tar.gz"
+
+// downloadAndroidVulkan handles on-demand download and extraction of the Vulkan GPU
+// acceleration runtime for Android arm64 into the llama-cpp directory.
+func downloadAndroidVulkan() {
+	ctx, cancel := context.WithCancel(context.Background())
+	downloadMu.Lock()
+	downloadCancel = cancel
+	downloadResumeCh = make(chan struct{}, 1)
+	downloadMu.Unlock()
+
+	defer func() {
+		downloadMu.Lock()
+		downloadCancel = nil
+		llamaDownloadActive = false
+		downloadMu.Unlock()
+		cancel()
+	}()
+
+	const assetName = "llama-vulkan-android-arm64.tar.gz"
+
+	downloadMu.Lock()
+	downloadState.Status = "downloading"
+	downloadState.FileName = assetName
+	downloadState.Total = 12851191 // initial hint for UI progress bar
+	downloadState.Version = "v0.6.1-vulkan"
+	downloadState.Downloaded = 0
+	downloadMu.Unlock()
+
+	targetDir := llamaCppDownloadDir()
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		setDownloadError(tr("创建目录失败: ", "Failed to create directory: ") + err.Error())
+		return
+	}
+
+	tmpPath, err := downloadWithResume(ctx, androidVulkanAssetURL, 0, 0)
+	if err != nil {
+		if ctx.Err() != nil {
+			downloadMu.Lock()
+			if downloadState.Status != "idle" {
+				downloadState.Status = "idle"
+				downloadState.Error = ""
+				downloadState.Paused = false
+			}
+			downloadMu.Unlock()
+			log.Println("⏹️ Vulkan download stopped by user")
+		} else {
+			setDownloadError(tr("下载失败: ", "Download failed: ") + err.Error())
+		}
+		return
+	}
+	defer os.Remove(tmpPath)
+
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	downloadMu.Lock()
+	downloadState.Status = "extracting"
+	downloadState.Progress = 100
+	downloadMu.Unlock()
+
+	if err := extractTarGz(tmpPath, targetDir); err != nil {
+		setDownloadError(tr("解压失败: ", "Extraction failed: ") + err.Error())
+		return
+	}
+
+	ensureLlamaServerExecutable(targetDir)
+
+	downloadMu.Lock()
+	downloadState.Status = "done"
+	downloadState.Progress = 100
+	downloadMu.Unlock()
+
+	invalidateModelCache()
+	llamaMu.Lock()
+	llamaCacheValid.Store(false)
+	llamaMu.Unlock()
+
+	log.Printf("[OK] Vulkan runtime downloaded and extracted to %s/", targetDir)
 }
 
 // ensureLlamaServerExecutable re-asserts the 0755 exec permission on the

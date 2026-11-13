@@ -1,8 +1,10 @@
 package core
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1029,9 +1031,15 @@ func TestDetectAccel(t *testing.T) {
 		t.Errorf("darwin, no libraries in tree, Intel host = %q, want cpu", got)
 	}
 
-	// android: CPU-only regardless of directory contents
+	// android: detects vulkan when the library is present, falls back to cpu
+	if got := detectAccel(dir, "android", false); got != "vulkan" {
+		t.Errorf("android + ggml-vulkan.so = %q, want vulkan", got)
+	}
+	if err := os.Remove(filepath.Join(dir, "ggml-vulkan.so")); err != nil {
+		t.Fatal(err)
+	}
 	if got := detectAccel(dir, "android", false); got != "cpu" {
-		t.Errorf("android = %q, want cpu", got)
+		t.Errorf("android without vulkan library = %q, want cpu", got)
 	}
 }
 
@@ -1270,5 +1278,73 @@ func TestStartLlamaCppDownloadSingleFlight(t *testing.T) {
 			t.Fatal("download flow did not release its single-flight markers after cancel")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDownloadAndroidVulkanPackage verifies that downloadAndroidVulkan downloads
+// and extracts the Vulkan bundle into llamaCppDownloadDir, invalidates the cache,
+// and marks download status done.
+func TestDownloadAndroidVulkanPackage(t *testing.T) {
+	saveDownloadState(t)
+	saveServerState(t)
+	withTempCwd(t)
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for _, name := range []string{"llama-server", "libggml-vulkan.so"} {
+		hdr := &tar.Header{
+			Name: name,
+			Mode: 0755,
+			Size: int64(len("stub")),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte("stub")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tarBytes := buf.Bytes()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/vulkan.tar.gz" {
+			w.Header().Set("Content-Type", "application/gzip")
+			w.Write(tarBytes)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	origURL := androidVulkanAssetURL
+	androidVulkanAssetURL = srv.URL + "/vulkan.tar.gz"
+	t.Cleanup(func() { androidVulkanAssetURL = origURL })
+
+	llamaCacheValid.Store(true)
+
+	downloadAndroidVulkan()
+
+	if llamaCacheValid.Load() {
+		t.Error("llamaCacheValid should be false after downloadAndroidVulkan completes")
+	}
+	downloadMu.Lock()
+	status := downloadState.Status
+	downloadMu.Unlock()
+	if status != "done" {
+		t.Errorf("download status = %q, want done", status)
+	}
+	targetDir := llamaCppDownloadDir()
+	if _, err := os.Stat(filepath.Join(targetDir, "llama-server")); err != nil {
+		t.Errorf("extracted llama-server missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "libggml-vulkan.so")); err != nil {
+		t.Errorf("extracted libggml-vulkan.so missing: %v", err)
 	}
 }

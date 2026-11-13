@@ -2,6 +2,32 @@
 
 更新日志的**权威来源**（见 `AGENTS.md`「版本发布」）：发版时先在此新增版本条目（含日期），`git tag` 注解消息与 GitHub Release 正文均从该条目复制，保持一致。自 v0.3.3 起条目为概括式双语（中文在上）；v0.3.0 之前的逐提交条目已随对应 tag 与 Release 的清理移除（见文末「历史版本」）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [v0.6.2] - 2026-11-13
+
+## 中文
+
+v0.6.2 带来了 Android 平台 Vulkan GPU 硬件加速按需下载支持，彻底打破移动端纯 CPU 推理的性能瓶颈；同时重构了移动端与外部客户端（Operit、Cherry Studio 等）的对接体验，并引入深度思考禁用开关，消除端侧小模型思考耗时引发的客户端断连。
+
+**🌟 本版亮点**
+
+- **Android Vulkan GPU 加速包按需下载 (Zero APK Bloat)** — 拒绝将 12MB 的 Vulkan 动态库强塞入基础包，主 APK 体积保持在 12.8MB 轻量水平。用户可在系统运行环境页自由选择按需下载 Vulkan 加速包，下载后自动解压、授予执行权限并热重载生效。
+- **灵活的计算模式切换** — Android 端全面解锁 GPU 卸载配置项，支持用户在模型配置中自由选择「纯 CPU (0) / 纯 GPU (全部) / 混合卸载 (分层)」模式，兼顾发热、续航与推理速度。
+- **外部客户端对接面板** — 在 API 页面新增专属「外部客户端对接」指引卡片，自动展示局域网服务地址、模型标识、鉴权令牌并提供一键复制与 cURL 测试命令，降低 Operit、Cherry Studio 等客户端接入门槛。
+- **禁用深度思考 (Reasoning Off) 开关** — 针对 Qwen 等默认开启深度思考的模型，在高级参数中提供一键关闭开关（传递 `--reasoning off`），避免移动端小核心生成巨长思维链引发第三方客户端请求超时，TTFT 降低超 99%。
+- **macOS 与跨平台构建更新** — 同步交付包含最新前端面板与通用运行环境的 macOS Universal 二进制包。
+
+## English
+
+v0.6.2 brings on-demand Vulkan GPU hardware acceleration to Android, breaking through the performance limitations of mobile CPU-only inference, alongside streamlined third-party client integration (Operit, Cherry Studio) and a reasoning-off toggle to prevent request timeouts.
+
+**Highlights**
+
+- **On-Demand Android Vulkan GPU Acceleration (Zero APK Bloat)** — Keeps base APK at an ultra-lightweight 12.8MB without bundling 12MB Vulkan libraries. Users can trigger one-click on-demand download of the Vulkan acceleration package directly from the Runtime settings, with automatic extraction and atomic runtime switching.
+- **Flexible Compute Mode Switching** — Fully unlocked GPU offload layers on Android, empowering users to switch between pure CPU (`0`), full GPU (`all`), or hybrid offloading per model based on thermal and battery priorities.
+- **External Client Integration Panel** — Added a dedicated integration card in the API view, automatically exposing LAN IP, model IDs, API keys, and pre-formatted cURL examples for external clients like Cherry Studio and Operit.
+- **Disable Thinking (Reasoning Off) Switch** — Added a dedicated toggle under Advanced settings to pass `--reasoning off`, bypassing lengthy on-device reasoning chains and preventing third-party client read timeouts while cutting TTFT by over 99%.
+- **macOS & Cross-Platform Release** — Updated universal macOS distributable packaging with complete native bindings and latest runtime interface.
+
 ## [v0.6.1] - 2026-10-30
 
 ## 中文

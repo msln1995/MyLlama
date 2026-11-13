@@ -845,6 +845,24 @@ func startLlamaCppDownload() {
 	go downloadLlamaCpp()
 }
 
+// startAndroidVulkanDownload starts downloading the Vulkan GPU runtime package
+// for Android arm64 from the project release asset.
+func startAndroidVulkanDownload() {
+	downloadMu.Lock()
+	if llamaDownloadActive || downloadCancel != nil {
+		status := downloadState.Status
+		downloadMu.Unlock()
+		log.Printf("[WARN] download already in progress (status %q); repeated trigger ignored", status)
+		return
+	}
+	llamaDownloadActive = true
+	downloadState.Status = "fetching"
+	downloadState.Paused = false
+	downloadState.Error = ""
+	downloadMu.Unlock()
+	go downloadAndroidVulkan()
+}
+
 // ─── HF Mirror download trigger ──────────────────────────────────
 
 func startHFDownload(modelID string, files []string) error {

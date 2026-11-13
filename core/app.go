@@ -899,6 +899,8 @@ func (a *App) GetServerStatus() map[string]interface{} {
 	// serverLogsMu.
 	serverMu.Lock()
 	running := serverRunning
+	model := directServingModel
+	port := serverPort
 	serverMu.Unlock()
 	serverLogsMu.Lock()
 	logs := make([]string, len(serverLogs))
@@ -907,8 +909,16 @@ func (a *App) GetServerStatus() map[string]interface{} {
 	}
 	serverLogsMu.Unlock()
 
+	alias := ""
+	if model != "" {
+		alias = sanitizeAlias(model)
+	}
+
 	return map[string]interface{}{
 		"running": running,
+		"model":   model,
+		"alias":   alias,
+		"port":    port,
 		"log":     logs,
 	}
 }
@@ -989,6 +999,11 @@ func (a *App) GetLlamaCppDownloadStatus() *DownloadState {
 
 func (a *App) StartLlamaCppDownload() error {
 	startLlamaCppDownload()
+	return nil
+}
+
+func (a *App) StartAndroidVulkanDownload() error {
+	startAndroidVulkanDownload()
 	return nil
 }
 

@@ -639,6 +639,10 @@ export function SetTrayEnabled(enabled: boolean): $CancellablePromise<void> {
     return $Call.ByID(1566242230, enabled);
 }
 
+export function StartAndroidVulkanDownload(): $CancellablePromise<void> {
+    return $Call.ByID(2668661943);
+}
+
 export function StartDownload(modelID: string, files: string[]): $CancellablePromise<void> {
     return $Call.ByID(2008696521, modelID, files);
 }

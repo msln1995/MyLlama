@@ -243,7 +243,7 @@ describe('hardware-capability render gates', () => {
     ['darwin', 'arm64', true], // macOS arm64 release embeds Metal (-ngl works)
     ['darwin', 'amd64', false], // macOS x64 release is CPU-only
     ['darwin', '', false], // unknown arch degrades to hiding (safe fallback)
-    ['android', 'arm64', false], // CPU-only: offload selector must not render
+    ['android', 'arm64', true], // Android supports GPU offload selector (CPU/Vulkan/Hybrid)
     ['ios', 'arm64', false],
   ])('showGpuOffloadParam: %s arch=%j -> %s', (os, arch, expected) => {
     expect(showGpuOffloadParam(buildPlatformState(os, 1920, arch))).toBe(expected)

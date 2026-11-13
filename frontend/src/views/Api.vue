@@ -252,6 +252,60 @@
             </div>
           </section>
 
+          <!-- 外部客户端对接卡片：提供完整的 API 地址、Model Alias、API Key、一键复制 curl 命令，以及排坑指南 -->
+          <section class="client-card">
+            <div class="island-head">
+              <span class="island-title">{{ t('api.clientCardTitle') }}</span>
+              <span class="island-more">{{ t('api.clientCardDesc') }}</span>
+            </div>
+            <div class="client-info-grid">
+              <div class="client-row">
+                <span class="client-label">{{ t('api.endpoint') }}</span>
+                <span class="client-val client-mono">{{ clientBaseUrl }}</span>
+                <button class="client-copy" type="button" @click="copyValue(clientBaseUrl, 'endpoint')">
+                  {{ copiedKey === 'endpoint' ? t('api.addressCopied') : t('settings.lanPairing.copy') }}
+                </button>
+              </div>
+              <div class="client-row">
+                <span class="client-label">{{ t('api.modelAlias') }}</span>
+                <span class="client-val client-mono">{{ effectiveModelId }}</span>
+                <button class="client-copy" type="button" @click="copyValue(effectiveModelId, 'model')">
+                  {{ copiedKey === 'model' ? t('api.addressCopied') : t('settings.lanPairing.copy') }}
+                </button>
+              </div>
+              <div class="client-row">
+                <span class="client-label">{{ t('api.apiKey') }}</span>
+                <span class="client-val" :class="{ 'client-mono': !!cfg.apiKey }">
+                  {{ cfg.apiKey ? cfg.apiKey : t('api.noApiKey') }}
+                </span>
+                <button v-if="cfg.apiKey" class="client-copy" type="button" @click="copyValue(cfg.apiKey, 'key')">
+                  {{ copiedKey === 'key' ? t('api.addressCopied') : t('settings.lanPairing.copy') }}
+                </button>
+              </div>
+            </div>
+
+            <!-- curl 复制与代码示例 -->
+            <div class="client-curl-box">
+              <div class="curl-header">
+                <span class="curl-title">cURL</span>
+                <button class="curl-copy-btn" type="button" @click="copyCurlExample">
+                  {{ copiedKey === 'curl' ? t('api.curlCopied') : t('api.copyCurl') }}
+                </button>
+              </div>
+              <pre class="curl-code"><code>{{ curlExampleText }}</code></pre>
+            </div>
+
+            <!-- 排坑说明 -->
+            <div class="client-tips">
+              <div class="tips-title">{{ t('api.tipsTitle') }}</div>
+              <ul class="tips-list">
+                <li>{{ t('api.tipContext') }}</li>
+                <li>{{ t('api.tipTimeout') }}</li>
+                <li>{{ t('api.tipReasoning') }}</li>
+              </ul>
+            </div>
+          </section>
+
           <!-- Service log (frame ⑬ .logbox on phone): terminal-dark console inside
                a floating island; the footer link toggles the phone console between
                compact preview and expanded height -->
@@ -275,7 +329,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getLoadedModels, getMonitorStatus, getModels, getServerConfig, getServerLogsSince, getServerStatus, refreshModels, saveServerConfig, startServer, startServerWithModel, stopServer, unloadModel } from '../wails'
+import { getLoadedModels, getMonitorStatus, getModels, getLanAddresses, getServerConfig, getServerLogsSince, getServerStatus, refreshModels, saveServerConfig, startServer, startServerWithModel, stopServer, unloadModel } from '../wails'
 import { applyFullLogFetch, appendLogEntries, type ServerLogEntry } from '../lib/serverLog'
 import { modelsToUnload } from '../lib/chat'
 import { restartServer } from '../lib/serverControls'
@@ -410,6 +464,44 @@ async function copyAddress() {
   }
 }
 
+// ─── 外部客户端对接卡片参数与复制功能 ───
+const lanIps = ref<string[]>([])
+const clientBaseUrl = computed(() => {
+  const host = (cfg.accessMode === 'lan' && lanIps.value.length > 0)
+    ? lanIps.value[0]
+    : displayHost.value
+  return `http://${host}:${cfg.port}/v1`
+})
+
+const effectiveModelId = computed(() => {
+  return activeModelName.value || (availableModels.value.length > 0 ? availableModels.value[0] : 'default-model')
+})
+
+const curlExampleText = computed(() => {
+  const authHeader = cfg.apiKey ? `  -H "Authorization: Bearer ${cfg.apiKey}" \\\n` : ''
+  return `curl -X POST "${clientBaseUrl.value}/chat/completions" \\\n  -H "Content-Type: application/json" \\\n${authHeader}  -d '{\n    "model": "${effectiveModelId.value}",\n    "messages": [{"role": "user", "content": "你好"}],\n    "stream": false\n  }'`
+})
+
+const copiedKey = ref<string>('')
+let copiedKeyTimer: ReturnType<typeof setTimeout> | null = null
+
+async function copyValue(val: string, key: string) {
+  try {
+    await navigator.clipboard.writeText(val)
+    copiedKey.value = key
+    if (copiedKeyTimer) clearTimeout(copiedKeyTimer)
+    copiedKeyTimer = setTimeout(() => {
+      copiedKey.value = ''
+    }, 1600)
+  } catch {
+    // clipboard unavailable
+  }
+}
+
+async function copyCurlExample() {
+  await copyValue(curlExampleText.value, 'curl')
+}
+
 async function fetchMonitorStatus() {
   try {
     const s = await getMonitorStatus()
@@ -486,6 +578,13 @@ onUnmounted(() => {
 onMounted(async () => {
   // Monitoring polling: fetch monitor status every 1s (merged into monitor block, period matches original Monitor.vue)
   startPolling()
+
+  // 局域网 IP 获取，用于外部客户端调用提示
+  try {
+    lanIps.value = await getLanAddresses()
+  } catch {
+    // best-effort
+  }
 
   // Load server config
   try {
@@ -1237,6 +1336,138 @@ html[data-theme='dark'] .speed-baseline {
   margin-bottom: 14px;
 }
 
+/* ─── 外部客户端对接卡片 ─── */
+.client-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-island);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+}
+
+.client-info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.client-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.06));
+}
+
+.client-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.client-val {
+  font-size: 13px;
+  color: var(--text-primary);
+  flex: 1;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.client-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.client-copy {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--primary, #6366f1);
+  background: rgba(99, 102, 241, 0.08);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s;
+}
+
+.client-copy:hover {
+  opacity: 0.8;
+}
+
+.client-curl-box {
+  background: #181926;
+  border-radius: var(--radius-sm, 6px);
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.curl-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.curl-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #a6adc8;
+  letter-spacing: 0.5px;
+}
+
+.curl-copy-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #cdd6f4;
+  background: rgba(255, 255, 255, 0.12);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.curl-code {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #a6e3a1;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.client-tips {
+  padding: 10px 12px;
+  background: rgba(234, 179, 8, 0.08);
+  border-left: 3px solid #eab308;
+  border-radius: 4px;
+}
+
+.tips-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ca8a04;
+  margin-bottom: 4px;
+}
+
+.tips-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
 .island-head {
   display: flex;
   align-items: center;
@@ -1467,7 +1698,8 @@ html[data-theme='dark'] .speed-baseline {
   .speed-island { order: 2; } /* mounts only while running (draft ⑬) */
   .action-row { order: 3; }
   .models-island { order: 4; }
-  .log-panel { order: 5; }
+  .client-card { order: 5; }
+  .log-panel { order: 6; }
 
   /* Frame ⑭ offline hero: static gray dot + static ring + secondary ink —
      the same offline vocabulary the phone tier already uses */

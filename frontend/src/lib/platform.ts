@@ -299,7 +299,7 @@ export function showMultiGpuPanel(state: PlatformState): boolean {
  * unknown arch degrades to hiding (safe fallback); android/ios are CPU-only.
  */
 export function showGpuOffloadParam(state: PlatformState): boolean {
-  if (state.os === 'windows' || state.os === 'linux') return true
+  if (state.os === 'windows' || state.os === 'linux' || state.os === 'android') return true
   return state.os === 'darwin' && state.arch === 'arm64'
 }
 

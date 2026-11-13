@@ -794,7 +794,13 @@ export const handlers: Record<string, (...args: any[]) => any> = {
   // Non-loopback IPv4 addresses for the Settings LAN pairing card; the mock
   // reports two sample addresses like the real sorted list would.
   GetLanAddresses: () => ['192.168.1.10', '192.168.1.5'],
-  GetServerStatus: () => ({ running: serverRunning, log: serverLogRing.map((e) => e.text) }),
+  GetServerStatus: () => ({
+    running: serverRunning,
+    model: residentModel,
+    alias: residentModel,
+    port: config.server.port,
+    log: serverLogRing.map((e) => e.text),
+  }),
   GetServerLogsSince: (since: number) => ({
     entries: serverLogRing.filter((e) => e.seq >= since).map((e) => ({ ...e })),
     next: logSeq + 1,
@@ -846,6 +852,15 @@ export const handlers: Record<string, (...args: any[]) => any> = {
     llamacppDl.base = 0
     llamacppDl.since = Date.now()
     llamacppDl.version = 'b5913'
+    llamacppDl.error = ''
+  },
+  StartAndroidVulkanDownload: () => {
+    llamacppDl.status = 'downloading'
+    llamacppDl.paused = false
+    llamacppDl.total = 12_851_191
+    llamacppDl.base = 0
+    llamacppDl.since = Date.now()
+    llamacppDl.version = 'v0.6.1-vulkan'
     llamacppDl.error = ''
   },
   PauseLlamaCppDownload: () => {

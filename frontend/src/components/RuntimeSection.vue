@@ -121,29 +121,70 @@
               {{ cudartBadge }}
             </span>
           </div>
+
+          <!-- Android Vulkan upgrade / status area -->
+          <div v-if="platformState.isAndroid && info.accel !== 'vulkan'" class="vulkan-upgrade-card">
+            <div class="vulkan-upgrade-info">
+              <div class="vulkan-upgrade-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                </svg>
+                {{ t('runtime.vulkanAvailableTitle') }}
+              </div>
+              <p class="vulkan-upgrade-desc">{{ t('runtime.vulkanAvailableDesc') }}</p>
+            </div>
+            <button class="vulkan-download-btn" :disabled="dlStatus.status === 'downloading' || dlStatus.status === 'extracting'" @click="startVulkanDownload">
+              {{ t('runtime.downloadVulkanBtn') }}
+            </button>
+          </div>
+          <div v-else-if="platformState.isAndroid && info.accel === 'vulkan'" class="vulkan-ready-hint">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+              <polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+            <span>{{ t('runtime.vulkanReadyHint') }}</span>
+          </div>
         </div>
 
         <!-- Download section: three blocks render independently via v-if (not mutually bound); display conditions unified
              by downloadVisibility, avoiding v-if/v-else-if mutual exclusion that would swallow the progress area -->
-        <div v-if="!info.installed && dlStatus.status !== 'done'" class="download-area">
+        <div v-if="(!info.installed || dlVisibility.showProgress) && dlStatus.status !== 'done'" class="download-area">
           <!-- Idle/error: show download + custom buttons. The custom-directory
                browse button is Android-gated out (no native dir picker in the
                sandbox; storage is app-managed) -->
           <div v-if="dlVisibility.showButtons" class="download-btns">
-            <button class="download-btn" @click="startDownload">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/>
-                <line x1="12" y1="15" x2="12" y2="3"/>
-              </svg>
-              {{ t('runtime.downloadLlamaCpp') }}
-            </button>
-            <button v-if="!platformState.isAndroid" class="custom-btn" @click="browseCustomDir">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-              </svg>
-              {{ t('runtime.custom') }}
-            </button>
+            <template v-if="platformState.isAndroid">
+              <button class="download-btn" @click="startVulkanDownload">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                </svg>
+                {{ t('runtime.downloadVulkan') }}
+              </button>
+              <button class="custom-btn" @click="startDownload">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/>
+                  <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                {{ t('runtime.downloadStandardCpu') }}
+              </button>
+            </template>
+            <template v-else>
+              <button class="download-btn" @click="startDownload">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/>
+                  <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                {{ t('runtime.downloadLlamaCpp') }}
+              </button>
+              <button class="custom-btn" @click="browseCustomDir">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                </svg>
+                {{ t('runtime.custom') }}
+              </button>
+            </template>
           </div>
           <!-- Android storage hint (design draft frame ④): explains why there is no
                custom-directory option -->
@@ -267,7 +308,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import {
-  getLlamaCpp, getLlamaCppDownloadStatus, startLlamaCppDownload, pauseLlamaCppDownload,
+  getLlamaCpp, getLlamaCppDownloadStatus, startLlamaCppDownload, startAndroidVulkanDownload, pauseLlamaCppDownload,
   resumeLlamaCppDownload, stopLlamaCppDownload, browseLlamaCppDir, getConfig
 } from '../wails'
 import { downloadVisibility, initialDownloadAction, isCudartAsset, packageRows } from '../lib/llamaDownload'
@@ -432,6 +473,18 @@ async function startDownload() {
     dlStatus.value = { status: 'fetching', progress: 0, total: 0, downloaded: 0, fileName: '', version: '', error: '' }
     startPolling()
     await startLlamaCppDownload()
+  } catch (e: any) {
+    dlStatus.value.status = 'error'
+    dlStatus.value.error = t('runtime.backendError', { msg: e.message })
+    stopPolling()
+  }
+}
+
+async function startVulkanDownload() {
+  try {
+    dlStatus.value = { status: 'fetching', progress: 0, total: 0, downloaded: 0, fileName: '', version: '', error: '' }
+    startPolling()
+    await startAndroidVulkanDownload()
   } catch (e: any) {
     dlStatus.value.status = 'error'
     dlStatus.value.error = t('runtime.backendError', { msg: e.message })
@@ -1012,6 +1065,75 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--text-dim);
   font-weight: 400;
+}
+
+/* ─── Android Vulkan GPU upgrade banner & ready badge ─── */
+.vulkan-upgrade-card {
+  margin-top: 14px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--overlay-10);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.vulkan-upgrade-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.vulkan-upgrade-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--accent-light);
+}
+
+.vulkan-upgrade-desc {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.vulkan-download-btn {
+  padding: 8px 14px;
+  background: var(--accent);
+  color: var(--accent-text, #fff);
+  border: none;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s ease;
+  flex-shrink: 0;
+}
+
+.vulkan-download-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.vulkan-ready-hint {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--success);
+  line-height: 1.4;
 }
 
 /* ─── Download progress ─── */

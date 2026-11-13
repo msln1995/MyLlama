@@ -278,6 +278,10 @@ export async function startLlamaCppDownload(): Promise<void> {
   return app().StartLlamaCppDownload()
 }
 
+export async function startAndroidVulkanDownload(): Promise<void> {
+  return app().StartAndroidVulkanDownload()
+}
+
 export async function pauseLlamaCppDownload(): Promise<void> {
   return app().PauseLlamaCppDownload()
 }
